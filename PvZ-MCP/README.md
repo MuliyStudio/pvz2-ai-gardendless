@@ -99,10 +99,24 @@ phase=objective 先 pvz_dismiss_objective；phase=preparing 先 pvz_choose_deck�
 - **条件等待**：`pvz_wait_until` 支持 `sun>=200`、`card_ready:repeater`、`zombie_in_lane:3`、`zombie_near:2`、`plantfood>=1`、`tasks_ready`、`phase:running`、`plants>=10`。
 - **换卡组**：`pvz_choose_deck({replace:true})` 清空游戏预填卡组后重新选，返回 `deck / applied / skipped / started`。
 
+## v0.2.6 新增
+
+- **矿车**：`state.carts[]`（id / lane,column / railLanes / 车上植物 / canUp,canDown）；`pvz_move_cart {cart,direction}` 把车上下移动，植物跟着走。地形用 `R` 标轨道，`blockedCells` 里 `reason:"rail"` 表示车不在。
+- **全任务语义**：`tasks[].semantics / left / hint / urgent`，覆盖植物损失、植物上限、阳光预算、限时击杀等 7 种模式。
+- **逐行火力**：`state.lanes[]`（`shooters / nearestZombie / needsShooter / danger / mower / cart`）。
+- **暂停**：`state.paused / state.ui`，动作返回 `PAUSED`；`pvz_resume` 继续。
+- **僵尸标签**：`state.zombies[].tags`（crush / jump_over / backline / flying / spawner / armored / lane_switch）。
+- **损失追踪**：`state.recentLosses[]`。
+- **健康检查**：`pvz_health`。
+- **条件等待**：新增 `cart_ready:<id>`。
+
 ## 工具
 
 | 工具 | 作用 |
 | --- | --- |
+| `pvz_move_cart` | 移动西部矿车（可移动植物平台） |
+| `pvz_resume` | 游戏暂停时继续 |
+| `pvz_health` | 模组/Server 版本与能力自检 |
 | `pvz_state` | 地形、阳光/能量豆、卡槽费用与冷却、植物、僵尸、波次、**关卡任务与倒计时（tasks）**，以及当前卡牌/僵尸的图鉴知识 |
 | `pvz_knowledge` | 查询某个植物/僵尸的真实图鉴（名称、短介绍、特殊能力、属性） |
 | `pvz_plant` | 种卡到指定 lane/column（原生流程：扣阳光、进冷却；失败带 code） |

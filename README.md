@@ -63,6 +63,9 @@ pvz_state → 决策 → pvz_plant / pvz_plant_food / pvz_shovel → pvz_state
 | `pvz_collect` | 立即收取掉落物 |
 | `pvz_plant_food` | 使用能量豆 |
 | `pvz_shovel` | 铲除植物 |
+| `pvz_move_cart` | 移动西部矿车（可移动植物平台），植物跟着换行 |
+| `pvz_resume` | 游戏暂停时继续 |
+| `pvz_health` | 检查模组/Server 版本、关键能力、缺失工具 |
 | `pvz_choose_deck` | 选卡；`replace:true` 可换掉游戏预填卡组 |
 | `pvz_start_level` | 开始战斗（自动关闭关卡目标说明） |
 | `pvz_dismiss_objective` | 关闭开局的关卡目标说明，返回本关任务 |
@@ -94,6 +97,16 @@ LLLLLWWWW
 LLLLLPPPP
 LLLLLPPPP
 ```
+
+### v0.2.6 · 矿车 / 全任务语义 / 逐行火力
+
+- **矿车**：`snapshot().carts[]` 给出编号、当前行/列、可移动方向、车上植物；`pvz_move_cart {cart,direction}` 把车移到上下行，植物跟着走。地形用 `R` 标轨道，`blockedCells` 里 `reason:"rail"` 表示车不在该格。
+- **全任务语义**：7 种 mode 都有 `semantics / left / hint / urgent`。例如「失去不超过 2 株植物」会给出 `left=2`、`hint="还可损失 2 株…再丢就失败"`，不再把进度条误报成 100%。
+- **逐行火力**：`snapshot().lanes[]` 直接给出每排 `shooters / nearestZombie / needsShooter / danger / mower / cart`；`needsShooter=true` 就是“这排有僵尸但没射手”。
+- **暂停**：`state.paused` / `state.ui`，动作返回 `code:"PAUSED"`；`pvz_resume` 继续。
+- **僵尸机制标签**：`zombies[].tags`（`crush / jump_over / backline / flying / spawner / armored / support / lane_switch`）。奏琴僵尸会碾压植物并让牛仔换行；炸矿僵尸跳到最左侧；牧鸡僵尸放鸡；机械牛投小鬼。
+- **损失追踪**：`recentLosses[]` 记录刚刚消失的植物（排除自己铲除和矿车移动）。
+- **健康检查**：`pvz_health` 返回模组/Server 版本、`compatible`、`missingTools`、关键能力。
 
 
 详见 [PvZ-MCP/README.md](PvZ-MCP/README.md)。

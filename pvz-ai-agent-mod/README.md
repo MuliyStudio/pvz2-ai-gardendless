@@ -25,6 +25,12 @@
 - **v0.2.5 任务计时**：`timed_kill` 使用滑动窗口语义，给出 `windowActive` / `timeLeft` / `urgent` / `hint`，内置 AI 会在 `urgent` 时优先输出与能量豆。
 - **v0.2.5 批量动作 / 条件等待**：`window.PvzAI.execute(actions)` 一次执行最多 6 个动作；`waitUntil("sun>=200", 20000)` 内部 200ms 轮询。
 - **v0.2.5 换卡组**：`autoDeckWith(plants, true)` 会先 `Cards.spliceAllCards()` 清空游戏预填卡组，再逐张选入，返回 `deck / applied / skipped`。
+- **v0.2.6 矿车**：`snapshot().carts[]` + `moveCart(id, "up"|"down")`；矿车是可移动植物平台，植物跟着换行。地形用 `R` 标轨道。
+- **v0.2.6 全任务语义**：7 种关卡任务都有 `semantics / left / hint / urgent`（植物损失、植物上限、阳光预算、限时击杀等）。
+- **v0.2.6 逐行火力**：`snapshot().lanes[]` 给出每排 `shooters / nearestZombie / needsShooter / danger / mower / cart`。
+- **v0.2.6 暂停识别**：`paused` / `ui`，动作失败返回 `PAUSED`；`resume()` 继续。
+- **v0.2.6 僵尸标签**：`zombies[].tags`（crush / jump_over / backline / flying / spawner / armored / lane_switch）。
+- **v0.2.6 损失追踪**：`recentLosses[]` 记录刚消失的植物。
 - **原生种植**：走 `UIInGame.tryChangingIndex()` + `LnC.PlaceUIPlant()`，会正常扣阳光、进冷却、受关卡植物上限/地形限制。
 - **支持动作**：种植、铲除、喂植物能量、等待、选卡、关闭任务说明、开局。
 - **F8 热键**：随时开始/停止；按 F9 可打开 GP-Next 官方侧栏作为兜底。
