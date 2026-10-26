@@ -1,0 +1,18 @@
+node_modules/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地日志 / 本地配置 / 构建产物
+日志.txt
+*.log
+launcher.ini
+.mcp.json
+.cursor/
+PvZAI-发布包/
+pvz-ai-agent.zip
+PvZAI-AI草坪指挥官-发布包.zip
+
+# 编辑器
+.vscode/
+.idea/

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "pvz-gardendless": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": [
+        "F:\\植物大战僵尸\\PvZ-MCP\\pvz-mcp-server.mjs"
+      ]
+    }
+  }
+}
