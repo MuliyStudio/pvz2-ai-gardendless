@@ -55,27 +55,46 @@ pvz_state → 决策 → pvz_plant / pvz_plant_food / pvz_shovel → pvz_state
 
 | 工具 | 作用 |
 | --- | --- |
-| `pvz_state` | 阳光/能量豆、卡槽费用冷却、植物、僵尸、波次、**关卡任务** + 当前卡牌/僵尸真实图鉴 |
+| `pvz_state` | 地形（terrain.map / blockedCells）、阳光/能量豆、卡槽费用冷却、植物、僵尸、波次、**关卡任务与倒计时** + 当前卡牌/僵尸真实图鉴 |
 | `pvz_knowledge` | 查询任意植物/僵尸的图鉴机制 |
-| `pvz_plant` | 种卡（原生扣阳光、冷却、每行上限） |
+| `pvz_plant` | 种卡（原生扣阳光、冷却、每行上限；失败带 code） |
+| `pvz_act` | 一次执行最多 6 个动作，返回每步结构化结果 |
+| `pvz_wait_until` | 等到 `sun>=200` / `card_ready:xxx` / `zombie_in_lane:3` / `tasks_ready` 等条件 |
 | `pvz_collect` | 立即收取掉落物 |
 | `pvz_plant_food` | 使用能量豆 |
 | `pvz_shovel` | 铲除植物 |
-| `pvz_choose_deck` | 选卡 |
+| `pvz_choose_deck` | 选卡；`replace:true` 可换掉游戏预填卡组 |
 | `pvz_start_level` | 开始战斗（自动关闭关卡目标说明） |
 | `pvz_dismiss_objective` | 关闭开局的关卡目标说明，返回本关任务 |
 | `pvz_wait` | 等待 |
 | `pvz_rules` | 规则与策略 |
 
-### 关卡任务
+### 关卡任务与 v0.2.5
 
 每关都有任务，例如 `在 30 秒内击杀 20 个僵尸`。`pvz_state` 的 `state.tasks` 会给出：
 
 ```json
-{ "tip": "在 30 秒内击杀 20 个僵尸", "count": "0/20", "value": 0, "total": 20, "percent": 0, "completed": false, "failed": false }
+{ "tip": "在 30 秒内击杀 20 个僵尸", "count": "20/20", "value": 20, "total": 20,
+  "modeName": "timed_kill", "timeSemantics": "sliding_window",
+  "timeLeft": 4.4, "windowActive": true, "urgent": true,
+  "hint": "滑动窗口还剩 4.4 秒，当前 16/20，需再杀 4 个",
+  "completed": false, "failed": false }
 ```
 
-任务进度会随战局更新，失败通常直接判负。内置 AI 会把任务写进提示词第一屏并围绕任务打；MCP 模式下由 Agent 自己按 `tasks` 决策。
+`timed_kill` 是“最近 N 秒内击杀”的滑动窗口，不是整关倒计时；`urgent` 时优先能量豆/一次性植物。
+
+v0.2.5 实测（海盗港湾 17）：任务在 wave 12 以 **20/20** 完成，当时 `timeLeft=4.4s`、
+`urgent=true`，用三线射手能量豆完成收尾；整局 MCP 调用 **55 次**（含 state / act / wait_until），
+最终 `phase=won`、进度 100%。地形矩阵实测：
+
+```text
+LLLLLWWWW
+LLLLLWWWW
+LLLLLWWWW
+LLLLLPPPP
+LLLLLPPPP
+```
+
 
 详见 [PvZ-MCP/README.md](PvZ-MCP/README.md)。
 

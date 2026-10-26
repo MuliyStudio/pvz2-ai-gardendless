@@ -11,10 +11,58 @@
  * 注意：这是单机辅助工具，请勿用于联机或排行榜；游戏更新后内部字段可能变化。
  */
 
-const VERSION = '0.2.4';
+const VERSION = '0.2.5';
 const CFG_KEY = 'pvzai.agent.mod.cfg.v1';
 const HOST_ID = 'pvzai-mod-host';
 const LOG_LIMIT = 120;
+
+// LnC.squareType -> 地形字母（SquareType 枚举来自游戏 LnC.ts）
+const SQUARE_TYPE_LETTER = { 0: 'L', 1: 'S', 2: 'W', 3: 'W', 4: 'P' };
+const SQUARE_TYPE_NAME = { 0: 'land', 1: 'sky', 2: 'water', 3: 'sea', 4: 'plank' };
+const TERRAIN_LEGEND = { L: 'land', W: 'water', P: 'plank', S: 'sky', '?': 'unknown' };
+const TASK_MODE_NAME = {
+  0: 'plant_count_limit',
+  1: 'plant_lose_limit',
+  2: 'sun_cost_limit',
+  3: 'sun_produce_request',
+  4: 'sun_cost_countdown',
+  5: 'kill_count_request',
+  6: 'timed_kill',
+};
+const TASK_REASON_TEXT = {
+  TERRAIN: '该格地形不允许种植',
+  OUT_OF_RANGE: '格子超出范围',
+  NO_CARD: '卡槽不存在',
+  UI_NOT_READY: '卡槽 UI 尚未初始化完成',
+  COOLDOWN: '卡牌冷却中',
+  SUN: '阳光不足',
+  CARD_UNAVAILABLE: '卡牌无法选中',
+  LANE_LIMIT: '该行同类型植物已达上限',
+  OCCUPIED: '格子已有植物',
+  LEVEL_LIMIT: '关卡限制（植物上限/特殊规则）',
+  CELL_BLOCKED: '该格当前不可种植',
+  PLANT_FAILED: '种植未生效',
+  EMPTY: '格子没有植物',
+  SHOVEL_FAILED: '铲除失败',
+  NO_FOOD: '没有植物能量',
+  NOT_FOODABLE: '该格没有可喂能量的植物',
+  TIMEOUT: '等待超时',
+  UNKNOWN_ACTION: '未知动作',
+  PREP_NOT_READY: '选卡界面还没准备好',
+  ALREADY_STARTED: '战斗已经开始',
+  NO_SCENE: '不在关卡内',
+  UNSUPPORTED_LEVEL: '当前关卡类型不支持',
+  NO_SLOTS: '当前关卡没有可用卡槽',
+  NO_CELL: '格子不存在',
+  DECK_INCOMPLETE: '卡组还没选满',
+  DECK_CLEAR_FAILED: '清空卡组失败',
+  START_FAILED: '开局失败',
+  NO_OBJECTIVE: '当前没有关卡目标界面',
+  CONTINUE_NOT_FOUND: '找不到“继续”按钮',
+  BAD_CONDITION: '无法识别的条件',
+  NO_ACTIONS: '没有可执行的动作',
+};
+
 
 const PLANT_CN = {
   sunflower: '向日葵', twinsunflower: '双子向日葵', sunshroom: '阳光菇', primalsunflower: '原始向日葵',
@@ -116,6 +164,7 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2》的实时自动游玩代�
 - 射手向右攻击；坚果挡路；冰系减速/冻结；一次性植物触发后消失；地刺不会被啃食但会被滚动物体摧毁；弹簧豆把僵尸弹回/弹进水。
 - 能量豆会自动收集；需要时用 plant_food 给高输出植物释放大招。
 - 卡牌图鉴和僵尸图鉴会随状态给出，按图鉴事实决策，不要猜。
+- **地形**：状态里有 terrain.map，每行一个字符串：L=陆地 P=木板 W=水 S=天空 ?=未知。水格不能种普通植物（需要睡莲/弹簧豆等水生卡）。blockedCells 里是明确不可种植的格子，不要往上种。
 - 每行最多 1 个坚果墙；该行已有坚果且血量>25% 时不要再种。
 - 每行最多 1 个弹簧豆/冰冻生菜；一次性植物不要叠。
 - 每行最多 4 个射手；优先补没有射手的行。
@@ -133,7 +182,10 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2》的实时自动游玩代�
 8. 如果某行已有 2 个坚果/弹簧豆/冰生菜，先铲掉多余的一个，再补输出。
 9. 如果 phase=objective，先输出 dismiss_objective，不要做别的。
 10. 如果 phase=preparing，先 choose_deck（最多选满卡槽）再 start_level；如果已经自动选好卡，直接 start_level。
-11. 关卡任务（tasks）是本关必须完成的目标，例如“在 30 秒内击杀 20 个僵尸”。每回合都先看 tasks：未完成任务优先，围绕它调整种植和能量豆——限时击杀就集中输出/地刺/能量豆，限制植物数量就不要多铺，限制阳光花费就先便宜卡。任务失败通常直接判负，宁可少种也要保证任务完成。`;
+11. 关卡任务（tasks）是本关必须完成的目标，例如“在 30 秒内击杀 20 个僵尸”。每回合都先看 tasks：未完成任务优先，围绕它调整种植和能量豆——限时击杀就集中输出/地刺/能量豆，限制植物数量就不要多铺，限制阳光花费就先便宜卡。任务失败通常直接判负，宁可少种也要保证任务完成。
+12. 任务带 timeLeft 时，第一屏会显示“任务倒计时”。urgent=true 时优先把能量豆/一次性植物/最高输出砸上去；timeLeft 很小而进度差很多时，不要继续铺经济。timed_kill 是“最近 30 秒内击杀 20 个”的滑动窗口，不是整关倒计时。
+13. 动作失败会返回 code（TERRAIN/COOLDOWN/SUN/OCCUPIED/LANE_LIMIT/LEVEL_LIMIT…），按 code 换格或等待，不要重复同一个失败动作。`;
+
 
 const PLAY_TOOL = {
   type: 'function',
@@ -186,6 +238,12 @@ export default {
     let tauriHttpLogged = false;
     let tauriHttpErrorLogged = false;
     const kb = { plants: Object.create(null), zombies: Object.create(null), plantNames: null, zombieNames: null };
+    // 地形学习缓存：游戏字段探不到/判定失败时，第二次不再撞同一格。
+    const learnedCells = new Map(); // "lane:column" -> { until, code, terrain }
+    let learnedLevelKey = '';
+    // 限时击杀任务的滑动窗口：按任务 key 记录击杀时间戳。
+    const taskTrack = new Map(); // key -> { lastValue, kills: [], updatedAt }
+
 
     // GP-Next 可能在同源 iframe 中运行模组：优先把浮窗挂到游戏主页面。
     function getDoc() {
@@ -597,6 +655,62 @@ export default {
 
     const TASK_LIMIT_KEYS = ['plantCountLimit', 'plantLoseLimit', 'sunCostLimit', 'sunProduceRequest', 'sunCostCountDownLimit', 'zombieKillCount'];
 
+    function num(v) {
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    }
+
+    // 统一的结构化失败返回；reason 保留给旧调用方/日志，code 给 Agent。
+    function fail(code, extra, reason) {
+      const out = { ok: false, code, retryable: false, reason: reason || TASK_REASON_TEXT[code] || code };
+      if (extra && typeof extra === 'object') {
+        for (const k of Object.keys(extra)) if (extra[k] !== undefined) out[k] = extra[k];
+      }
+      return out;
+    }
+
+    // 限时击杀（mode 6）是滑动窗口：每次击杀 Time 秒后计数减 1。
+    // 这里用击杀时间戳队列还原“窗口还剩多久 / 窗口内几个”，不假装有整关倒计时。
+    function trackTaskTimer(t) {
+      const mode = t.mode;
+      const now = Date.now();
+      if (mode !== 6) { taskTrack.delete(t.key); return; }
+      const total = t.total || (t.starting && t.starting.ZombiesToKill) || 0;
+      const limit = t.timeLimit || (t.starting && t.starting.Time) || 0;
+      let st = taskTrack.get(t.key);
+      if (!st) { st = { lastValue: 0, kills: [], updatedAt: now }; taskTrack.set(t.key, st); }
+      if (typeof t.value === 'number') {
+        const delta = t.value - st.lastValue;
+        if (delta > 0) {
+          for (let i = 0; i < delta && i < 40; i++) st.kills.push(now);
+        } else if (delta < 0) {
+          // 游戏已经通过 scheduleOnce 过期掉 |delta| 次击杀，按时间顺序丢弃。
+          st.kills.splice(0, Math.min(st.kills.length, -delta));
+        }
+        st.lastValue = t.value;
+      }
+      if (limit > 0) {
+        while (st.kills.length && now - st.kills[0] > limit * 1000) st.kills.shift();
+      }
+      st.updatedAt = now;
+      const active = limit > 0 ? st.kills.length : (t.value || 0);
+      const timeLeft = limit > 0 && st.kills.length
+        ? Math.max(0, limit - (now - st.kills[0]) / 1000)
+        : null;
+      const need = total > 0 && typeof t.value === 'number' ? Math.max(0, total - t.value) : null;
+      t.timeSemantics = 'sliding_window';
+      t.windowActive = !t.completed && !t.failed && (timeLeft !== null ? timeLeft > 0 : !!t.value);
+      t.timeLeft = timeLeft === null ? null : Math.round(timeLeft * 10) / 10;
+      t.windowKills = active;
+      t.timeLimit = limit || null;
+      t.need = need;
+      t.urgent = !t.completed && !t.failed && need !== null && need > 0
+        && ((t.timeLeft !== null && t.timeLeft <= 5) || (total > 0 && (t.value || 0) / total >= 0.75));
+      if (t.completed) t.hint = '任务已完成';
+      else if (t.failed) t.hint = '任务已失败';
+      else if (t.timeLeft !== null && t.windowActive) t.hint = `滑动窗口还剩 ${t.timeLeft.toFixed(1)} 秒，当前 ${t.value}/${total}，需再杀 ${need} 个`;
+      else if (need !== null) t.hint = `最近 ${limit} 秒窗口内击杀 ${t.value}/${total}，还需 ${need} 个`;
+    }
+
     // 关卡任务：LevelTaskCount（每关开局后常驻在 UIInGameUpper/LevelTaskSlots 下）
     function readTasks(scene) {
       const tasks = [];
@@ -607,6 +721,7 @@ export default {
           if (cls !== 'LevelTaskCount') continue;
           const tip = typeof c.tip === 'string' ? c.tip : '';
           const count = c.count && typeof c.count.string === 'string' ? c.count.string : '';
+          const mode = num(c.mode);
           let value = null;
           let total = null;
           if (count && count.indexOf('/') >= 0) {
@@ -621,6 +736,19 @@ export default {
             const v = c[k];
             if (typeof v === 'number' && v !== 0) limits[k] = v;
           }
+          const starting = {};
+          try {
+            if (c.startingObjdata && typeof c.startingObjdata === 'object') {
+              for (const k of ['Time', 'ZombiesToKill', 'TargetSun', 'MaximumPlants', 'MaximumPlantsLost', 'HoldoutSeconds', 'LeftSun']) {
+                const v = c.startingObjdata[k];
+                if (typeof v === 'number') starting[k] = v;
+              }
+              // 有时字段名会被 Object.assign 到组件上
+              for (const k of ['Time', 'ZombiesToKill', 'TargetSun', 'MaximumPlants', 'MaximumPlantsLost', 'HoldoutSeconds']) {
+                if (starting[k] === undefined && typeof c[k] === 'number') starting[k] = c[k];
+              }
+            }
+          } catch { /* ignore */ }
           let detail;
           try {
             if (c.objdata && typeof c.objdata === 'object') {
@@ -629,22 +757,36 @@ export default {
               for (const k of Object.keys(c.objdata)) {
                 const v = c.objdata[k];
                 if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') detail[k] = v;
-                if (++n2 >= 6) break;
+                if (++n2 >= 8) break;
               }
             }
           } catch { detail = undefined; }
-          tasks.push({
+
+          const task = {
+            key: tip || ('mode_' + mode),
             tip,
             count,
             value,
             total,
             percent: value !== null && total ? Math.round((value / total) * 100) : null,
-            mode: typeof c.mode === 'number' ? c.mode : null,
+            mode,
+            modeName: mode === null ? null : (TASK_MODE_NAME[mode] || 'mode_' + mode),
             completed: !!c.completed,
             failed: !!c.failed,
             limits: Object.keys(limits).length ? limits : undefined,
+            starting: Object.keys(starting).length ? starting : undefined,
+            timeLimit: mode === 6 ? num(starting.Time) : (mode === 4 ? num(starting.HoldoutSeconds) : null),
             detail,
-          });
+          };
+          // 进度条的兜底（有些模式 count 不是 "a/b"）
+          if (task.value === null && c.progress && typeof c.progress._progress === 'number') {
+            const p = c.progress._progress;
+            task.percent = Math.round(p * 100);
+            if (task.percent > 100) task.percent = 100;
+          }
+          if (!task.modeName && task.mode !== null) task.modeName = 'mode_' + task.mode;
+          trackTaskTimer(task);
+          tasks.push(task);
         }
         for (const ch of n.children || []) walk(ch);
       };
@@ -685,6 +827,51 @@ export default {
       };
     }
 
+    // LnC 地形：squareType 0=solid 1=sky 2=water 3=sea 4=deck
+    function cellTerrain(C, lane, column) {
+      const out = { lane, column, letter: '?', terrain: 'unknown', plantable: false, tilePutable: false, exists: false };
+      let cell = null;
+      try { cell = C.getLnC(lane, column); } catch { cell = null; }
+      if (!cell) return out;
+      out.exists = true;
+      let st = null;
+      try { st = num(cell.squareType); } catch { st = null; }
+      if (st === null) { try { st = num(cell._squareType); } catch { st = null; } }
+      if (st !== null) {
+        out.squareType = st;
+        out.letter = SQUARE_TYPE_LETTER[st] || '?';
+        out.terrain = SQUARE_TYPE_NAME[st] || 'unknown';
+      }
+      try { if (typeof cell.plantable === 'function') out.plantable = !!cell.plantable(); } catch { /* ignore */ }
+      try { if (typeof cell.tilePutable === 'function') out.tilePutable = !!cell.tilePutable(undefined, true); } catch { /* ignore */ }
+      return out;
+    }
+
+    function refreshLearning(levelKey) {
+      if (levelKey === learnedLevelKey) return;
+      learnedLevelKey = levelKey;
+      learnedCells.clear();
+      taskTrack.clear();
+    }
+
+    // 把地形矩阵 + 不可种植格子放进 snapshot。只增字段，不改旧结构。
+    function readTerrain(C, lanes, cols) {
+      const map = [];
+      const blocked = [];
+      for (let r = 0; r < lanes; r++) {
+        let row = '';
+        for (let c = 0; c < cols; c++) {
+          const info = cellTerrain(C, r, c);
+          row += info.letter;
+          if (info.exists && (info.letter === 'W' || info.letter === 'S')) {
+            blocked.push({ lane: r, column: c, terrain: info.terrain, reason: info.terrain === 'sky' ? 'sky' : 'water' });
+          }
+        }
+        map.push(row);
+      }
+      return { lanes, columns: cols, map, legend: TERRAIN_LEGEND, blockedCells: blocked };
+    }
+
     function snapshot() {
       const ctxg = findComps();
       if (!ctxg) return { ok: false, reason: '尚未进入游戏场景' };
@@ -707,6 +894,9 @@ export default {
         else if (!fighting) phase = 'preparing';
         else phase = 'running';
       }
+
+      const levelKey = String((lvl && (lvl.levelNameString || lvl.levelID || lvl.levelName)) || sceneName);
+      refreshLearning(levelKey && levelKey !== 'inGameScene' ? levelKey : '');
 
       const tasks = readTasks(scene);
       const objective = readObjective(scene);
@@ -734,6 +924,8 @@ export default {
         plants: [],
         zombies: [],
         suns: [],
+        terrain: null,
+        blockedCells: [],
         seedSelection: null,
       };
 
@@ -766,6 +958,7 @@ export default {
         const lanes = C.LaneCount || 5;
         const cols = C.ColumnCount || 9;
         out.grid = { lanes, columns: cols };
+        try { out.terrain = readTerrain(C, lanes, cols); } catch { out.terrain = null; }
 
         const seen = new Set();
         for (let r = 0; r < lanes; r++) {
@@ -838,6 +1031,22 @@ export default {
               chosen: !!(cf.ca && cf.ca.chosen),
             })),
         };
+      }
+
+      // 学习型兜底：putPlantAvailable 判定失败的格子（第二次不再撞）。
+      const now = Date.now();
+      for (const [k, v] of learnedCells) {
+        if (!v || v.until <= now) { learnedCells.delete(k); continue; }
+        const [lane, column] = k.split(':').map(Number);
+        out.blockedCells.push({
+          lane, column,
+          terrain: v.terrain || '?',
+          reason: v.code || 'blocked',
+          learned: true,
+        });
+      }
+      if (out.terrain && Array.isArray(out.terrain.blockedCells)) {
+        out.blockedCells = out.blockedCells.concat(out.terrain.blockedCells);
       }
 
       return out;
@@ -936,20 +1145,32 @@ export default {
       return list;
     }
 
+    function plantCountLimitOf(scene) {
+      let limit = 0;
+      for (const t of readTasks(scene)) {
+        if (t.limits && t.limits.plantCountLimit > 0) limit = Math.max(limit, t.limits.plantCountLimit);
+      }
+      return limit;
+    }
+
     function plant(cardIndex, lane, column) {
       const ctxg = findComps();
-      if (!ctxg) return { ok: false, reason: '不在关卡内' };
-      const { map } = ctxg;
+      if (!ctxg) return fail('NO_SCENE');
+      const { map, scene } = ctxg;
       const ui = map.UIInGame, cards = map.Cards, square = map.Square;
-      if (!ui || !cards || !square) return { ok: false, reason: '当前场景没有种植物界面' };
+      if (!ui || !cards || !square) return fail('NO_SCENE', {}, '当前场景没有种植物界面');
 
       const cf = cards.CFs && cards.CFs[cardIndex];
-      if (!cf) return { ok: false, reason: `卡槽 ${cardIndex} 不存在` };
+      if (!cf) return fail('NO_CARD', { card: cardIndex });
       if (Array.isArray(cards.cardsUIUpper) && cards.CFs.length > cards.cardsUIUpper.length) {
-        return { ok: false, reason: '卡槽 UI 尚未初始化完成，请稍候' };
+        return fail('UI_NOT_READY', { retryable: true });
       }
       const upper = cards.cardsUIUpper && cards.cardsUIUpper[cardIndex];
-      if (upper && upper.CD > 0) return { ok: false, reason: `${cf.Type} 冷却中 ${upper.CD.toFixed(1)}s` };
+      const cd = upper ? Math.max(0, +upper.CD || 0) : 0;
+      if (upper && cd > 0) {
+        return fail('COOLDOWN', { card: cardIndex, type: cf.Type, retryAfter: Math.round(cd * 10) / 10, retryable: true },
+          `${cf.Type} 冷却中 ${cd.toFixed(1)}s`);
+      }
       const sunCounter = map.SunCount;
       const sunNow = sunCounter ? sunCounter.CurrentValue : null;
       const cost = Number.isFinite(cf.SUNCOST) ? cf.SUNCOST : 0;
@@ -957,69 +1178,121 @@ export default {
         // 卡片 UI 的状态可能慢一帧；阳光足够时同步一次，避免刚开局被误判为“阳光不足”。
         cf.ca.affordable = true;
       }
-      if (cf.ca && !cf.ca.affordable && !cf.ca.free) return { ok: false, reason: `${cf.Type} 阳光不足` };
+      if (cf.ca && !cf.ca.affordable && !cf.ca.free) {
+        return fail('SUN', {
+          card: cardIndex, type: cf.Type, need: cost, have: sunNow,
+          short: Number.isFinite(sunNow) ? Math.max(0, cost - sunNow) : null, retryable: true,
+        }, `${cf.Type} 阳光不足`);
+      }
 
       const C = square.constructor;
-      if (lane < 0 || lane >= (C.LaneCount || 5) || column < 0 || column >= (C.ColumnCount || 9)) {
-        return { ok: false, reason: `格子 ${lane},${column} 超出范围` };
+      const lanes = C.LaneCount || 5, cols = C.ColumnCount || 9;
+      if (lane < 0 || lane >= lanes || column < 0 || column >= cols) {
+        return fail('OUT_OF_RANGE', { lane, column, range: { lanes, columns: cols } }, `格子 ${lane},${column} 超出范围`);
       }
       const cell = C.getLnC(lane, column);
-      if (!cell) return { ok: false, reason: '格子不存在' };
+      if (!cell) return fail('NO_CELL', { lane, column }, '格子不存在');
+
+      // 地形：W=水/S=天空 不能种普通植物；P=木板可以。
+      const terrain = cellTerrain(C, lane, column);
+      if (terrain.exists && (terrain.letter === 'W' || terrain.letter === 'S')) {
+        return fail('TERRAIN', {
+          lane, column, terrain: terrain.letter, terrainName: terrain.terrain, retryable: false,
+        }, `格子 ${lane},${column} 是${terrain.terrain === 'sea' ? '海面' : terrain.terrain}，不能种普通植物`);
+      }
 
       const role = plantRole(cf.Type);
       const lanePlants = lanePlantList(C, lane);
       const sameRole = lanePlants.filter((p) => plantRole(cleanCodename(p.Plant_Type || '')) === role);
       const posText = sameRole.map((p) => (p.plantInLnC && p.plantInLnC.cIndex != null ? 'c' + p.plantInLnC.cIndex : '?')).join(',');
+      const laneLimit = (limit, name) => fail('LANE_LIMIT', {
+        lane, role, count: sameRole.length, limit, plants: sameRole.map((p) => cleanCodename(p.Plant_Type || '')),
+      }, `该行已有${name}（${posText}），先补其他行`);
       if (role === 'wall') {
         const strong = sameRole.find((p) => (p.health || 0) > Math.max(1, p.toughness || 1) * 0.25);
-        if (strong) return { ok: false, reason: `该行已有坚果墙（${posText}），不要重复种` };
+        if (strong) return laneLimit(1, '坚果墙');
       } else if (role === 'spring' && sameRole.length) {
-        return { ok: false, reason: `该行已有弹簧豆（${posText}），一次性植物不要叠` };
+        return laneLimit(1, '弹簧豆');
       } else if (role === 'freeze' && sameRole.length) {
-        return { ok: false, reason: `该行已有冰冻生菜（${posText}），不要重复种` };
+        return laneLimit(1, '冰冻生菜');
       } else if (role === 'sun' && sameRole.length >= 2) {
-        return { ok: false, reason: `该行已有 2 个阳光生产者（${posText}），先补其他行` };
+        return laneLimit(2, '2 个阳光生产者');
       } else if (role === 'shooter' && sameRole.length >= 4) {
-        return { ok: false, reason: `该行已有 4 个射手（${posText}），先补其他行` };
+        return laneLimit(4, '4 个射手');
       } else if (role === 'spike' && sameRole.length >= 2) {
-        return { ok: false, reason: `该行已有 2 个地刺（${posText}），不要重复种` };
+        return laneLimit(2, '2 个地刺');
       }
 
       const tags = (cf.PF && cf.PF.TAGS) || [];
       const canOverlap = tags.includes('allowOverlap') || tags.includes('vine') || tags.includes('floawerPot') || tags.includes('lilypad');
       const cellPlants = cellPlantList(cell);
-      if (cellPlants.length && !canOverlap) return { ok: false, reason: `格子 ${lane},${column} 已有植物` };
+      if (cellPlants.length && !canOverlap) {
+        return fail('OCCUPIED', {
+          lane, column, plants: cellPlants.map((p) => cleanCodename(p.Plant_Type || '')),
+        }, `格子 ${lane},${column} 已有植物`);
+      }
+
+      // 关卡植物总数上限
+      const plantLimit = plantCountLimitOf(scene);
+      if (plantLimit > 0) {
+        let total = 0;
+        for (let r = 0; r < lanes; r++) {
+          for (let c = 0; c < cols; c++) total += cellPlantList(C.getLnC(r, c)).length ? 1 : 0;
+        }
+        if (total >= plantLimit) {
+          return fail('LEVEL_LIMIT', { limit: 'plantCountLimit', value: plantLimit, count: total }, `关卡限制最多 ${plantLimit} 株植物`);
+        }
+      }
+
+      const learnKey = `${lane}:${column}`;
+      const learned = learnedCells.get(learnKey);
+      if (learned && learned.until > Date.now()) {
+        return fail(learned.code || 'CELL_BLOCKED', {
+          lane, column, terrain: learned.terrain || '?', learned: true, retryable: false,
+        }, `格子 ${lane},${column} 之前判定为不可种植（缓存中）`);
+      }
 
       if (ui.index === cardIndex && ui.currentCF !== cf) ui.tryChangingIndex(-1);
       if (ui.index !== cardIndex) ui.tryChangingIndex(cardIndex);
-      if (ui.currentCF !== cf) return { ok: false, reason: `${cf.Type} 无法选中（冷却/阳光/场景限制）` };
+      if (ui.currentCF !== cf) {
+        if (ui.index === cardIndex) ui.tryChangingIndex(-1);
+        return fail('CARD_UNAVAILABLE', { card: cardIndex, type: cf.Type, retryable: true });
+      }
 
       const canPlace = cell.putPlantAvailable
         ? cell.putPlantAvailable(true, cf.ID, true, true, cf.spf)
         : true;
       if (!canPlace) {
         if (ui.index === cardIndex) ui.tryChangingIndex(-1);
-        if (run && run.blocked) run.blocked.set(`${lane}:${column}`, Date.now() + 15000);
-        return { ok: false, reason: `格子 ${lane},${column} 当前不可种植（关卡限制/地形/植物上限）` };
+        learnedCells.set(learnKey, { until: Date.now() + 15000, code: 'CELL_BLOCKED', terrain: terrain.letter || '?' });
+        return fail('CELL_BLOCKED', { lane, column, terrain: terrain.letter || '?' }, `格子 ${lane},${column} 当前不可种植（关卡限制/地形/植物上限）`);
       }
 
       const beforeSpawn = cell.spawningPromiseCount || 0;
       cell.PlaceUIPlant();
       if ((cell.spawningPromiseCount || 0) <= beforeSpawn) {
         if (ui.index === cardIndex) ui.tryChangingIndex(-1);
-        return { ok: false, reason: `${cf.Type} 在 ${lane},${column} 种植未生效` };
+        return fail('PLANT_FAILED', { card: cardIndex, type: cf.Type, lane, column });
       }
-      return { ok: true, detail: `种下 ${PLANT_CN[cf.Type] || cf.Type} @ ${lane},${column}` };
+      return {
+        ok: true,
+        detail: `种下 ${PLANT_CN[cf.Type] || cf.Type} @ ${lane},${column}`,
+        lane, column, type: cf.Type,
+      };
     }
 
     function shovel(lane, column) {
       const ctxg = findComps();
-      if (!ctxg || !ctxg.map.Square) return { ok: false, reason: '不在关卡内' };
+      if (!ctxg || !ctxg.map.Square) return fail('NO_SCENE');
       const C = ctxg.map.Square.constructor;
+      const lanes = C.LaneCount || 5, cols = C.ColumnCount || 9;
+      if (lane < 0 || lane >= lanes || column < 0 || column >= cols) {
+        return fail('OUT_OF_RANGE', { lane, column, range: { lanes, columns: cols } });
+      }
       const cell = C.getLnC(lane, column);
-      if (!cell) return { ok: false, reason: '格子不存在' };
+      if (!cell) return fail('NO_CELL', { lane, column });
       const plants = cellPlantList(cell);
-      if (!plants.length) return { ok: false, reason: `格子 ${lane},${column} 没有植物` };
+      if (!plants.length) return fail('EMPTY', { lane, column }, `格子 ${lane},${column} 没有植物`);
       const names = plants.map((p) => cleanCodename(p.Plant_Type || '') || '植物').join(',');
       try {
         cell.removePlant();
@@ -1035,25 +1308,34 @@ export default {
         remaining = cellPlantList(cell);
       }
       if (remaining.length) {
-        return { ok: false, reason: `铲除失败，仍剩：${remaining.map((p) => cleanCodename(p.Plant_Type || '')).join(',')}` };
+        return fail('SHOVEL_FAILED', { lane, column, remaining: remaining.map((p) => cleanCodename(p.Plant_Type || '')) });
       }
-      return { ok: true, detail: `铲除 ${names} @ ${lane},${column}` };
+      learnedCells.delete(`${lane}:${column}`);
+      return { ok: true, detail: `铲除 ${names} @ ${lane},${column}`, lane, column };
     }
 
     function plantFood(lane, column) {
       const ctxg = findComps();
-      if (!ctxg) return { ok: false, reason: '不在关卡内' };
+      if (!ctxg) return fail('NO_SCENE');
       const { map } = ctxg;
       const C = map.Square && map.Square.constructor;
-      if (!C) return { ok: false, reason: '不在关卡内' };
+      if (!C) return fail('NO_SCENE');
+      const lanes = C.LaneCount || 5, cols = C.ColumnCount || 9;
+      if (lane < 0 || lane >= lanes || column < 0 || column >= cols) {
+        return fail('OUT_OF_RANGE', { lane, column, range: { lanes, columns: cols } });
+      }
       const counter = map.PlantFoodCount;
-      if (counter && !(counter.plantFoodNum > 0)) return { ok: false, reason: '没有植物能量' };
+      const have = counter ? counter.plantFoodNum : null;
+      if (counter && !(counter.plantFoodNum > 0)) {
+        return fail('NO_FOOD', { have: have || 0, retryable: true }, '没有植物能量');
+      }
       const cell = C.getLnC(lane, column);
-      const p = ((cell && cell.plantInSquare) || []).find((x) => x && x.foodable && !x.fooding);
-      if (!p) return { ok: false, reason: '该格没有可喂能量的植物' };
+      if (!cell) return fail('NO_CELL', { lane, column });
+      const p = ((cell.plantInSquare) || []).find((x) => x && x.foodable && !x.fooding);
+      if (!p) return fail('NOT_FOODABLE', { lane, column, plants: cellPlantList(cell).map((x) => cleanCodename(x.Plant_Type || '')) });
       p.food();
       if (counter && counter.plantFoodDec) counter.plantFoodDec();
-      return { ok: true, detail: `植物能量 → ${lane},${column}` };
+      return { ok: true, detail: `植物能量 → ${lane},${column}`, lane, column, type: cleanCodename(p.Plant_Type || '') };
     }
 
     function safeStartable(cards) {
@@ -1068,32 +1350,32 @@ export default {
     }
 
     function tryLetsRock(lvl, cards) {
-      if (!lvl || typeof lvl.letsRock !== 'function') return { ok: false, reason: '当前场景无法开局' };
-      if (lvl.letsRocked) return { ok: false, reason: '已经开局' };
-      if (!prepReady(cards, lvl)) return { ok: false, reason: '选卡界面还没准备好，稍等' };
-      if (!safeStartable(cards)) return { ok: false, reason: '卡组还没选满' };
+      if (!lvl || typeof lvl.letsRock !== 'function') return fail('NO_SCENE', {}, '当前场景无法开局');
+      if (lvl.letsRocked) return fail('ALREADY_STARTED', {}, '已经开局');
+      if (!prepReady(cards, lvl)) return fail('PREP_NOT_READY', { retryable: true }, '选卡界面还没准备好，稍等');
+      if (!safeStartable(cards)) return fail('DECK_INCOMPLETE', { retryable: false }, '卡组还没选满');
       try {
         lvl.letsRock();
-        return { ok: true, detail: '开始战斗' };
+        return { ok: true, detail: '开始战斗', started: true };
       } catch (e) {
-        return { ok: false, reason: '开局失败：' + (e && e.message ? e.message : e) };
+        return fail('START_FAILED', {}, '开局失败：' + (e && e.message ? e.message : e));
       }
     }
 
     function autoDeck() {
       const ctxg = findComps();
-      if (!ctxg) return { ok: false, reason: '不在关卡内' };
+      if (!ctxg) return fail('NO_SCENE');
       const { map } = ctxg;
       const cards = map.Cards, lvl = map.levelController;
-      if (!cards || !lvl) return { ok: false, reason: '当前不是关卡准备阶段' };
-      if (cards.gameStarted) return { ok: false, reason: '战斗已经开始' };
+      if (!cards || !lvl) return fail('PREP_NOT_READY');
+      if (cards.gameStarted) return fail('ALREADY_STARTED');
+      if (!prepReady(cards, lvl)) return fail('PREP_NOT_READY', { retryable: true }, '选卡界面还没准备好，稍等');
+      if (safeStartable(cards)) return tryLetsRock(lvl, cards);
 
       const max = cards.maxSlotCount || 0;
-      if (!max) return { ok: false, reason: '当前关卡没有可用卡槽（植物未解锁/关卡限制）' };
-      if (safeStartable(cards)) return tryLetsRock(lvl, cards);
-      if (!cards.seedChooser) return { ok: false, reason: '选卡界面未打开' };
-
-      if (cards.CFs.length >= max) return { ok: true, detail: '卡组已满' };
+      if (!max) return fail('NO_SLOTS', { retryable: true }, '当前关卡没有可用卡槽（植物未解锁/关卡限制）');
+      if (!cards.seedChooser) return fail('PREP_NOT_READY', { retryable: true });
+      if (cards.CFs.length >= max) return { ok: true, deck: cards.CFs.map((c) => c.Type), applied: [], skipped: [], started: false, detail: '卡组已满' };
 
       const avail = (cards.seedChooser.CFs || []).filter(
         (cf) => cf && cf.Type && !(cf.ca && cf.ca.locked) && !(cf.ca && cf.ca.disallowed)
@@ -1105,9 +1387,9 @@ export default {
       };
       [
         'sunflower', 'primalsunflower', 'twinsunflower', 'sunshroom',
-        'peashooter', 'repeater', 'snowpea', 'threepeater', 'cabbage-pult', 'kernel-pult',
-        'wallnut', 'tallnut', 'endurian', 'potatomine', 'cherrybomb', 'jalapeno',
-        'chomper', 'bonk-choy', 'bloomerang', 'lightning-reed', 'spikeweed',
+        'peashooter', 'repeater', 'snowpea', 'threepeater', 'cabbagepult', 'kernelpult',
+        'wallnut', 'tallnut', 'endurian', 'potatomine', 'cherry_bomb', 'jalapeno',
+        'chomper', 'bonkchoy', 'bloomerang', 'lightningreed', 'spikeweed',
       ].forEach(push);
       for (const cf of avail) { if (pick.length >= max) break; push(cf.Type); }
 
@@ -1119,36 +1401,80 @@ export default {
           if (cards.CFs.length > before) added++;
         } catch { /* ignore one card */ }
       }
+      const out = {
+        ok: true,
+        deck: cards.CFs.map((c) => c.Type),
+        applied: pick.slice(0, added),
+        skipped: [],
+        started: false,
+        detail: `选卡 ${added} 张`,
+      };
       if (safeStartable(cards)) {
         const r = tryLetsRock(lvl, cards);
-        return r.ok ? { ok: true, detail: `选卡 ${added} 张，已开局`, deck: pick } : { ok: false, reason: r.reason };
+        if (r.ok) { out.started = true; out.detail = `选卡 ${added} 张，已开局`; }
+        else out.startReason = r.reason;
       }
-      return { ok: true, detail: `选卡 ${added} 张，等待界面就绪`, deck: pick };
+      return out;
     }
 
-    function autoDeckWith(plants) {
-      if (!Array.isArray(plants) || !plants.length) return autoDeck();
+    // plants: 指定卡组；replace: 先清空当前卡组。返回实际生效的 deck / applied / skipped。
+    function autoDeckWith(plants, replace) {
       const ctxg = findComps();
-      if (!ctxg) return { ok: false, reason: '不在关卡内' };
+      if (!ctxg) return fail('NO_SCENE');
       const { map } = ctxg;
       const cards = map.Cards, lvl = map.levelController;
-      if (!cards || !lvl) return { ok: false, reason: '当前不是关卡准备阶段' };
-      if (cards.gameStarted) return { ok: false, reason: '战斗已经开始' };
-      const avail = new Set(((cards.seedChooser && cards.seedChooser.CFs) || []).map((c) => c.Type));
-      let added = 0;
-      for (const type of plants) {
-        if (!avail.has(type)) continue;
-        try {
-          const before = cards.CFs.length;
-          cards.addCardByPlantTypeFromSeedbank(type);
-          if (cards.CFs.length > before) added++;
-        } catch { /* ignore one card */ }
+      if (!cards || !lvl) return fail('PREP_NOT_READY');
+      if (cards.gameStarted) return fail('ALREADY_STARTED');
+      if (!prepReady(cards, lvl)) return fail('PREP_NOT_READY', { retryable: true }, '选卡界面还没准备好，稍等');
+      const max = cards.maxSlotCount || 0;
+      if (!max) return fail('NO_SLOTS', { retryable: true });
+      if (!cards.seedChooser) return fail('PREP_NOT_READY', { retryable: true });
+
+      const wanted = Array.isArray(plants) ? plants.map(String).filter(Boolean) : [];
+      if (!wanted.length && !replace) return autoDeck();
+
+      const cleared = cards.CFs.length;
+      if (replace && typeof cards.spliceAllCards === 'function') {
+        try { cards.spliceAllCards(); } catch (e) { /* fall through to add */ }
       }
+      if (replace && cards.CFs.length) {
+        return fail('DECK_CLEAR_FAILED', { remaining: cards.CFs.map((c) => c.Type) }, '清空卡组失败');
+      }
+      const avail = new Map((cards.seedChooser.CFs || []).map((cf) => [cf.Type, cf]));
+      const applied = [];
+      const skipped = [];
+      for (const type of wanted) {
+        const cf = avail.get(type);
+        if (!cf) { skipped.push({ type, reason: 'not_available' }); continue; }
+        if (cf.ca && (cf.ca.locked || cf.ca.disallowed)) {
+          skipped.push({ type, reason: cf.ca.locked ? 'locked' : 'not_available' });
+          continue;
+        }
+        const before = cards.CFs.length;
+        if (before >= max) { skipped.push({ type, reason: 'no_slot' }); continue; }
+        try { cards.addCardByPlantTypeFromSeedbank(type); } catch (e) {
+          skipped.push({ type, reason: 'error', message: String((e && e.message) || e) });
+          continue;
+        }
+        if (cards.CFs.length > before) applied.push(type);
+        else skipped.push({ type, reason: 'rejected' });
+      }
+      const out = {
+        ok: true,
+        deck: cards.CFs.map((c) => c.Type),
+        applied,
+        skipped,
+        cleared: replace ? cleared : 0,
+        replace: !!replace,
+        started: false,
+        detail: `${replace ? `清空 ${cleared} 张并` : ''}选卡 ${applied.length} 张`,
+      };
       if (safeStartable(cards)) {
         const r = tryLetsRock(lvl, cards);
-        return r.ok ? { ok: true, detail: `选卡 ${added} 张，已开局` } : { ok: false, reason: r.reason };
+        if (r.ok) { out.started = true; out.detail += '，已开局'; }
+        else out.startReason = r.reason;
       }
-      return { ok: true, detail: `选卡 ${added} 张` };
+      return out;
     }
 
     function startLevel() {
@@ -1161,9 +1487,9 @@ export default {
 
     function dismissObjective() {
       const ctxg = findComps();
-      if (!ctxg || !ctxg.scene) return { ok: false, reason: '不在关卡内' };
+      if (!ctxg || !ctxg.scene) return fail('NO_SCENE');
       const info = readObjective(ctxg.scene);
-      if (!info) return { ok: false, reason: '当前没有关卡目标界面' };
+      if (!info) return fail('NO_OBJECTIVE', {}, '当前没有关卡目标界面');
       const obj = findCompByClass(ctxg.scene, 'LevelObjectiveScreen');
       let called = false;
       if (obj && typeof obj.continue === 'function') {
@@ -1175,7 +1501,7 @@ export default {
           try { btnNode.emit('click'); called = true; } catch { /* ignore */ }
         }
       }
-      if (!called) return { ok: false, reason: '找不到“继续”按钮' };
+      if (!called) return fail('CONTINUE_NOT_FOUND', {}, '找不到“继续”按钮');
       return { ok: true, detail: `关闭关卡目标说明（${info.screenName || '本关任务'}）`, tasks: info.missions };
     }
 
@@ -1185,7 +1511,10 @@ export default {
       return list.map((t) => {
         const name = t.tip || '任务';
         const state = t.completed ? '已完成' : (t.failed ? '失败' : (t.count || ''));
-        return `${name}${state ? '（' + state + '）' : ''}`;
+        const timer = t.timeSemantics === 'sliding_window' && t.timeLeft !== null && !t.completed
+          ? `，窗口剩 ${t.timeLeft.toFixed(1)}s`
+          : '';
+        return `${name}${state || timer ? '（' + state + timer + '）' : ''}`;
       }).join('；');
     }
 
@@ -1199,18 +1528,38 @@ export default {
       const plants = s.plants
         .map((p) => `${p.lane}:${p.column}:${p.type}:${Math.ceil((p.hp || 0) / 150)}`)
         .sort().join('|');
-      const tasks = (s.tasks || []).map((t) => `${t.tip}:${t.count}:${t.completed ? 1 : 0}`).join('|');
+      const tasks = (s.tasks || []).map((t) => `${t.tip}:${t.count}:${t.completed ? 1 : 0}:${t.urgent ? 'U' : ''}`).join('|');
       return [s.phase, s.level.wave, ready, zombies, plants, tasks].join('#');
     }
 
     function localBrain(s) {
       const ready = s.cards.filter((c) => c.ready);
       const occupied = new Set(s.plants.map((p) => `${p.lane}:${p.column}`));
-      const blocked = (run && run.blocked) || new Map();
+      const ctxg = findComps();
+      const C = ctxg && ctxg.map.Square && ctxg.map.Square.constructor;
+      const now = Date.now();
       const free = (lane, col) => {
         const k = `${lane}:${col}`;
-        return !occupied.has(k) && !((blocked.get(k) || 0) > Date.now());
+        if (occupied.has(k)) return false;
+        const learned = learnedCells.get(k);
+        if (learned && learned.until > now) return false;
+        if (C) {
+          const t = cellTerrain(C, lane, col);
+          if (t.exists && (t.letter === 'W' || t.letter === 'S')) return false;
+        }
+        return true;
       };
+      const urgentTask = (s.tasks || []).find((t) => t.urgent && !t.completed && !t.failed);
+      if (urgentTask) {
+        // 限时击杀：能量豆优先给僵尸最多的行里可喂的植物。
+        const counts = [0, 0, 0, 0, 0];
+        s.zombies.forEach((z) => { counts[z.lane] = (counts[z.lane] || 0) + 1; });
+        const lane = counts.indexOf(Math.max(...counts));
+        const foodable = s.plants.find((p) => p.lane === lane && p.foodable);
+        if ((s.plantFood || 0) > 0 && foodable) {
+          return { thought: `任务倒计时 ${urgentTask.timeLeft ?? '?'}s，能量豆抢救`, actions: [{ type: 'plant_food', lane: foodable.lane, column: foodable.column }] };
+        }
+      }
       for (const t of s.tasks || []) {
         const limit = t.limits && t.limits.plantCountLimit;
         if (limit > 0 && s.plants.length >= limit) {
@@ -1360,21 +1709,30 @@ export default {
         zombies: s.zombies.map((z) => ({ lane: z.lane, column: z.column, type: z.type, name: z.name, hp: z.hp, maxHp: z.maxHp, hypnotized: z.hypnotized })),
         sunsOnGround: s.suns.length,
         lastResults: (run && run.lastResults) || [],
+        terrain: s.terrain ? { map: s.terrain.map, legend: s.terrain.legend } : null,
+        blockedCells: s.blockedCells || [],
       };
       if (s.phase === 'preparing' && s.seedSelection) compact.seedSelection = s.seedSelection;
-      if (run && run.blocked) {
-        const now = Date.now();
-        compact.blockedCells = [...run.blocked.entries()]
-          .filter(([, until]) => until > now)
-          .map(([key]) => key);
-      }
 
       const lines = [];
       lines.push(`关卡：${s.level.name || '未知'}  阶段：${phaseText(s.phase)}  波次：${s.level.wave}/${s.level.waves || '?'}  下一波：${s.level.nextWaveIn ?? '?'}s`);
       if (s.tasks && s.tasks.length) {
-        lines.push('本关任务（必须完成）：' + s.tasks.map((t) => `${t.tip}${t.count ? ' ' + t.count : ''}${t.completed ? ' [已完成]' : (t.failed ? ' [已失败]' : '')}`).join('；'));
+        lines.push('本关任务（必须完成）：' + s.tasks.map((t) => {
+          const tail = t.completed ? ' [已完成]' : (t.failed ? ' [已失败]' : '');
+          return `${t.tip}${t.count ? ' ' + t.count : ''}${t.timeSemantics === 'sliding_window' && t.timeLeft !== null ? `（窗口剩 ${t.timeLeft.toFixed(1)}s）` : ''}${tail}`;
+        }).join('；'));
+        for (const t of s.tasks) {
+          if (t.hint) lines.push(`任务提示：${t.hint}${t.urgent ? '  ⚠️ 优先集中输出/能量豆' : ''}`);
+        }
       } else if (s.objective && s.objective.missions && s.objective.missions.length) {
         lines.push('本关任务（目标说明界面）：' + s.objective.missions.join('；'));
+      }
+      if (s.terrain && Array.isArray(s.terrain.map)) {
+        lines.push('地形（L陆地 P木板 W水 S天空，每行字符串）：' + s.terrain.map.join(' '));
+      }
+      if (s.blockedCells && s.blockedCells.length) {
+        const list = s.blockedCells.slice(0, 16).map((b) => `${b.lane},${b.column}:${b.terrain || '?'}/${b.reason || 'blocked'}`);
+        lines.push('不可种植格子：' + list.join(' ') + (s.blockedCells.length > 16 ? ` …共 ${s.blockedCells.length} 个` : ''));
       }
       lines.push(`阳光：${s.sun}  能量豆：${s.plantFood ?? 0}  地面掉落：${s.suns.length}`);
       if (run && run.lastResults && run.lastResults.length) {
@@ -1708,7 +2066,7 @@ export default {
             case 'shovel': r = shovel(Number(a.lane), Number(a.column)); break;
             case 'plant_food': r = plantFood(Number(a.lane), Number(a.column)); break;
             case 'collect_sun': r = collectSuns(); break;
-            case 'choose_deck': r = autoDeckWith(a.plants); break;
+            case 'choose_deck': r = autoDeckWith(a.plants, !!a.replace); break;
             case 'start_level': r = startLevel(); break;
             case 'dismiss_objective': r = dismissObjective(); break;
             case 'wait': r = { ok: true, detail: '等待' }; break;
@@ -1720,7 +2078,79 @@ export default {
       return results;
     }
 
-    // ───────────────────────── 主循环 ─────────────────────────
+    // ───────────────────────── 批量 / 条件等待 ─────────────────────────
+
+    function compactState(s) {
+      return {
+        phase: s.phase,
+        sun: s.sun,
+        plantFood: s.plantFood,
+        wave: s.level && s.level.wave,
+        plants: (s.plants || []).length,
+        zombies: (s.zombies || []).length,
+        tasks: (s.tasks || []).map((t) => ({
+          tip: t.tip, count: t.count, completed: t.completed,
+          failed: t.failed, timeLeft: t.timeLeft, urgent: t.urgent,
+        })),
+      };
+    }
+
+    function condSatisfied(s, cond) {
+      const c = String(cond || '').trim();
+      let m;
+      if (!c) return { ok: false, reason: '空条件' };
+      if ((m = /^sun\s*>=\s*(-?\d+(?:\.\d+)?)$/i.exec(c))) return { ok: true, hit: Number(s.sun) >= Number(m[1]) };
+      if ((m = /^sun\s*<=\s*(-?\d+(?:\.\d+)?)$/i.exec(c))) return { ok: true, hit: Number(s.sun) <= Number(m[1]) };
+      if ((m = /^sun\s*>\s*(-?\d+(?:\.\d+)?)$/i.exec(c))) return { ok: true, hit: Number(s.sun) > Number(m[1]) };
+      if ((m = /^sun\s*<\s*(-?\d+(?:\.\d+)?)$/i.exec(c))) return { ok: true, hit: Number(s.sun) < Number(m[1]) };
+      if ((m = /^plantfood\s*>=\s*(\d+)$/i.exec(c))) return { ok: true, hit: Number(s.plantFood || 0) >= Number(m[1]) };
+      if ((m = /^card_ready\s*:\s*(.+)$/i.exec(c))) {
+        const v = m[1].trim();
+        const card = (s.cards || []).find((x) => x.type === v) || (s.cards || [])[Number(v)];
+        return { ok: true, hit: !!(card && card.ready) };
+      }
+      if ((m = /^zombie_in_lane\s*:\s*(\d+)$/i.exec(c))) {
+        return { ok: true, hit: (s.zombies || []).some((z) => Number(z.lane) === Number(m[1])) };
+      }
+      if ((m = /^zombie_near\s*:\s*(-?\d+(?:\.\d+)?)$/i.exec(c))) {
+        return { ok: true, hit: (s.zombies || []).some((z) => Number(z.column) <= Number(m[1])) };
+      }
+      if (/^tasks_ready$/i.test(c)) {
+        const list = s.tasks || [];
+        return { ok: true, hit: list.length > 0 && list.every((t) => t.completed || t.failed) };
+      }
+      if ((m = /^phase\s*:\s*(\w+)$/i.exec(c))) return { ok: true, hit: s.phase === m[1].toLowerCase() };
+      if ((m = /^plants\s*>=\s*(\d+)$/i.exec(c))) return { ok: true, hit: (s.plants || []).length >= Number(m[1]) };
+      return { ok: false, reason: '无法识别的条件：' + c };
+    }
+
+    async function waitUntil(cond, timeoutMs) {
+      const timeout = clamp(Number(timeoutMs) || 10, 1, 60) * 1000;
+      const started = Date.now();
+      let last = null;
+      while (Date.now() - started <= timeout) {
+        const s = safeSnapshot();
+        last = s;
+        if (!s.ok) { await new Promise((r) => setTimeout(r, 200)); continue; }
+        const r = condSatisfied(s, cond);
+        if (!r.ok) return { ok: false, code: 'BAD_CONDITION', retryable: false, condition: String(cond), message: r.reason };
+        if (r.hit) {
+          return {
+            ok: true, satisfied: true, condition: String(cond),
+            elapsed: Math.round((Date.now() - started) / 100) / 10,
+            state: compactState(s),
+          };
+        }
+        await new Promise((r2) => setTimeout(r2, 200));
+      }
+      return {
+        ok: false, code: 'TIMEOUT', satisfied: false, retryable: true,
+        condition: String(cond), elapsed: Math.round((Date.now() - started) / 100) / 10,
+        state: last && last.ok ? compactState(last) : null,
+      };
+    }
+
+
 
     function start() {
       if (run && run.active) return;
@@ -1852,13 +2282,13 @@ export default {
         for (const r of results) {
           if (r.action.type === 'wait') continue;
           if (r.result && r.result.ok) mlog(`✅ ${r.result.detail || r.action.type}`, 'ok');
-          else mlog(`⚠️ ${r.action.type}: ${(r.result && r.result.reason) || '失败'}`, 'warn');
+          else mlog(`⚠️ ${r.action.type}${r.result && r.result.code ? '[' + r.result.code + ']' : ''}: ${(r.result && r.result.reason) || '失败'}`, 'warn');
         }
         const resultLines = results
           .filter((r) => r.action.type !== 'wait')
           .map((r) => (r.result && r.result.ok
             ? `${r.action.type} ${r.result.detail || ''} 成功`
-            : `${r.action.type} 失败：${(r.result && r.result.reason) || ''}`));
+            : `${r.action.type} 失败${r.result && r.result.code ? '[' + r.result.code + ']' : ''}：${(r.result && (r.result.reason || r.result.code)) || ''}`));
         run.lastResults = resultLines.slice(-3);
         updateStatus();
         schedule(cfg.interval);
@@ -2096,6 +2526,13 @@ export default {
         platform: platformVersion,
         snapshot: safeSnapshot,
         collectSuns, collectPickups, plant, shovel, plantFood, autoDeck, autoDeckWith, startLevel, dismissObjective, start, stop,
+        execute: executeActions,
+        waitUntil,
+        terrain: (lane, column) => {
+          const ctxg = findComps();
+          const C = ctxg && ctxg.map.Square && ctxg.map.Square.constructor;
+          return C ? cellTerrain(C, Number(lane), Number(column)) : null;
+        },
         knowledge: { plant: plantKb, zombie: zombieKb },
         normalizeDecision,
         testDecision: async (s) => {

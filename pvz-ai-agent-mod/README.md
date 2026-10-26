@@ -20,6 +20,11 @@
 - **每行阵容约束**：同一行最多 1 个坚果墙、1 个弹簧豆、1 个冰冻生菜、2 个阳光生产者、4 个射手、2 个地刺；模型乱种会被代码拒绝，并在提示词里看到“该行已有坚果，禁止再种”。
 - **铲子**：支持普通植物和地刺/土豆雷/睡莲等 tile 植物；可以铲掉重复坚果、低血量植物或低效植物，腾位种更强的卡。
 - **关卡任务识别**：读取每关任务（如“在 30 秒内击杀 20 个僵尸”），包括当前进度 `0/20`、完成/失败状态；任务会进入提示词，AI 围绕任务调整打法；开局的“关卡目标”说明界面会自动点“继续”。
+- **v0.2.5 地形矩阵**：`snapshot().terrain.map` 直接给出 5×9 地形（L 陆地 / P 木板 / W 水 / S 天空），`blockedCells` 标出不可种植格；种水格不再靠试错。
+- **v0.2.5 结构化错误**：种植/铲除/能量豆失败返回 `code`（`TERRAIN` / `COOLDOWN` / `SUN` / `OCCUPIED` / `LANE_LIMIT` / `LEVEL_LIMIT`…），`COOLDOWN` 带 `retryAfter`。
+- **v0.2.5 任务计时**：`timed_kill` 使用滑动窗口语义，给出 `windowActive` / `timeLeft` / `urgent` / `hint`，内置 AI 会在 `urgent` 时优先输出与能量豆。
+- **v0.2.5 批量动作 / 条件等待**：`window.PvzAI.execute(actions)` 一次执行最多 6 个动作；`waitUntil("sun>=200", 20000)` 内部 200ms 轮询。
+- **v0.2.5 换卡组**：`autoDeckWith(plants, true)` 会先 `Cards.spliceAllCards()` 清空游戏预填卡组，再逐张选入，返回 `deck / applied / skipped`。
 - **原生种植**：走 `UIInGame.tryChangingIndex()` + `LnC.PlaceUIPlant()`，会正常扣阳光、进冷却、受关卡植物上限/地形限制。
 - **支持动作**：种植、铲除、喂植物能量、等待、选卡、关闭任务说明、开局。
 - **F8 热键**：随时开始/停止；按 F9 可打开 GP-Next 官方侧栏作为兜底。
@@ -89,14 +94,19 @@
 | 卡槽/费用/冷却 | `Cards.CFs`、`Cards.cardsUIUpper[i].CD` |
 | 种植 | `UIInGame.tryChangingIndex()` + `LnC.PlaceUIPlant()` |
 | 铲除 | `LnC.removePlant()`（遍历 plantInSquare / tilePlantInSquare / vineInSquare 等所有容器） |
-| 关卡任务 | `LevelTaskCount`（`tip` / `count.string` / `completed` / `failed` / `objdata`） |
+| 关卡任务 | `LevelTaskCount`（`tip` / `count.string` / `mode` / `startingObjdata` / `objdata` / `completed` / `failed`） |
+| 地形 | `LnC.squareType`（0=solid 1=sky 2=water 3=sea 4=deck） |
 | 目标说明界面 | `LevelObjectiveScreen.continue()` |
 | 收阳光 | `sun.collect()`（回退 `specialGoToUI()`） |
 | 植物能量 | `plant.food()` + `PlantFoodCount.plantFoodDec()` |
 | 棋盘 | `Square.getLnC(row, col)` |
 | 僵尸 | `Square.getLane(i).zombiePool()` |
-| 选卡开局 | `Cards.addCardByPlantTypeFromSeedbank()` + `levelController.letsRock()` |
+| 选卡开局 | `Cards.addCardByPlantTypeFromSeedbank()` / `Cards.spliceAllCards()` + `levelController.letsRock()` |
 | 波次/胜负 | `levelController.currentWave / waveManagerProps / gameWon / gameLost` |
+
+对外 API（MCP 通过 `window.PvzAI` 调用）：`snapshot` / `plant` / `shovel` / `plantFood` /
+`autoDeck` / `autoDeckWith(plants, replace)` / `startLevel` / `dismissObjective` /
+`execute(actions)` / `waitUntil(cond, timeoutMs)` / `terrain(lane, column)`。
 
 大模型每回合收到一份紧凑 JSON + 一行行战场摘要，输出：
 
@@ -114,8 +124,16 @@
 
 - `snapshot().phase = "objective"`：停在开局的目标说明界面，AI 会自动点“继续”，也可以手动调用 `PvzAI.dismissObjective()`。
 - `snapshot().tasks`：本关任务列表，例如
-  `[{ tip: "在 30 秒内击杀 20 个僵尸", count: "0/20", value: 0, total: 20, percent: 0, completed: false, failed: false }]`。
-- `snapshot().objective`：说明界面的标题与任务文本（`screenName` / `missions` / `active`）。
+  `[{ tip: "在 30 秒内击杀 20 个僵尸", count: "20/20", value: 20, total: 20, percent: 100,
+      mode: 6, modeName: "timed_kill", timeSemantics: "sliding_window",
+      windowActive: false, timeLeft: null, urgent: false, completed: true, failed: false }]`。
+- `timed_kill` 不是“整关倒计时”，而是**最近 30 秒内击杀 ≥ 20** 的滑动窗口：
+  每次击杀 30 秒后计数减 1。`timeLeft` 表示最老一次击杀还剩几秒过期，
+  `urgent` 在窗口快过期或进度 ≥75% 时为 true；内置 AI 会优先能量豆/一次性植物。
+- `snapshot().terrain`：`{ lanes, columns, map: ["LLLLLWWWW", ...], legend }`；
+  海盗港湾 17 实测：0–2 行第 5–8 列海面，3–4 行第 5–8 列木板。
+- `snapshot().blockedCells`：`[{ lane, column, terrain: "W", reason: "water" }]`，
+  含游戏地形与 15 秒学习缓存。
 - 任务文本会写进提示词第一屏（`本关任务（必须完成）：… 0/20`），任务进度变化也会触发重新决策。
 - 如果任务带 `plantCountLimit` 这类限制，本地策略会据此停止超量种植。
 

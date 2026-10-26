@@ -80,32 +80,42 @@ args:    F:\植物大战僵尸\PvZ-MCP\pvz-mcp-server.mjs
 
 ```text
 你现在操控 PvZ2。先调用 pvz_rules，然后每回合：
-pvz_state → 决策 → pvz_plant → pvz_state。
+pvz_state → 决策 → pvz_act（1–6 个动作）→ 需要时 pvz_wait_until。
 阳光/能量豆会自动收。不要猜植物/僵尸技能，需要时调用 pvz_knowledge 查询。
-每回合最多种 3 个；没事做就 pvz_wait 2-4 秒。
-先看 state.tasks（关卡任务），任务失败会直接判负：限时击杀就集中输出，限制植物数量就不要多铺。
-phase=objective 先 pvz_dismiss_objective；phase=preparing 先 pvz_choose_deck 再 pvz_start_level。
+先看 state.tasks（关卡任务）和 timeLeft/urgent；任务失败会直接判负。
+phase=objective 先 pvz_dismiss_objective；phase=preparing 先 pvz_choose_deck（可 replace:true）再 pvz_start_level。
 ```
 
 4. 进入关卡（选卡页也行）。Agent 会自己读状态、选卡、开局、种植。
 
 > 每关开局会有“关卡目标”说明界面（例如“在 30 秒内击杀 20 个僵尸”）。此时 `pvz_state` 返回 `phase: "objective"` 和 `objective.missions`，调用 `pvz_dismiss_objective` 关掉即可；`pvz_start_level` 也会自动处理。
 
+## v0.2.5 新增
+
+- **地形**：`state.terrain.map`（每行字符串：`L` 陆地 / `P` 木板 / `W` 水 / `S` 天空 / `?` 未知）与 `state.blockedCells`。水格不会再被盲目试种。
+- **结构化错误**：`pvz_plant` / `pvz_shovel` / `pvz_plant_food` 失败返回 `code`（`TERRAIN` / `COOLDOWN` / `SUN` / `OCCUPIED` / `LANE_LIMIT` / `LEVEL_LIMIT` …）。`COOLDOWN` 带 `retryAfter`。
+- **任务计时**：`tasks[].modeName`、`timeSemantics`、`windowActive`、`timeLeft`、`urgent`、`hint`。`timed_kill` 是“最近 N 秒内击杀”的滑动窗口。
+- **批量动作**：`pvz_act` 一次执行最多 6 个动作。
+- **条件等待**：`pvz_wait_until` 支持 `sun>=200`、`card_ready:repeater`、`zombie_in_lane:3`、`zombie_near:2`、`plantfood>=1`、`tasks_ready`、`phase:running`、`plants>=10`。
+- **换卡组**：`pvz_choose_deck({replace:true})` 清空游戏预填卡组后重新选，返回 `deck / applied / skipped / started`。
+
 ## 工具
 
 | 工具 | 作用 |
 | --- | --- |
-| `pvz_state` | 阳光/能量豆、卡槽费用与冷却、植物、僵尸、波次、**关卡任务（tasks）**，以及当前卡牌/僵尸的图鉴知识 |
+| `pvz_state` | 地形、阳光/能量豆、卡槽费用与冷却、植物、僵尸、波次、**关卡任务与倒计时（tasks）**，以及当前卡牌/僵尸的图鉴知识 |
 | `pvz_knowledge` | 查询某个植物/僵尸的真实图鉴（名称、短介绍、特殊能力、属性） |
-| `pvz_plant` | 种卡到指定 lane/column（原生流程：扣阳光、进冷却） |
+| `pvz_plant` | 种卡到指定 lane/column（原生流程：扣阳光、进冷却；失败带 code） |
+| `pvz_act` | 一次执行最多 6 个动作（plant / shovel / plant_food / wait / choose_deck / start_level / dismiss_objective） |
+| `pvz_wait_until` | 等到条件满足或超时（1–60 秒） |
 | `pvz_collect` | 立即收取所有掉落物（阳光/能量豆/金币） |
 | `pvz_plant_food` | 给指定格子的植物用能量豆 |
 | `pvz_shovel` | 铲除指定格子的植物；支持地刺/土豆雷/睡莲等 tile 植物，可清理重复或低血量植物 |
-| `pvz_choose_deck` | 选卡阶段选卡组；不传则自动选 |
+| `pvz_choose_deck` | 选卡阶段选卡组；`replace:true` 可清空游戏预填卡组 |
 | `pvz_start_level` | 开始战斗；停在关卡目标说明界面时会先自动关闭再点“一起摇滚吧” |
 | `pvz_dismiss_objective` | 关闭开局的关卡目标说明界面，返回本关任务文本 |
-| `pvz_wait` | 等待 0.2–15 秒 |
-| `pvz_rules` | 规则、坐标、策略（含关卡任务处理原则） |
+| `pvz_wait` | 等待 0.2–15 秒（优先用 `pvz_wait_until`） |
+| `pvz_rules` | 规则、坐标、地形、任务计时与策略 |
 
 ## 资源
 
