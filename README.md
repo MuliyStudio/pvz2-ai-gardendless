@@ -16,7 +16,7 @@
 
 从 [Releases](https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/latest) 下载：
 
-- `PvZAI-AI草坪指挥官-发布包.zip`：模组 + 启动器 + MCP Server + 安装说明（推荐）
+- `PvZAI-AI-Agent-Bundle.zip`：模组 + 启动器 + MCP Server + 安装说明（推荐）
 - `pvz-ai-agent.zip`：只有 GP-Next 模组，适合已经会装模组的人
 
 ## 快速开始（内置 DeepSeek 模式）
