@@ -96,7 +96,7 @@ pvz_state → 决策 → pvz_plant → pvz_state。
 | `pvz_plant` | 种卡到指定 lane/column（原生流程：扣阳光、进冷却） |
 | `pvz_collect` | 立即收取所有掉落物（阳光/能量豆/金币） |
 | `pvz_plant_food` | 给指定格子的植物用能量豆 |
-| `pvz_shovel` | 铲除指定格子的植物 |
+| `pvz_shovel` | 铲除指定格子的植物；支持地刺/土豆雷/睡莲等 tile 植物，可清理重复或低血量植物 |
 | `pvz_choose_deck` | 选卡阶段选卡组；不传则自动选 |
 | `pvz_start_level` | 选卡界面点“一起摇滚吧” |
 | `pvz_wait` | 等待 0.2–15 秒 |

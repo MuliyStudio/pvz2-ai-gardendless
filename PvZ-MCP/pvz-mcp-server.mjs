@@ -49,7 +49,8 @@ const GUIDE = `你是《植物大战僵尸2 花园无尽》的操控者。通过
 - 某行僵尸 column<=3 时优先补防御/输出；column<=1 紧急。
 - 只选择 ready=true 的卡；cd>0 或 affordable=false 不要用。
 - 每回合最多 3 个动作；没有值得做的就 pvz_wait。
-- 不要 shovel，除非明显挡路或血量极低且需要腾位。`;
+- 可以用 pvz_shovel 铲掉：同一行重复的坚果/弹簧豆、血量低于 30% 的危险行植物、明显低效需要腾位的植物。每次最多铲 1 个，铲完再种。
+- 如果某行已有 2 个坚果/弹簧豆/冰生菜，先用 pvz_shovel 铲掉多余的一个，再补输出。`;
 
 const TOOLS = [
   {
@@ -104,7 +105,7 @@ const TOOLS = [
   },
   {
     name: 'pvz_shovel',
-    description: '铲除指定格子的植物。慎用。',
+    description: '铲除指定格子的植物；支持地刺/土豆雷/睡莲等 tile 植物，可清理重复或低血量植物。',
     inputSchema: {
       type: 'object',
       properties: {

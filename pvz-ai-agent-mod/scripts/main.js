@@ -11,7 +11,7 @@
  * 注意：这是单机辅助工具，请勿用于联机或排行榜；游戏更新后内部字段可能变化。
  */
 
-const VERSION = '0.2.2';
+const VERSION = '0.2.3';
 const CFG_KEY = 'pvzai.agent.mod.cfg.v1';
 const HOST_ID = 'pvzai-mod-host';
 const LOG_LIMIT = 120;
@@ -128,8 +128,9 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2》的实时自动游玩代�
 4. 只选择 ready=true 的卡；cd>0 或 affordable=false 的卡不要用。
 5. 每个回合最多 3 个动作，按顺序执行；没有值得做的就输出 wait。
 6. 优先使用费用低、冷却好的卡；阳光快到上限时不必囤积。
-7. 不要使用 shovel，除非某格植物明显挡路或血量极低且需要腾位。
-8. 如果 phase=preparing，先 choose_deck（最多选满卡槽）再 start_level；如果已经自动选好卡，直接 start_level。`;
+7. 可以并且应该用 shovel：同一行重复坚果/弹簧豆、植物血量低于 30% 且本行危险、某格低效植物需要腾位。每次最多铲 1 个，铲完再种。
+8. 如果某行已有 2 个坚果/弹簧豆/冰生菜，先铲掉多余的一个，再补输出。
+9. 如果 phase=preparing，先 choose_deck（最多选满卡槽）再 start_level；如果已经自动选好卡，直接 start_level。`;
 
 const PLAY_TOOL = {
   type: 'function',
@@ -647,26 +648,19 @@ export default {
           for (let c = 0; c < cols; c++) {
             const cell = C.getLnC(r, c);
             if (!cell) continue;
-            const groups = [cell.plantInSquare, cell.vineInSquare, cell.tilePlantInSquare, cell.imitaterInSquare, [cell.floawerpot], [cell.lilypad]];
-            for (const group of groups) {
-              if (!Array.isArray(group)) continue;
-              for (const p of group) {
-                if (!p || seen.has(p)) continue;
-                seen.add(p);
-                let alive = true;
-                try { alive = p.isAlive ? p.isAlive() : true; } catch { alive = true; }
-                if (!alive) continue;
-                const rawType = p.Plant_Type || '';
-                const type = cleanCodename(rawType);
-                out.plants.push({
-                  lane: r, column: c,
-                  type,
-                  name: PLANT_CN[type] || type,
-                  hp: Math.round(p.health || 0),
-                  maxHp: Math.round(p.toughness || 0),
-                  foodable: !!p.foodable && !p.fooding,
-                });
-              }
+            for (const p of cellPlantList(cell)) {
+              if (!p || seen.has(p)) continue;
+              seen.add(p);
+              const rawType = p.Plant_Type || '';
+              const type = cleanCodename(rawType);
+              out.plants.push({
+                lane: r, column: c,
+                type,
+                name: PLANT_CN[type] || type,
+                hp: Math.round(p.health || 0),
+                maxHp: Math.round(p.toughness || 0),
+                foodable: !!p.foodable && !p.fooding,
+              });
             }
           }
         }
@@ -784,21 +778,35 @@ export default {
         .join(' ');
     }
 
+    function cellPlantList(cell) {
+      if (!cell) return [];
+      const list = [];
+      const groups = [
+        cell.plantInSquare,
+        cell.vineInSquare,
+        cell.tilePlantInSquare,
+        cell.imitaterInSquare,
+        cell.floawerpot ? [cell.floawerpot] : null,
+        cell.lilypad ? [cell.lilypad] : null,
+      ];
+      for (const g of groups) {
+        if (!Array.isArray(g)) continue;
+        for (const p of g) {
+          if (!p || list.includes(p)) continue;
+          let alive = true;
+          try { alive = p.isAlive ? p.isAlive() : true; } catch { alive = true; }
+          if (alive) list.push(p);
+        }
+      }
+      return list;
+    }
+
     function lanePlantList(C, lane) {
       const list = [];
       const cols = C.ColumnCount || 9;
       for (let c = 0; c < cols; c++) {
-        const cell = C.getLnC(lane, c);
-        if (!cell) continue;
-        const groups = [cell.plantInSquare, cell.vineInSquare, cell.tilePlantInSquare, cell.imitaterInSquare, [cell.floawerpot], [cell.lilypad]];
-        for (const g of groups) {
-          if (!Array.isArray(g)) continue;
-          for (const p of g) {
-            if (!p || list.includes(p)) continue;
-            let alive = true;
-            try { alive = p.isAlive ? p.isAlive() : true; } catch { alive = true; }
-            if (alive) list.push(p);
-          }
+        for (const p of cellPlantList(C.getLnC(lane, c))) {
+          if (!list.includes(p)) list.push(p);
         }
       }
       return list;
@@ -855,7 +863,8 @@ export default {
 
       const tags = (cf.PF && cf.PF.TAGS) || [];
       const canOverlap = tags.includes('allowOverlap') || tags.includes('vine') || tags.includes('floawerPot') || tags.includes('lilypad');
-      if (cell.hasP && cell.hasP() && !canOverlap) return { ok: false, reason: `格子 ${lane},${column} 已有植物` };
+      const cellPlants = cellPlantList(cell);
+      if (cellPlants.length && !canOverlap) return { ok: false, reason: `格子 ${lane},${column} 已有植物` };
 
       if (ui.index === cardIndex && ui.currentCF !== cf) ui.tryChangingIndex(-1);
       if (ui.index !== cardIndex) ui.tryChangingIndex(cardIndex);
@@ -885,9 +894,26 @@ export default {
       const C = ctxg.map.Square.constructor;
       const cell = C.getLnC(lane, column);
       if (!cell) return { ok: false, reason: '格子不存在' };
-      if (!(cell.hasP && cell.hasP())) return { ok: false, reason: '该格没有植物' };
-      cell.removePlant();
-      return { ok: true, detail: `铲除 ${lane},${column}` };
+      const plants = cellPlantList(cell);
+      if (!plants.length) return { ok: false, reason: `格子 ${lane},${column} 没有植物` };
+      const names = plants.map((p) => cleanCodename(p.Plant_Type || '') || '植物').join(',');
+      try {
+        cell.removePlant();
+      } catch (e) {
+        // 某些版本 removePlant 可能对 tile 植物异常，下面走逐株兜底。
+      }
+      let remaining = cellPlantList(cell);
+      if (remaining.length) {
+        for (const p of remaining) {
+          try { if (p.die) p.die(false); } catch { /* ignore */ }
+          try { if (p.node && p.node.destroy) p.node.destroy(); } catch { /* ignore */ }
+        }
+        remaining = cellPlantList(cell);
+      }
+      if (remaining.length) {
+        return { ok: false, reason: `铲除失败，仍剩：${remaining.map((p) => cleanCodename(p.Plant_Type || '')).join(',')}` };
+      }
+      return { ok: true, detail: `铲除 ${names} @ ${lane},${column}` };
     }
 
     function plantFood(lane, column) {
