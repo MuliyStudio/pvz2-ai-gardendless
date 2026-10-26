@@ -108,6 +108,22 @@ LLLLLPPPP
 - **损失追踪**：`recentLosses[]` 记录刚刚消失的植物（排除自己铲除和矿车移动）。
 - **健康检查**：`pvz_health` 返回模组/Server 版本、`compatible`、`missingTools`、关键能力。
 
+### v0.2.7 · 通用机制探测（其他地图）
+
+- **`snapshot().mechanics`**：进关时扫描场景组件，不按地图硬编码。
+  - `features`：`water / tide / rail / tomb / gold / endangered / slider / mold / dinosaur / portal / hazard / conveyor / vase / sky`
+  - `tide`：潮水线 `pos`、`moving`、水覆盖列数
+  - `dinosaurs[]`：`kind / lane / column / action`
+  - `portals[]`、`hazards[]`（气功洞、巫师羊）
+  - `tiles[]`：rail / tomb / mold / ice / vase / gold / endangered / slider
+  - `unmappedTiles[]`：发现但还不认识的地块类名
+- **不支持关卡**：传送带 / 砸罐 / 天空 / 保龄球会标 `supported:false`，种植返回 `UNSUPPORTED_LEVEL`。
+- **实测**：
+  - 巨浪沙滩 15：`water + tide`，`tide.pos=3`，濒危植物 5 个
+  - 黑暗时代 2：7 个墓碑
+  - 遗落古城 15：金瓷砖 + 濒危植物
+  - 侏罗纪 10：`stego/ptero/raptor` 三条恐龙
+
 
 详见 [PvZ-MCP/README.md](PvZ-MCP/README.md)。
 

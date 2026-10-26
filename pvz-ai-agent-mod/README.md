@@ -31,6 +31,8 @@
 - **v0.2.6 暂停识别**：`paused` / `ui`，动作失败返回 `PAUSED`；`resume()` 继续。
 - **v0.2.6 僵尸标签**：`zombies[].tags`（crush / jump_over / backline / flying / spawner / armored / lane_switch）。
 - **v0.2.6 损失追踪**：`recentLosses[]` 记录刚消失的植物。
+- **v0.2.7 通用机制探测**：`snapshot().mechanics`（features / tide / dinosaurs / portals / hazards / tiles / unmappedTiles）；不按地图硬编码，按场景组件类名识别。
+- **v0.2.7 不支持关卡**：传送带/砸罐/天空/保龄球标 `supported:false`，种植返回 `UNSUPPORTED_LEVEL`。
 - **原生种植**：走 `UIInGame.tryChangingIndex()` + `LnC.PlaceUIPlant()`，会正常扣阳光、进冷却、受关卡植物上限/地形限制。
 - **支持动作**：种植、铲除、喂植物能量、等待、选卡、关闭任务说明、开局。
 - **F8 热键**：随时开始/停止；按 F9 可打开 GP-Next 官方侧栏作为兜底。

@@ -11,7 +11,7 @@
  * 注意：这是单机辅助工具，请勿用于联机或排行榜；游戏更新后内部字段可能变化。
  */
 
-const VERSION = '0.2.6';
+const VERSION = '0.2.7';
 const CFG_KEY = 'pvzai.agent.mod.cfg.v1';
 const HOST_ID = 'pvzai-mod-host';
 const LOG_LIMIT = 120;
@@ -55,6 +55,9 @@ const ZOMBIE_TRAIT_RULES = [
   [/weaselhoarder/, ['spawner']],
   [/octopus/, ['disable']],
   [/fisherman/, ['pull']],
+  [/eighties_boombox|boombox/, ['support', 'lane_switch']],
+  [/dark_wizard/, ['disable', 'sheep']],
+  [/kongfu_chi|abbot_chi|monk_drink/, ['push']],
 ];
 
 function zombieTraits(type) {
@@ -291,6 +294,7 @@ export default {
     const shoveledAt = new Map(); // "lane:column" -> timestamp（自己铲掉的不算损失）
     let recentLosses = [];
     let cartMoveUntil = 0; // 矿车移动后 3 秒内不做损失对比（植物跟着车换格）
+    let lastMechanics = null;
 
 
     // GP-Next 可能在同源 iframe 中运行模组：优先把浮窗挂到游戏主页面。
@@ -1064,16 +1068,29 @@ export default {
 
     function readSpecialTiles(C, lanes, cols) {
       const out = [];
+      const seen = new Set();
+      const push = (lane, column, type, cls) => {
+        const key = `${lane}:${column}:${type}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ lane, column, type, class: cls || type });
+      };
       for (let r = 0; r < lanes; r++) {
         for (let c = 0; c < cols; c++) {
           let cell = null;
           try { cell = C.getLnC(r, c); } catch { cell = null; }
           if (!cell) continue;
-          if (cell.rail) out.push({ lane: r, column: c, type: 'rail', hasCart: !!cell.cart });
-          if (cell.haveTomb) out.push({ lane: r, column: c, type: 'tomb' });
-          if (cell.mold) out.push({ lane: r, column: c, type: 'mold' });
-          if (cell.vases && cell.vases.length) out.push({ lane: r, column: c, type: 'vase' });
-          if (cell.iceTile) out.push({ lane: r, column: c, type: 'ice' });
+          if (cell.rail) push(r, c, 'rail', 'railway');
+          if (cell.haveTomb) push(r, c, 'tomb', 'Tomb');
+          if (cell.mold) push(r, c, 'mold', 'moldSquare');
+          if (cell.vases && cell.vases.length) push(r, c, 'vase', 'Vase');
+          if (cell.iceTile) push(r, c, 'ice', 'iceTile');
+          for (const t of (cell.tilesInSquare || [])) {
+            const name = compNameOf(t);
+            for (const [re, type] of TILE_CLASS_TYPES) {
+              if (re.test(name)) { push(r, c, type, name); break; }
+            }
+          }
         }
       }
       return out;
@@ -1107,6 +1124,165 @@ export default {
         });
       }
       return out;
+    }
+
+    function compNameOf(c) {
+      return String((c && (c.__classname__ || (c.constructor && c.constructor.name))) || '');
+    }
+
+    const TILE_CLASS_TYPES = [
+      [/railway|^rail$/i, 'rail'],
+      [/goldTile/i, 'gold'],
+      [/endangeredTile/i, 'endangered'],
+      [/sliderTile/i, 'slider'],
+      [/moldSquare/i, 'mold'],
+      [/iceblock|iceTile/i, 'ice'],
+    ];
+
+    // 只挑安全、可序列化的字段，避免把整个 Cocos 对象塞进 state。
+    function compFacts(c) {
+      const out = { class: compNameOf(c) };
+      const keys = [
+        'lIndex', 'cIndex', 'row', 'column', 'lane', 'inLane',
+        'action', 'state', 'phase', 'type', 'kind', 'ID', 'name',
+        'pos', 'moving', 'waterLevel',
+        'Direction', 'LanesToAffect', 'Column', 'LifeSpan', 'TimeBeforeAbsorbing', 'SuppressesNextWave',
+        'World', 'TimeBeforeFirst', 'TimeBetween', 'Scale',
+        'hp', 'health', 'dead', 'active', 'countdown', 'cd', 'time',
+      ];
+      for (const holder of [c, c && c.objdataOwn, c && c.objdata]) {
+        if (!holder || typeof holder !== 'object') continue;
+        for (const k of keys) {
+          if (out[k] !== undefined) continue;
+          let v;
+          try { v = holder[k]; } catch { continue; }
+          if (v === null || ['number', 'string', 'boolean'].includes(typeof v)) out[k] = v;
+          else if (Array.isArray(v) && v.length && v.every((x) => ['number', 'string', 'boolean'].includes(typeof x))) out[k] = v.slice(0, 6);
+        }
+      }
+      if (!Number.isFinite(out.lane)) {
+        if (Number.isFinite(c && c.lIndex)) out.lane = c.lIndex;
+        else if (c && c.inLnC && Number.isFinite(c.inLnC.lIndex)) out.lane = c.inLnC.lIndex;
+      }
+      if (!Number.isFinite(out.column)) {
+        if (Number.isFinite(c && c.cIndex)) out.column = c.cIndex;
+        else if (c && c.inLnC && Number.isFinite(c.inLnC.cIndex)) out.column = c.inLnC.cIndex;
+      }
+      return out;
+    }
+
+    // 通用机制探测：不按地图写死，按场景组件类名识别。
+    function readMechanics(scene, C, lanes, cols, lvl) {
+      const comps = [];
+      (function walk(n) {
+        for (const c of n._components || []) comps.push(c);
+        for (const ch of n.children || []) walk(ch);
+      })(scene);
+
+      const byName = (re) => comps.filter((c) => re.test(compNameOf(c)));
+      const features = [];
+      const tiles = [];
+      const tileSeen = new Set();
+      const pushTile = (lane, column, type, cls) => {
+        const key = `${lane}:${column}:${type}`;
+        if (tileSeen.has(key)) return;
+        tileSeen.add(key);
+        tiles.push({ lane, column, type, class: cls || type });
+      };
+
+      let waterCells = 0, solidCells = 0, skyCells = 0, railCells = 0;
+      const unmapped = new Set();
+      for (let r = 0; r < lanes; r++) {
+        for (let c = 0; c < cols; c++) {
+          let cell = null;
+          try { cell = C.getLnC(r, c); } catch { cell = null; }
+          if (!cell) continue;
+          let st = null;
+          try { st = cell.squareType; } catch { /* ignore */ }
+          if (st === 0 || st === 4) solidCells++;
+          if (st === 1) skyCells++;
+          if (st === 2 || st === 3) waterCells++;
+          if (cell.rail) { railCells++; pushTile(r, c, 'rail', 'railway'); }
+          if (cell.haveTomb) pushTile(r, c, 'tomb', 'Tomb');
+          if (cell.mold) pushTile(r, c, 'mold', 'moldSquare');
+          if (cell.iceTile) pushTile(r, c, 'ice', 'iceTile');
+          if (cell.vases && cell.vases.length) pushTile(r, c, 'vase', 'Vase');
+          for (const t of (cell.tilesInSquare || [])) {
+            const name = compNameOf(t);
+            let hit = null;
+            for (const [re, type] of TILE_CLASS_TYPES) if (re.test(name)) { hit = type; break; }
+            if (hit) pushTile(r, c, hit, name);
+            else if (/Tile$/i.test(name) && !/^Tile$/i.test(name)) unmapped.add(name);
+          }
+        }
+      }
+      if (waterCells) features.push('water');
+      if (railCells) features.push('rail');
+      if (skyCells) features.push('sky');
+      for (const type of ['tomb', 'gold', 'endangered', 'slider', 'mold', 'ice', 'vase']) {
+        if (tiles.some((t) => t.type === type)) features.push(type);
+      }
+
+      let tide = null;
+      const tideComp = byName(/^Tide$/i)[0];
+      if (tideComp) {
+        tide = { pos: num(tideComp.pos), moving: !!tideComp.moving, waterColumns: num(tideComp.pos) !== null ? Math.max(0, cols - num(tideComp.pos)) : null };
+        features.push('tide');
+      }
+
+      const dinosaurs = byName(/(Ankylo|Ptero|Raptor|Stego|Tyranno)Dinosaur/i)
+        .map((c) => {
+          const f = compFacts(c);
+          f.kind = compNameOf(c).replace(/Dinosaur$/i, '').toLowerCase();
+          return f;
+        });
+      if (dinosaurs.length) features.push('dinosaur');
+
+      const portals = byName(/^Portal$/i).map(compFacts);
+      if (portals.length) features.push('portal');
+
+      const hazards = [];
+      for (const c of byName(/^ChiHole$/i)) {
+        const f = compFacts(c);
+        f.type = 'chi_hole';
+        hazards.push(f);
+      }
+      for (const c of byName(/DarkWizardSheep/i)) {
+        const f = compFacts(c);
+        f.type = 'sheep';
+        hazards.push(f);
+      }
+      if (hazards.length) features.push('hazard');
+
+      const conveyorComp = byName(/^Conveyor$/i)[0];
+      const conveyor = !!conveyorComp && (
+        (Array.isArray(conveyorComp.plantList) && conveyorComp.plantList.length > 0) ||
+        (Array.isArray(conveyorComp.dropDelayConditions) && conveyorComp.dropDelayConditions.length > 0) ||
+        (Array.isArray(conveyorComp.speedConditions) && conveyorComp.speedConditions.length > 0)
+      );
+      const vaseLevel = tiles.some((t) => t.type === 'vase');
+      const skyLevel = skyCells > 0 && solidCells === 0;
+      if (conveyor) features.push('conveyor');
+      if (vaseLevel) features.push('vase');
+
+      let supported = true, unsupportedReason = null;
+      const levelName = String((lvl && (lvl.levelNameString || lvl.levelName)) || '');
+      if (conveyor || /传送带|conveyor/i.test(levelName)) { supported = false; unsupportedReason = 'conveyor'; }
+      else if (vaseLevel || /砸罐|vase/i.test(levelName)) { supported = false; unsupportedReason = 'vase'; }
+      else if (skyLevel || /天空|sky/i.test(levelName)) { supported = false; unsupportedReason = 'sky'; }
+      else if (/保龄球|bowling/i.test(levelName)) { supported = false; unsupportedReason = 'bowling'; }
+
+      return {
+        supported,
+        unsupportedReason,
+        features: [...new Set(features)],
+        tide,
+        dinosaurs,
+        portals,
+        hazards,
+        tiles,
+        unmappedTiles: [...unmapped].slice(0, 12),
+      };
     }
 
     function snapshot() {
@@ -1166,6 +1342,7 @@ export default {
         carts: [],
         lanes: [],
         specialTiles: [],
+        mechanics: null,
         recentLosses: [],
         paused: !!(ui && ui.paused),
         ui: ui ? { paused: !!ui.paused, index: ui.index, indexLocked: !!ui.indexLocked } : null,
@@ -1274,6 +1451,10 @@ export default {
         try { out.carts = readCarts(C, lanes, cols); } catch { out.carts = []; }
         try { out.lanes = buildLanes(C, lanes, cols, out.plants, out.zombies, out.carts); } catch { out.lanes = []; }
         try { out.specialTiles = readSpecialTiles(C, lanes, cols); } catch { out.specialTiles = []; }
+        try {
+          out.mechanics = readMechanics(scene, C, lanes, cols, lvl);
+          lastMechanics = { ...out.mechanics, at: Date.now() };
+        } catch { out.mechanics = null; }
       }
 
       if (droppings && Array.isArray(droppings.sunPool)) {
@@ -1426,6 +1607,12 @@ export default {
       const { map, scene } = ctxg;
       const ui = map.UIInGame, cards = map.Cards, square = map.Square;
       if (!ui || !cards || !square) return fail('NO_SCENE', {}, '当前场景没有种植物界面');
+      if (lastMechanics && Date.now() - (lastMechanics.at || 0) < 4000 && lastMechanics.supported === false) {
+        return fail('UNSUPPORTED_LEVEL', {
+          unsupportedReason: lastMechanics.unsupportedReason,
+          features: lastMechanics.features,
+        });
+      }
       if (ui.paused) return fail('PAUSED', { retryable: true });
       if (ui.indexLocked) return fail('UI_LOCKED', { retryable: true });
 
@@ -2048,6 +2235,7 @@ export default {
         blockedCells: s.blockedCells || [],
         carts: s.carts || [],
         lanes: s.lanes || [],
+        mechanics: s.mechanics || null,
         recentLosses: s.recentLosses || [],
         paused: !!s.paused,
       };
@@ -2085,6 +2273,22 @@ export default {
         const list = s.recentLosses.filter((l) => now - l.at < 20000).slice(-4)
           .map((l) => `第${l.lane + 1}排c${l.column} ${PLANT_CN[l.type] || l.type}`);
         if (list.length) lines.push('最近损失：' + list.join('；'));
+      }
+      if (s.mechanics) {
+        const m = s.mechanics;
+        lines.push(`地图机制：${(m.features || []).join(',') || '无'}｜supported=${m.supported}${m.unsupportedReason ? `（${m.unsupportedReason}）` : ''}`);
+        if (m.tide) lines.push(`潮汐：水位 pos=${m.tide.pos ?? '?'}，水覆盖约 ${m.tide.waterColumns ?? '?'} 列${m.tide.moving ? '，正在移动' : ''}`);
+        if (m.dinosaurs && m.dinosaurs.length) {
+          lines.push('恐龙：' + m.dinosaurs.map((d) => `${d.kind || d.class}@第${Number.isFinite(d.lane) ? d.lane + 1 : '?'}排${d.action ? '/' + d.action : ''}${d.state ? '/' + d.state : ''}`).join('；'));
+        }
+        if (m.portals && m.portals.length) {
+          lines.push('传送门：' + m.portals.map((p) => `第${Number.isFinite(p.lane) ? p.lane + 1 : '?'}排c${p.column ?? '?'}${p.World ? '/' + p.World : ''}`).join('；'));
+        }
+        if (m.hazards && m.hazards.length) {
+          lines.push('机制危险：' + m.hazards.map((h) => `${h.type}${Number.isFinite(h.lane) ? '@第' + (h.lane + 1) + '排' : ''}${h.Column !== undefined ? ' c' + h.Column : ''}${h.Direction !== undefined ? ' 方向' + h.Direction : ''}`).join('；'));
+        }
+        if (m.unmappedTiles && m.unmappedTiles.length) lines.push('未识别地块：' + m.unmappedTiles.join(','));
+        if (m.supported === false) lines.push('⚠️ 该关卡类型不在支持范围：种植会返回 UNSUPPORTED_LEVEL，不要继续尝试。');
       }
       lines.push(`阳光：${s.sun}  能量豆：${s.plantFood ?? 0}  地面掉落：${s.suns.length}`);
       if (run && run.lastResults && run.lastResults.length) {

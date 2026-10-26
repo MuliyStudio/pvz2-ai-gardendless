@@ -17,7 +17,7 @@
 import readline from 'node:readline';
 
 const PORT = Number(process.env.PVZ_CDP_PORT || 9222);
-const VERSION = '0.2.6';
+const VERSION = '0.2.7';
 const log = (...args) => { try { console.error('[pvz-mcp]', ...args); } catch { /* ignore */ } };
 
 let ws = null;
@@ -65,6 +65,13 @@ phase=preparing：选卡（可 replace=true 换掉游戏预填卡组），然后
 
 暂停：
 - state.paused=true 时种植/铲除/能量豆都会被游戏忽略；先 pvz_resume。
+
+其他地图机制（state.mechanics）：
+- features 会列出 tide / water / rail / dinosaur / portal / hazard / conveyor / vase / sky 等。
+- tide：潮水线 pos，水覆盖 pos 右侧的列；结合 terrain 判断哪些格需要睡莲。
+- dinosaurs：kind / lane / action，提前在对应行补火力。
+- portals：传送门位置与世界；specialTiles 里还有 gold / endangered / slider / tomb / mold 等。
+- supported=false 表示该关卡类型（传送带/砸罐/天空/保龄球）不在支持范围，不要继续种植。
 
 关卡任务与计时（state.tasks）：
 - tasks[].tip 是任务文本，count 形如 "0/20" 或 "剩余 1"，completed/failed 表示状态，modeName/semantics 是可读类型。
@@ -509,6 +516,7 @@ async function healthValue() {
         terrain: typeof P.terrain === 'function',
         carts: Array.isArray(s && s.carts),
         lanes: Array.isArray(s && s.lanes),
+        mechanics: !!(s && s.mechanics),
         taskSemantics: !(s && s.tasks && s.tasks.length) || s.tasks.every((t) => !!t.semantics),
         pausedFlag: typeof (s && s.paused) === 'boolean',
         execute: typeof P.execute === 'function',

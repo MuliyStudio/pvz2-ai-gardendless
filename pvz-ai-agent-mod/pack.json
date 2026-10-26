@@ -1,7 +1,7 @@
 {
   "uuid": "pvzai.agent",
   "name": "AI 草坪指挥官",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "author": "pvz-ai-agent",
   "description": "读取植物 / 僵尸 / 关卡 / 阳光 / 卡槽状态，交给大模型决策并自动游玩。支持浮窗填 Key、开始/停止、自动收阳光、自动选卡、自动种植。适用于 PvZ2 Gardendless 0.16.x + GP-Next 1.5.x（单机）。",
   "packFormatVersion": 1,

@@ -110,6 +110,15 @@ phase=objective 先 pvz_dismiss_objective；phase=preparing 先 pvz_choose_deck�
 - **健康检查**：`pvz_health`。
 - **条件等待**：新增 `cart_ready:<id>`。
 
+## v0.2.7 新增
+
+- **通用机制探测**：`state.mechanics`：
+  - `features`（water/tide/rail/tomb/gold/endangered/slider/dinosaur/portal/hazard/conveyor/vase/sky）
+  - `tide`（pos/moving）、`dinosaurs[]`（kind/lane/action）、`portals[]`、`hazards[]`
+  - `tiles[]`、`unmappedTiles[]`
+- **不支持关卡**：传送带/砸罐/天空/保龄球 → `supported:false`，种植返回 `UNSUPPORTED_LEVEL`。
+- **实测**：海滩 15（潮汐 pos=3）、黑暗 2（7 墓碑）、古城 15（金瓷砖+濒危）、侏罗纪 10（stego/ptero/raptor）。
+
 ## 工具
 
 | 工具 | 作用 |
