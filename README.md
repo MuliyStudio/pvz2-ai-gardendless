@@ -55,16 +55,27 @@ pvz_state → 决策 → pvz_plant / pvz_plant_food / pvz_shovel → pvz_state
 
 | 工具 | 作用 |
 | --- | --- |
-| `pvz_state` | 阳光/能量豆、卡槽费用冷却、植物、僵尸、波次 + 当前卡牌/僵尸真实图鉴 |
+| `pvz_state` | 阳光/能量豆、卡槽费用冷却、植物、僵尸、波次、**关卡任务** + 当前卡牌/僵尸真实图鉴 |
 | `pvz_knowledge` | 查询任意植物/僵尸的图鉴机制 |
 | `pvz_plant` | 种卡（原生扣阳光、冷却、每行上限） |
 | `pvz_collect` | 立即收取掉落物 |
 | `pvz_plant_food` | 使用能量豆 |
 | `pvz_shovel` | 铲除植物 |
 | `pvz_choose_deck` | 选卡 |
-| `pvz_start_level` | 开始战斗 |
+| `pvz_start_level` | 开始战斗（自动关闭关卡目标说明） |
+| `pvz_dismiss_objective` | 关闭开局的关卡目标说明，返回本关任务 |
 | `pvz_wait` | 等待 |
 | `pvz_rules` | 规则与策略 |
+
+### 关卡任务
+
+每关都有任务，例如 `在 30 秒内击杀 20 个僵尸`。`pvz_state` 的 `state.tasks` 会给出：
+
+```json
+{ "tip": "在 30 秒内击杀 20 个僵尸", "count": "0/20", "value": 0, "total": 20, "percent": 0, "completed": false, "failed": false }
+```
+
+任务进度会随战局更新，失败通常直接判负。内置 AI 会把任务写进提示词第一屏并围绕任务打；MCP 模式下由 Agent 自己按 `tasks` 决策。
 
 详见 [PvZ-MCP/README.md](PvZ-MCP/README.md)。
 

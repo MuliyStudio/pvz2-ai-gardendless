@@ -11,7 +11,7 @@
  * 注意：这是单机辅助工具，请勿用于联机或排行榜；游戏更新后内部字段可能变化。
  */
 
-const VERSION = '0.2.3';
+const VERSION = '0.2.4';
 const CFG_KEY = 'pvzai.agent.mod.cfg.v1';
 const HOST_ID = 'pvzai-mod-host';
 const LOG_LIMIT = 120;
@@ -107,6 +107,7 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2》的实时自动游玩代�
 - {"type":"wait"}
 - {"type":"choose_deck","plants":["sunflower","peashooter"]}  仅 phase=preparing
 - {"type":"start_level"}  仅 phase=preparing
+- {"type":"dismiss_objective"}  仅 phase=objective（本关任务弹窗，点“继续”）
 
 游戏规则：
 - 掉落的阳光、能量豆、金币会自动收取，不需要你操作。
@@ -130,7 +131,9 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2》的实时自动游玩代�
 6. 优先使用费用低、冷却好的卡；阳光快到上限时不必囤积。
 7. 可以并且应该用 shovel：同一行重复坚果/弹簧豆、植物血量低于 30% 且本行危险、某格低效植物需要腾位。每次最多铲 1 个，铲完再种。
 8. 如果某行已有 2 个坚果/弹簧豆/冰生菜，先铲掉多余的一个，再补输出。
-9. 如果 phase=preparing，先 choose_deck（最多选满卡槽）再 start_level；如果已经自动选好卡，直接 start_level。`;
+9. 如果 phase=objective，先输出 dismiss_objective，不要做别的。
+10. 如果 phase=preparing，先 choose_deck（最多选满卡槽）再 start_level；如果已经自动选好卡，直接 start_level。
+11. 关卡任务（tasks）是本关必须完成的目标，例如“在 30 秒内击杀 20 个僵尸”。每回合都先看 tasks：未完成任务优先，围绕它调整种植和能量豆——限时击杀就集中输出/地刺/能量豆，限制植物数量就不要多铺，限制阳光花费就先便宜卡。任务失败通常直接判负，宁可少种也要保证任务完成。`;
 
 const PLAY_TOOL = {
   type: 'function',
@@ -147,7 +150,7 @@ const PLAY_TOOL = {
           items: {
             type: 'object',
             properties: {
-              type: { type: 'string', enum: ['plant', 'shovel', 'plant_food', 'wait', 'choose_deck', 'start_level'] },
+              type: { type: 'string', enum: ['plant', 'shovel', 'plant_food', 'wait', 'choose_deck', 'start_level', 'dismiss_objective'] },
               card: { type: 'integer', description: '卡槽下标（plant 用）' },
               lane: { type: 'integer', description: '0-4 行' },
               column: { type: 'integer', description: '0-8 列' },
@@ -567,6 +570,121 @@ export default {
       return { cc, scene, map };
     }
 
+    function findCompByClass(scene, className) {
+      if (!scene) return null;
+      let hit = null;
+      const walk = (n) => {
+        if (hit) return;
+        for (const c of n._components || []) {
+          const k = c && (c.__classname__ || (c.constructor && c.constructor.name));
+          if (k === className) { hit = c; return; }
+        }
+        for (const ch of n.children || []) { walk(ch); if (hit) return; }
+      };
+      walk(scene);
+      return hit;
+    }
+
+    function findNodeByName(root, name) {
+      if (!root) return null;
+      if (root.name === name) return root;
+      for (const ch of root.children || []) {
+        const hit = findNodeByName(ch, name);
+        if (hit) return hit;
+      }
+      return null;
+    }
+
+    const TASK_LIMIT_KEYS = ['plantCountLimit', 'plantLoseLimit', 'sunCostLimit', 'sunProduceRequest', 'sunCostCountDownLimit', 'zombieKillCount'];
+
+    // 关卡任务：LevelTaskCount（每关开局后常驻在 UIInGameUpper/LevelTaskSlots 下）
+    function readTasks(scene) {
+      const tasks = [];
+      if (!scene) return tasks;
+      const walk = (n) => {
+        for (const c of n._components || []) {
+          const cls = c && (c.__classname__ || (c.constructor && c.constructor.name));
+          if (cls !== 'LevelTaskCount') continue;
+          const tip = typeof c.tip === 'string' ? c.tip : '';
+          const count = c.count && typeof c.count.string === 'string' ? c.count.string : '';
+          let value = null;
+          let total = null;
+          if (count && count.indexOf('/') >= 0) {
+            const parts = count.split('/');
+            value = Number(parts[0]);
+            total = Number(parts[1]);
+            if (!Number.isFinite(value)) value = null;
+            if (!Number.isFinite(total)) total = null;
+          }
+          const limits = {};
+          for (const k of TASK_LIMIT_KEYS) {
+            const v = c[k];
+            if (typeof v === 'number' && v !== 0) limits[k] = v;
+          }
+          let detail;
+          try {
+            if (c.objdata && typeof c.objdata === 'object') {
+              detail = {};
+              let n2 = 0;
+              for (const k of Object.keys(c.objdata)) {
+                const v = c.objdata[k];
+                if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') detail[k] = v;
+                if (++n2 >= 6) break;
+              }
+            }
+          } catch { detail = undefined; }
+          tasks.push({
+            tip,
+            count,
+            value,
+            total,
+            percent: value !== null && total ? Math.round((value / total) * 100) : null,
+            mode: typeof c.mode === 'number' ? c.mode : null,
+            completed: !!c.completed,
+            failed: !!c.failed,
+            limits: Object.keys(limits).length ? limits : undefined,
+            detail,
+          });
+        }
+        for (const ch of n.children || []) walk(ch);
+      };
+      walk(scene);
+      return tasks;
+    }
+
+    // 开局的目标说明弹窗（LevelObjectiveScreen），必须先点“继续”才能进选卡
+    function readObjective(scene) {
+      const obj = findCompByClass(scene, 'LevelObjectiveScreen');
+      if (!obj) return null;
+      const node = obj.node || null;
+      const screenName = obj.screenName && typeof obj.screenName.string === 'string' ? obj.screenName.string : '';
+      const missions = [];
+      const push = (t) => {
+        const s = String(t || '').trim();
+        if (!s || s.length < 3) return;
+        if (s === screenName) return;
+        if (/^(继续|开始|开始游戏|确定|下一步|返回|取消)$/.test(s)) return;
+        if (/^(关卡任务|任务|任务目标|目标|本关任务|任务说明)$/.test(s)) return;
+        if (missions.indexOf(s) < 0) missions.push(s);
+      };
+      if (obj.mission0 && typeof obj.mission0.string === 'string') push(obj.mission0.string);
+      const walkLabels = (n) => {
+        for (const c of n._components || []) {
+          const cls = c && (c.__classname__ || (c.constructor && c.constructor.name));
+          if (cls === 'cc.Label' && typeof c.string === 'string') push(c.string);
+        }
+        for (const ch of n.children || []) walkLabels(ch);
+      };
+      if (node) walkLabels(node);
+      const active = !!node && node.activeInHierarchy !== false && node.active !== false && !obj.faded;
+      return {
+        screenName,
+        missions,
+        active,
+        canContinue: typeof obj.continue === 'function',
+      };
+    }
+
     function snapshot() {
       const ctxg = findComps();
       if (!ctxg) return { ok: false, reason: '尚未进入游戏场景' };
@@ -590,6 +708,10 @@ export default {
         else phase = 'running';
       }
 
+      const tasks = readTasks(scene);
+      const objective = readObjective(scene);
+      if (phase === 'preparing' && objective && objective.active) phase = 'objective';
+
       const out = {
         ok: true,
         scene: sceneName,
@@ -606,6 +728,8 @@ export default {
           rocked: !!(lvl && lvl.letsRocked),
         },
         plantFood: map.PlantFoodCount ? map.PlantFoodCount.plantFoodNum : null,
+        tasks,
+        objective,
         cards: [],
         plants: [],
         zombies: [],
@@ -1035,6 +1159,36 @@ export default {
       return tryLetsRock(lvl, cards);
     }
 
+    function dismissObjective() {
+      const ctxg = findComps();
+      if (!ctxg || !ctxg.scene) return { ok: false, reason: '不在关卡内' };
+      const info = readObjective(ctxg.scene);
+      if (!info) return { ok: false, reason: '当前没有关卡目标界面' };
+      const obj = findCompByClass(ctxg.scene, 'LevelObjectiveScreen');
+      let called = false;
+      if (obj && typeof obj.continue === 'function') {
+        try { obj.continue(); called = true; } catch { called = false; }
+      }
+      if (!called && obj && obj.node) {
+        const btnNode = findNodeByName(obj.node, 'ContinueButton');
+        if (btnNode) {
+          try { btnNode.emit('click'); called = true; } catch { /* ignore */ }
+        }
+      }
+      if (!called) return { ok: false, reason: '找不到“继续”按钮' };
+      return { ok: true, detail: `关闭关卡目标说明（${info.screenName || '本关任务'}）`, tasks: info.missions };
+    }
+
+    function taskSummary(s) {
+      const list = (s && s.tasks) || [];
+      if (!list.length) return '';
+      return list.map((t) => {
+        const name = t.tip || '任务';
+        const state = t.completed ? '已完成' : (t.failed ? '失败' : (t.count || ''));
+        return `${name}${state ? '（' + state + '）' : ''}`;
+      }).join('；');
+    }
+
     // ───────────────────────── 决策 ─────────────────────────
 
     function decisionKey(s) {
@@ -1045,7 +1199,8 @@ export default {
       const plants = s.plants
         .map((p) => `${p.lane}:${p.column}:${p.type}:${Math.ceil((p.hp || 0) / 150)}`)
         .sort().join('|');
-      return [s.phase, s.level.wave, ready, zombies, plants].join('#');
+      const tasks = (s.tasks || []).map((t) => `${t.tip}:${t.count}:${t.completed ? 1 : 0}`).join('|');
+      return [s.phase, s.level.wave, ready, zombies, plants, tasks].join('#');
     }
 
     function localBrain(s) {
@@ -1056,6 +1211,12 @@ export default {
         const k = `${lane}:${col}`;
         return !occupied.has(k) && !((blocked.get(k) || 0) > Date.now());
       };
+      for (const t of s.tasks || []) {
+        const limit = t.limits && t.limits.plantCountLimit;
+        if (limit > 0 && s.plants.length >= limit) {
+          return { thought: '任务限制植物数量，停止种植', actions: [{ type: 'wait' }] };
+        }
+      }
       const sunMakers = s.plants.filter((p) => /sunflower|sunshroom|twinsunflower/i.test(p.type)).length;
       const sunCard = ready.find((c) => /sunflower|sunshroom|twinsunflower|primalsunflower/i.test(c.type));
       const shooters = ready.filter((c) => /pea|shot|pult|melon|cabbage|kernel|bloomerang|reed|starfruit|fume|laser|spike|sniper/i.test(c.type));
@@ -1191,6 +1352,7 @@ export default {
       const compact = {
         phase: s.phase,
         level: s.level,
+        tasks: s.tasks || [],
         sun: s.sun,
         plantFood: s.plantFood,
         cards: s.cards.map((c) => ({ i: c.index, type: c.type, name: c.name, cost: c.cost, cd: c.cd, ready: c.ready, affordable: c.affordable })),
@@ -1209,6 +1371,11 @@ export default {
 
       const lines = [];
       lines.push(`关卡：${s.level.name || '未知'}  阶段：${phaseText(s.phase)}  波次：${s.level.wave}/${s.level.waves || '?'}  下一波：${s.level.nextWaveIn ?? '?'}s`);
+      if (s.tasks && s.tasks.length) {
+        lines.push('本关任务（必须完成）：' + s.tasks.map((t) => `${t.tip}${t.count ? ' ' + t.count : ''}${t.completed ? ' [已完成]' : (t.failed ? ' [已失败]' : '')}`).join('；'));
+      } else if (s.objective && s.objective.missions && s.objective.missions.length) {
+        lines.push('本关任务（目标说明界面）：' + s.objective.missions.join('；'));
+      }
       lines.push(`阳光：${s.sun}  能量豆：${s.plantFood ?? 0}  地面掉落：${s.suns.length}`);
       if (run && run.lastResults && run.lastResults.length) {
         lines.push('上一回合结果：' + run.lastResults.join('；'));
@@ -1543,6 +1710,7 @@ export default {
             case 'collect_sun': r = collectSuns(); break;
             case 'choose_deck': r = autoDeckWith(a.plants); break;
             case 'start_level': r = startLevel(); break;
+            case 'dismiss_objective': r = dismissObjective(); break;
             case 'wait': r = { ok: true, detail: '等待' }; break;
             default: r = { ok: false, reason: '未知动作 ' + a.type };
           }
@@ -1622,6 +1790,21 @@ export default {
           return;
         }
 
+        const taskLine = taskSummary(s);
+        if (taskLine && taskLine !== run.lastTaskSummary) {
+          run.lastTaskSummary = taskLine;
+          mlog('本关任务：' + taskLine);
+        }
+
+        if (s.phase === 'objective') {
+          stage = 'objective';
+          const d = dismissObjective();
+          if (d.ok) mlog(d.detail, 'ok');
+          else if (d.reason !== run.lastPrepReason) { mlog('关卡目标界面：' + d.reason, 'warn'); run.lastPrepReason = d.reason; }
+          schedule(1000);
+          return;
+        }
+
         if (s.phase === 'preparing') {
           stage = 'prep';
           const ctxg = findComps();
@@ -1694,13 +1877,15 @@ export default {
     // ───────────────────────── 状态 / 连接测试 ─────────────────────────
 
     function phaseText(phase) {
-      return ({ menu: '主菜单', worldmap: '世界地图', loading: '加载中', preparing: '选卡/准备', running: '战斗中', won: '已胜利', lost: '已失败', other: '其他场景' })[phase] || phase;
+      return ({ menu: '主菜单', worldmap: '世界地图', loading: '加载中', objective: '关卡任务说明', preparing: '选卡/准备', running: '战斗中', won: '已胜利', lost: '已失败', other: '其他场景' })[phase] || phase;
     }
 
     function statusLine() {
       const s = safeSnapshot();
       if (!s.ok) return '待机 · ' + (s.reason || '等待游戏');
       const base = `${s.level.name || s.scene || '未知'} · ${phaseText(s.phase)} · 阳光${s.sun ?? '—'} · 植物${s.plants.length} · 僵尸${s.zombies.length}`;
+      const task = taskSummary(s);
+      if (task) return `${base} · 任务：${task}`;
       if (run && run.active) return `运行中 · ${base} · 回合${run.turns} · tokens${run.tokens}`;
       return '待机 · ' + base;
     }
@@ -1716,17 +1901,21 @@ export default {
       }
       if (run && run.active) {
         const danger = s.zombies.filter((z) => z.column <= 3).length;
+        const task = taskSummary(s);
         el.status.innerHTML =
           `<b>${escapeHtml(s.level.name || s.scene || '未知关卡')}</b> · ${phaseText(s.phase)}<br>` +
           `阳光 <b>${s.sun ?? '—'}</b> · 能量豆 <b>${s.plantFood ?? 0}</b> · 波次 <b>${s.level.wave}/${s.level.waves || '?'}</b> · 植物 <b>${s.plants.length}</b> · 僵尸 <b>${s.zombies.length}</b>` +
           (danger ? ` · <span style="color:#ff9b9b">近场 ${danger}</span>` : '') +
+          (task ? `<br><span class="hint">任务：${escapeHtml(task)}</span>` : '') +
           `<br><span class="hint">回合 ${run.turns} · tokens ${run.tokens}</span>`;
         el.pill.classList.remove('idle');
         el.pillText.textContent = `AI ${s.sun ?? '—'}☀ ⚡${s.plantFood ?? 0} · ${s.level.wave}/${s.level.waves || '?'}波`;
       } else {
+        const task = taskSummary(s);
         el.status.innerHTML =
           `待机 · <b>${escapeHtml(s.level.name || s.scene || '未知场景')}</b> · ${phaseText(s.phase)}<br>` +
-          `阳光 <b>${s.sun ?? '—'}</b> · 能量豆 <b>${s.plantFood ?? 0}</b> · 植物 <b>${s.plants.length}</b> · 僵尸 <b>${s.zombies.length}</b>`;
+          `阳光 <b>${s.sun ?? '—'}</b> · 能量豆 <b>${s.plantFood ?? 0}</b> · 植物 <b>${s.plants.length}</b> · 僵尸 <b>${s.zombies.length}</b>` +
+          (task ? `<br><span class="hint">任务：${escapeHtml(task)}</span>` : '');
         el.pill.classList.add('idle');
         el.pillText.textContent = 'AI 待机（F8）';
       }
@@ -1906,7 +2095,7 @@ export default {
         version: VERSION,
         platform: platformVersion,
         snapshot: safeSnapshot,
-        collectSuns, collectPickups, plant, shovel, plantFood, autoDeck, autoDeckWith, startLevel, start, stop,
+        collectSuns, collectPickups, plant, shovel, plantFood, autoDeck, autoDeckWith, startLevel, dismissObjective, start, stop,
         knowledge: { plant: plantKb, zombie: zombieKb },
         normalizeDecision,
         testDecision: async (s) => {
@@ -1915,6 +2104,7 @@ export default {
           try { return await llmDecide(s || safeSnapshot()); } finally { run = prev; }
         },
         rules: SYSTEM_PROMPT,
+        prompt: (s) => stateForPrompt(s || safeSnapshot()),
         get config() { return cfg; },
         setLocalBrain(v) { cfg.localBrain = !!v; if (el.local) el.local.checked = !!v; saveCfg(); },
         log: mlog,

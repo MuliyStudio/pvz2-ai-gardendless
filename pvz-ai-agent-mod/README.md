@@ -19,8 +19,9 @@
 - **自动选卡开局**：在选卡页自动选一套卡并点“一起摇滚吧”。
 - **每行阵容约束**：同一行最多 1 个坚果墙、1 个弹簧豆、1 个冰冻生菜、2 个阳光生产者、4 个射手、2 个地刺；模型乱种会被代码拒绝，并在提示词里看到“该行已有坚果，禁止再种”。
 - **铲子**：支持普通植物和地刺/土豆雷/睡莲等 tile 植物；可以铲掉重复坚果、低血量植物或低效植物，腾位种更强的卡。
+- **关卡任务识别**：读取每关任务（如“在 30 秒内击杀 20 个僵尸”），包括当前进度 `0/20`、完成/失败状态；任务会进入提示词，AI 围绕任务调整打法；开局的“关卡目标”说明界面会自动点“继续”。
 - **原生种植**：走 `UIInGame.tryChangingIndex()` + `LnC.PlaceUIPlant()`，会正常扣阳光、进冷却、受关卡植物上限/地形限制。
-- **支持动作**：种植、铲除、喂植物能量、等待、选卡、开局。
+- **支持动作**：种植、铲除、喂植物能量、等待、选卡、关闭任务说明、开局。
 - **F8 热键**：随时开始/停止；按 F9 可打开 GP-Next 官方侧栏作为兜底。
 
 ## 适用版本
@@ -87,7 +88,9 @@
 | 阳光 | `SunCount.CurrentValue` |
 | 卡槽/费用/冷却 | `Cards.CFs`、`Cards.cardsUIUpper[i].CD` |
 | 种植 | `UIInGame.tryChangingIndex()` + `LnC.PlaceUIPlant()` |
-| 铲除 | `LnC.removePlant()` |
+| 铲除 | `LnC.removePlant()`（遍历 plantInSquare / tilePlantInSquare / vineInSquare 等所有容器） |
+| 关卡任务 | `LevelTaskCount`（`tip` / `count.string` / `completed` / `failed` / `objdata`） |
+| 目标说明界面 | `LevelObjectiveScreen.continue()` |
 | 收阳光 | `sun.collect()`（回退 `specialGoToUI()`） |
 | 植物能量 | `plant.food()` + `PlantFoodCount.plantFoodDec()` |
 | 棋盘 | `Square.getLnC(row, col)` |
@@ -104,6 +107,17 @@
 ```
 
 模组会校验动作，再调用游戏原生方法执行。执行失败会写日志并自动换格/等待，不会无限重试同一格。
+
+## 关卡任务
+
+每关开局的“关卡目标”说明界面和进场后的任务条都会被读取：
+
+- `snapshot().phase = "objective"`：停在开局的目标说明界面，AI 会自动点“继续”，也可以手动调用 `PvzAI.dismissObjective()`。
+- `snapshot().tasks`：本关任务列表，例如
+  `[{ tip: "在 30 秒内击杀 20 个僵尸", count: "0/20", value: 0, total: 20, percent: 0, completed: false, failed: false }]`。
+- `snapshot().objective`：说明界面的标题与任务文本（`screenName` / `missions` / `active`）。
+- 任务文本会写进提示词第一屏（`本关任务（必须完成）：… 0/20`），任务进度变化也会触发重新决策。
+- 如果任务带 `plantCountLimit` 这类限制，本地策略会据此停止超量种植。
 
 ## 限制
 

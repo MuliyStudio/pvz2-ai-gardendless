@@ -38,10 +38,13 @@ const GUIDE = `你是《植物大战僵尸2 花园无尽》的操控者。通过
 - 能量豆会自动收集；需要时用 pvz_plant_food 给高输出植物释放大招。
 
 推荐循环：
-1. pvz_state（看阳光、卡槽、植物、僵尸、波次）
-2. 决策：补经济/输出/防御/一次性救场
+1. pvz_state（看关卡任务、阳光、卡槽、植物、僵尸、波次）
+2. 决策：先满足关卡任务，再补经济/输出/防御/一次性救场
 3. pvz_plant / pvz_plant_food / pvz_shovel
 4. 再 pvz_state 验证结果
+
+phase=objective：停在“关卡目标”说明界面，先 pvz_dismiss_objective。
+phase=preparing：选卡，然后 pvz_start_level（它会自动关闭目标说明并开局）。
 
 策略：
 - 前期优先 2-3 个阳光生产者（column 0-2）。
@@ -50,12 +53,17 @@ const GUIDE = `你是《植物大战僵尸2 花园无尽》的操控者。通过
 - 只选择 ready=true 的卡；cd>0 或 affordable=false 不要用。
 - 每回合最多 3 个动作；没有值得做的就 pvz_wait。
 - 可以用 pvz_shovel 铲掉：同一行重复的坚果/弹簧豆、血量低于 30% 的危险行植物、明显低效需要腾位的植物。每次最多铲 1 个，铲完再种。
-- 如果某行已有 2 个坚果/弹簧豆/冰生菜，先用 pvz_shovel 铲掉多余的一个，再补输出。`;
+- 如果某行已有 2 个坚果/弹簧豆/冰生菜，先用 pvz_shovel 铲掉多余的一个，再补输出。
+
+关卡任务（state.tasks）：
+- 每关开局都会有任务，例如“在 30 秒内击杀 20 个僵尸”。state.tasks[].tip 是任务文本，count 形如 "0/20"，completed/failed 表示状态。
+- 任务失败通常直接判负，必须优先围绕任务打：限时击杀就集中输出/地刺/能量豆；限制植物数量就不要多铺；限制阳光花费就先上便宜卡。
+- state.phase=objective 表示当前停在开局的“关卡目标”说明界面，先调用 pvz_dismiss_objective（或 pvz_start_level，会自动关闭）再选卡。`;
 
 const TOOLS = [
   {
     name: 'pvz_state',
-    description: '读取当前战场：阳光/能量豆、卡槽费用与冷却、植物、僵尸、波次、当前卡牌与场上僵尸的图鉴知识。每回合先调用它。',
+    description: '读取当前战场：阳光/能量豆、卡槽费用与冷却、植物、僵尸、波次、关卡任务（state.tasks）、当前卡牌与场上僵尸的图鉴知识。每回合先调用它。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -127,7 +135,12 @@ const TOOLS = [
   },
   {
     name: 'pvz_start_level',
-    description: '在选卡阶段点击“一起摇滚吧”开始战斗。选卡界面完全就绪后再调用。',
+    description: '开始战斗。若停在关卡目标说明界面会先自动关闭，再在选卡阶段点击“一起摇滚吧”。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'pvz_dismiss_objective',
+    description: '关闭开局的关卡目标说明界面（点“继续”），返回本关任务文本。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -165,11 +178,12 @@ const PROMPTS = [
 
 const PLAY_PROMPT = `你现在要操控《植物大战僵尸2 花园无尽》。
 请先调用 pvz_rules，然后循环：
-1. 调用 pvz_state 读取战场；
-2. 根据卡槽费用/冷却、植物和僵尸的图鉴能力做决策；
+1. 调用 pvz_state 读取战场和关卡任务（state.tasks）；
+2. 根据关卡任务、卡槽费用/冷却、植物和僵尸的图鉴能力做决策；
 3. 用 pvz_plant / pvz_plant_food / pvz_shovel 执行，最多 3 个动作；
-4. 如果没事可做就 pvz_wait 2-4 秒，再回到第 1 步。
-不要猜植物/僵尸能力；需要时先调用 pvz_knowledge 查询。`;
+4. 如果 phase=objective 先 pvz_dismiss_objective；如果 phase=preparing 先 pvz_choose_deck 再 pvz_start_level；
+5. 如果没事可做就 pvz_wait 2-4 秒，再回到第 1 步。
+不要猜植物/僵尸能力；需要时先调用 pvz_knowledge 查询。关卡任务失败会直接判负，优先保证任务完成。`;
 
 async function getPages() {
   try {
@@ -325,7 +339,33 @@ async function handleTool(name, args) {
       return textResult(r.ok ? r.value : r.error, !r.ok);
     }
     case 'pvz_start_level': {
-      const r = await callMod('window.PvzAI.startLevel()');
+      const r = await callMod(`(() => {
+        const P = window.PvzAI;
+        const s = P.snapshot();
+        if (!s || !s.ok) return { ok: false, reason: s && s.reason ? s.reason : '不在关卡内' };
+        const out = [];
+        if (s.phase === 'objective') {
+          const d = P.dismissObjective ? P.dismissObjective() : { ok: false, reason: '模组版本过低，请更新' };
+          out.push({ dismiss_objective: d });
+          if (!d.ok) return { ok: false, reason: d.reason || '关闭关卡目标失败', steps: out };
+        }
+        if (s.phase === 'running') return { ok: true, detail: '战斗已经开始', steps: out };
+        const st = P.startLevel();
+        out.push({ start_level: st });
+        if (st.ok) return { ok: true, detail: st.detail, steps: out };
+        if (s.phase === 'preparing') return { ok: false, reason: st.reason || '开局失败', steps: out };
+        return { ok: false, reason: '当前阶段是 ' + s.phase + '，不能开局', steps: out };
+      })()`);
+      return textResult(r.ok ? r.value : r.error, !r.ok);
+    }
+    case 'pvz_dismiss_objective': {
+      const r = await callMod(`(() => {
+        const P = window.PvzAI;
+        if (!P || !P.dismissObjective) return { ok: false, reason: '模组版本过低，请更新到 v0.2.4+' };
+        const s = P.snapshot();
+        const res = P.dismissObjective();
+        return { ...res, tasks: (s && s.tasks) || [], objective: (s && s.objective) || null };
+      })()`);
       return textResult(r.ok ? r.value : r.error, !r.ok);
     }
     case 'pvz_wait': {
