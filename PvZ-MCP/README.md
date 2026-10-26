@@ -119,6 +119,13 @@ phase=objective 先 pvz_dismiss_objective；phase=preparing 先 pvz_choose_deck�
 - **不支持关卡**：传送带/砸罐/天空/保龄球 → `supported:false`，种植返回 `UNSUPPORTED_LEVEL`。
 - **实测**：海滩 15（潮汐 pos=3）、黑暗 2（7 墓碑）、古城 15（金瓷砖+濒危）、侏罗纪 10（stego/ptero/raptor）。
 
+## v0.2.8 新增
+
+- **传送带关卡**：`state.conveyor = { enabled, vertical, cards:[{index,type,name}], plantList, slots }`
+- `pvz_plant` 的 `card` 在传送带关表示 `conveyor.cards` 的下标；不扣阳光、不吃种子冷却
+- `pvz_choose_deck` 传送带关返回「无需选卡」；`pvz_start_level` 直接开战
+- `pvz_wait_until` 新增 `conveyor_ready`；`card_ready` 同时识别传送带卡
+
 ## 工具
 
 | 工具 | 作用 |

@@ -17,7 +17,7 @@
 import readline from 'node:readline';
 
 const PORT = Number(process.env.PVZ_CDP_PORT || 9222);
-const VERSION = '0.2.7';
+const VERSION = '0.2.8';
 const log = (...args) => { try { console.error('[pvz-mcp]', ...args); } catch { /* ignore */ } };
 
 let ws = null;
@@ -71,7 +71,12 @@ phase=preparing：选卡（可 replace=true 换掉游戏预填卡组），然后
 - tide：潮水线 pos，水覆盖 pos 右侧的列；结合 terrain 判断哪些格需要睡莲。
 - dinosaurs：kind / lane / action，提前在对应行补火力。
 - portals：传送门位置与世界；specialTiles 里还有 gold / endangered / slider / tomb / mold 等。
-- supported=false 表示该关卡类型（传送带/砸罐/天空/保龄球）不在支持范围，不要继续种植。
+- supported=false 表示该关卡类型（砸罐/天空/保龄球）不在支持范围，不要继续种植。
+
+传送带关卡：
+- state.cards 为空、state.conveyor.cards 是当前带上的卡。
+- pvz_plant 的 card 用 conveyor.cards 的 index；不扣阳光、不吃种子冷却。
+- cards 为空时不要调用 pvz_choose_deck，直接 pvz_start_level / pvz_plant。
 
 关卡任务与计时（state.tasks）：
 - tasks[].tip 是任务文本，count 形如 "0/20" 或 "剩余 1"，completed/failed 表示状态，modeName/semantics 是可读类型。
@@ -221,7 +226,7 @@ const TOOLS = [
   },
   {
     name: 'pvz_wait_until',
-    description: '等到条件满足或超时（1–60 秒）。until: sun>=200 | sun<=50 | card_ready:repeater | zombie_in_lane:3 | zombie_near:2 | plantfood>=1 | cart_ready:0 | tasks_ready | phase:running | plants>=10。',
+    description: '等到条件满足或超时（1–60 秒）。until: sun>=200 | sun<=50 | card_ready:repeater | zombie_in_lane:3 | zombie_near:2 | plantfood>=1 | cart_ready:0 | conveyor_ready | tasks_ready | phase:running | plants>=10。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -428,8 +433,12 @@ function checkCondition(state, cond) {
   if ((m = /^plantfood\s*>=\s*(\d+)$/i.exec(c))) return { ok: true, hit: Number(state.plantFood || 0) >= Number(m[1]) };
   if ((m = /^card_ready\s*:\s*(.+)$/i.exec(c))) {
     const v = m[1].trim();
-    const card = (state.cards || []).find((x) => x.type === v) || (state.cards || [])[Number(v)];
+    const list = (state.cards || []).concat((state.conveyor && state.conveyor.cards) || []);
+    const card = list.find((x) => x.type === v) || list[Number(v)];
     return { ok: true, hit: !!(card && card.ready) };
+  }
+  if (/^conveyor_ready$/i.test(c)) {
+    return { ok: true, hit: !!(state.conveyor && state.conveyor.enabled && state.conveyor.cards && state.conveyor.cards.length) };
   }
   if ((m = /^zombie_in_lane\s*:\s*(\d+)$/i.exec(c))) {
     return { ok: true, hit: (state.zombies || []).some((z) => Number(z.lane) === Number(m[1])) };
@@ -516,6 +525,7 @@ async function healthValue() {
         terrain: typeof P.terrain === 'function',
         carts: Array.isArray(s && s.carts),
         lanes: Array.isArray(s && s.lanes),
+        conveyor: !!(s && s.conveyor),
         mechanics: !!(s && s.mechanics),
         taskSemantics: !(s && s.tasks && s.tasks.length) || s.tasks.every((t) => !!t.semantics),
         pausedFlag: typeof (s && s.paused) === 'boolean',

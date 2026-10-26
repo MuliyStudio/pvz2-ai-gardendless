@@ -11,7 +11,7 @@
  * 注意：这是单机辅助工具，请勿用于联机或排行榜；游戏更新后内部字段可能变化。
  */
 
-const VERSION = '0.2.7';
+const VERSION = '0.2.8';
 const CFG_KEY = 'pvzai.agent.mod.cfg.v1';
 const HOST_ID = 'pvzai-mod-host';
 const LOG_LIMIT = 120;
@@ -228,7 +228,8 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2》的实时自动游玩代�
 14. **矿车**：状态里有 carts。矿车是可在同一轨道列上下移动的植物平台，植物会跟着车走。某行有僵尸但没射手时，优先把载着射手的矿车 move_cart 到该行，而不是重复买植物；移车前确认原行不会因此失守（原行还有别的射手/低威胁）。
 15. **暂停**：状态 paused=true 时，种植/铲除/能量豆都会被游戏忽略；先输出 resume，再做别的。
 16. **特殊僵尸**：piano（碾压植物 + 让牛仔换行）不要用地刺硬挡，优先樱桃/投手/高输出；prospector 会跳过所有植物落到最左侧，必须保住后排火力；chicken_farmer 会放鸡，优先地刺/闪电芦苇；west_bull 会投小鬼，高坚果才能挡。state.zombies[].tags 会标出 crush/jump_over/backline/flying/spawner/armored。
-17. 同一张卡不要在一批动作里连续种两次（会撞冷却）；不同卡可以。`;
+17. 同一张卡不要在一批动作里连续种两次（会撞冷却）；不同卡可以。
+18. **传送带关卡**：state.conveyor.cards 是当前带上的卡，plant 的 card 用这个列表的 index（不是种子卡槽）；传送带不扣阳光、不吃冷却。没有 cards 时不要调用 choose_deck，直接开打。`;
 
 
 const PLAY_TOOL = {
@@ -1130,6 +1131,37 @@ export default {
       return String((c && (c.__classname__ || (c.constructor && c.constructor.name))) || '');
     }
 
+    function getConveyor(ctxg) {
+      if (!ctxg || !ctxg.scene) return null;
+      let hit = null;
+      (function walk(n) {
+        if (hit) return;
+        for (const c of n._components || []) {
+          if (compNameOf(c) === 'Conveyor') { hit = c; return; }
+        }
+        for (const ch of n.children || []) { walk(ch); if (hit) return; }
+      })(ctxg.scene);
+      return hit;
+    }
+
+    function conveyorCards(cv) {
+      if (!cv) return [];
+      try { return (typeof cv.getCards === 'function' ? cv.getCards() : []) || []; } catch { return []; }
+    }
+
+    function conveyorSlots(cv) {
+      if (!cv) return [];
+      return [].concat(cv.lane1slots || [], cv.lane2slots || [], cv.laneVertslots || []).filter(Boolean);
+    }
+
+    function isConveyorMode(cv, cards) {
+      if (!cv) return false;
+      const plantList = Array.isArray(cv.plantList) ? cv.plantList.length : 0;
+      const live = conveyorCards(cv).length;
+      const cardCount = cards && Array.isArray(cards.CFs) ? cards.CFs.length : 0;
+      return cardCount === 0 && (plantList > 0 || live > 0);
+    }
+
     const TILE_CLASS_TYPES = [
       [/railway|^rail$/i, 'rail'],
       [/goldTile/i, 'gold'],
@@ -1267,8 +1299,7 @@ export default {
 
       let supported = true, unsupportedReason = null;
       const levelName = String((lvl && (lvl.levelNameString || lvl.levelName)) || '');
-      if (conveyor || /传送带|conveyor/i.test(levelName)) { supported = false; unsupportedReason = 'conveyor'; }
-      else if (vaseLevel || /砸罐|vase/i.test(levelName)) { supported = false; unsupportedReason = 'vase'; }
+      if (vaseLevel || /砸罐|vase/i.test(levelName)) { supported = false; unsupportedReason = 'vase'; }
       else if (skyLevel || /天空|sky/i.test(levelName)) { supported = false; unsupportedReason = 'sky'; }
       else if (/保龄球|bowling/i.test(levelName)) { supported = false; unsupportedReason = 'bowling'; }
 
@@ -1334,6 +1365,7 @@ export default {
         tasks,
         objective,
         cards: [],
+        conveyor: null,
         plants: [],
         zombies: [],
         suns: [],
@@ -1371,6 +1403,25 @@ export default {
             selected: !!(ui && ui.index === i),
           };
         });
+      }
+
+      const cvNow = getConveyor(ctxg);
+      if (cvNow && isConveyorMode(cvNow, cards)) {
+        try {
+          const list = conveyorCards(cvNow);
+          out.conveyor = {
+            enabled: true,
+            vertical: !!cvNow.isVertical,
+            cards: list.map((cf, i) => ({
+              index: i,
+              type: cf.Type || '',
+              name: PLANT_CN[cf.Type] || cf.Type || '',
+              ready: true,
+            })),
+            plantList: (cvNow.plantList || []).map((p) => p && (p.PlantType || p.Type)).filter(Boolean),
+            slots: conveyorSlots(cvNow).map((s) => (s.card ? s.card.Type : null)),
+          };
+        } catch { out.conveyor = null; }
       }
 
       if (square) {
@@ -1601,6 +1652,88 @@ export default {
       return limit;
     }
 
+    function plantConveyor(cv, cardIndex, lane, column) {
+      const ctxg = findComps();
+      if (!ctxg) return fail('NO_SCENE');
+      const { map } = ctxg;
+      const ui = map.UIInGame, square = map.Square;
+      if (!ui || !square) return fail('NO_SCENE');
+      const list = conveyorCards(cv);
+      const cf = list[cardIndex];
+      if (!cf) {
+        return fail('NO_CARD', { conveyor: true, card: cardIndex, available: list.length },
+          `传送带当前只有 ${list.length} 张卡`);
+      }
+      const slot = conveyorSlots(cv).find((s) => s.card === cf);
+      if (!slot) return fail('CARD_UNAVAILABLE', { conveyor: true, card: cardIndex, type: cf.Type }, '这张卡已经离开传送带');
+
+      const C = square.constructor;
+      const lanes = C.LaneCount || 5, cols = C.ColumnCount || 9;
+      if (lane < 0 || lane >= lanes || column < 0 || column >= cols) {
+        return fail('OUT_OF_RANGE', { lane, column, range: { lanes, columns: cols } });
+      }
+      const cell = C.getLnC(lane, column);
+      if (!cell) return fail('NO_CELL', { lane, column });
+      const terrain = cellTerrain(C, lane, column);
+      if (terrain.exists && (terrain.letter === 'W' || terrain.letter === 'S')) {
+        return fail('TERRAIN', { lane, column, terrain: terrain.letter, terrainName: terrain.terrain });
+      }
+      const role = plantRole(cf.Type);
+      const lanePlants = lanePlantList(C, lane);
+      const sameRole = lanePlants.filter((p) => plantRole(cleanCodename(p.Plant_Type || '')) === role);
+      if (role === 'wall') {
+        const strong = sameRole.find((p) => (p.health || 0) > Math.max(1, p.toughness || 1) * 0.25);
+        if (strong) return fail('LANE_LIMIT', { lane, role, count: sameRole.length, limit: 1 });
+      } else if (role === 'spring' && sameRole.length) {
+        return fail('LANE_LIMIT', { lane, role, count: sameRole.length, limit: 1 });
+      } else if (role === 'freeze' && sameRole.length) {
+        return fail('LANE_LIMIT', { lane, role, count: sameRole.length, limit: 1 });
+      } else if (role === 'sun' && sameRole.length >= 2) {
+        return fail('LANE_LIMIT', { lane, role, count: sameRole.length, limit: 2 });
+      } else if (role === 'shooter' && sameRole.length >= 4) {
+        return fail('LANE_LIMIT', { lane, role, count: sameRole.length, limit: 4 });
+      } else if (role === 'spike' && sameRole.length >= 2) {
+        return fail('LANE_LIMIT', { lane, role, count: sameRole.length, limit: 2 });
+      }
+      const tags = (cf.PF && cf.PF.TAGS) || [];
+      const canOverlap = tags.includes('allowOverlap') || tags.includes('vine') || tags.includes('floawerPot') || tags.includes('lilypad');
+      const cellPlants = cellPlantList(cell);
+      if (cellPlants.length && !canOverlap) {
+        return fail('OCCUPIED', { lane, column, plants: cellPlants.map((p) => cleanCodename(p.Plant_Type || '')) });
+      }
+      const learnKey = `${lane}:${column}`;
+      const learned = learnedCells.get(learnKey);
+      if (learned && learned.until > Date.now()) {
+        return fail(learned.code || 'CELL_BLOCKED', { lane, column, terrain: learned.terrain || '?', learned: true });
+      }
+
+      try { cv.chooseCard(cf, slot); } catch (e) {
+        return fail('CARD_UNAVAILABLE', { conveyor: true, card: cardIndex, type: cf.Type }, '传送带选卡失败：' + (e && e.message ? e.message : e));
+      }
+      if (ui.currentFreeCF !== cf) {
+        return fail('CARD_UNAVAILABLE', { conveyor: true, card: cardIndex, type: cf.Type }, '传送带卡没有选中');
+      }
+      const canPlace = cell.putPlantAvailable
+        ? cell.putPlantAvailable(true, cf.ID, true, true, cf.spf)
+        : true;
+      if (!canPlace) {
+        try { cv.chooseCard(cf, slot); } catch { /* ignore */ }
+        learnedCells.set(learnKey, { until: Date.now() + 15000, code: 'CELL_BLOCKED', terrain: terrain.letter || '?' });
+        return fail('CELL_BLOCKED', { lane, column, terrain: terrain.letter || '?' });
+      }
+      const beforeSpawn = cell.spawningPromiseCount || 0;
+      cell.PlaceUIPlant();
+      if ((cell.spawningPromiseCount || 0) <= beforeSpawn) {
+        return fail('PLANT_FAILED', { conveyor: true, card: cardIndex, type: cf.Type, lane, column });
+      }
+      return {
+        ok: true,
+        conveyor: true,
+        detail: `传送带种下 ${PLANT_CN[cf.Type] || cf.Type} @ ${lane},${column}`,
+        lane, column, type: cf.Type, card: cardIndex,
+      };
+    }
+
     function plant(cardIndex, lane, column) {
       const ctxg = findComps();
       if (!ctxg) return fail('NO_SCENE');
@@ -1615,6 +1748,9 @@ export default {
       }
       if (ui.paused) return fail('PAUSED', { retryable: true });
       if (ui.indexLocked) return fail('UI_LOCKED', { retryable: true });
+
+      const cvHere = getConveyor(ctxg);
+      if (isConveyorMode(cvHere, cards)) return plantConveyor(cvHere, cardIndex, lane, column);
 
       const cf = cards.CFs && cards.CFs[cardIndex];
       if (!cf) return fail('NO_CARD', { card: cardIndex });
@@ -1891,6 +2027,10 @@ export default {
       const cards = map.Cards, lvl = map.levelController;
       if (!cards || !lvl) return fail('PREP_NOT_READY');
       if (cards.gameStarted) return fail('ALREADY_STARTED');
+      const cv = getConveyor(ctxg);
+      if (cv && isConveyorMode(cv, cards)) {
+        return { ok: true, conveyor: true, deck: [], applied: [], skipped: [], started: false, detail: '传送带关卡无需选卡' };
+      }
       if (!prepReady(cards, lvl)) return fail('PREP_NOT_READY', { retryable: true }, '选卡界面还没准备好，稍等');
       if (safeStartable(cards)) return tryLetsRock(lvl, cards);
 
@@ -1947,6 +2087,10 @@ export default {
       const cards = map.Cards, lvl = map.levelController;
       if (!cards || !lvl) return fail('PREP_NOT_READY');
       if (cards.gameStarted) return fail('ALREADY_STARTED');
+      const cv = getConveyor(ctxg);
+      if (cv && isConveyorMode(cv, cards)) {
+        return { ok: true, conveyor: true, deck: [], applied: [], skipped: [], started: false, detail: '传送带关卡无需选卡' };
+      }
       if (!prepReady(cards, lvl)) return fail('PREP_NOT_READY', { retryable: true }, '选卡界面还没准备好，稍等');
       const max = cards.maxSlotCount || 0;
       if (!max) return fail('NO_SLOTS', { retryable: true });
@@ -2004,6 +2148,23 @@ export default {
       if (!ctxg) return { ok: false, reason: '不在关卡内' };
       const { map } = ctxg;
       const cards = map.Cards, lvl = map.levelController;
+      const cv = getConveyor(ctxg);
+      if (cv && isConveyorMode(cv, cards) && lvl && !lvl.letsRocked && typeof lvl.letsRock === 'function') {
+        let warn = null;
+        try {
+          lvl.letsRock();
+        } catch (e) {
+          warn = String(e && e.message ? e.message : e);
+        }
+        // 传送带关的 letsRock 会在隐去种子栏 UI 时抛错，但战斗已经启动；
+        // 这里不把异常当失败，交给 wait_until phase:running 确认。
+        return {
+          ok: true,
+          detail: '开始战斗（传送带）',
+          started: !!(lvl.letsRocked || lvl.gameStarted || (cards && cards.gameStarted)),
+          warning: warn || undefined,
+        };
+      }
       return tryLetsRock(lvl, cards);
     }
 
@@ -2235,6 +2396,7 @@ export default {
         blockedCells: s.blockedCells || [],
         carts: s.carts || [],
         lanes: s.lanes || [],
+        conveyor: s.conveyor || null,
         mechanics: s.mechanics || null,
         recentLosses: s.recentLosses || [],
         paused: !!s.paused,
@@ -2267,6 +2429,9 @@ export default {
       }
       if (s.carts && s.carts.length) {
         lines.push('矿车：' + s.carts.map((c) => `#${c.id} 第${c.lane + 1}排(${c.lane},${c.column}) 载[${c.plants.map((p) => p.name || p.type).join(',') || '空'}] 可上${c.canUp ? '✓' : '✗'}下${c.canDown ? '✓' : '✗'}`).join('；') + '（用 move_cart 把车移到有僵尸的行，植物会跟着走）');
+      }
+      if (s.conveyor && s.conveyor.enabled) {
+        lines.push(`传送带：${s.conveyor.cards.map((c) => `[${c.index}]${c.name || c.type}`).join(' ') || '暂时没有卡'}（plant 的 card 用这里的 index；不扣阳光、不吃种子冷却）`);
       }
       if (s.recentLosses && s.recentLosses.length) {
         const now = Date.now();
@@ -2680,8 +2845,12 @@ export default {
       if ((m = /^plantfood\s*>=\s*(\d+)$/i.exec(c))) return { ok: true, hit: Number(s.plantFood || 0) >= Number(m[1]) };
       if ((m = /^card_ready\s*:\s*(.+)$/i.exec(c))) {
         const v = m[1].trim();
-        const card = (s.cards || []).find((x) => x.type === v) || (s.cards || [])[Number(v)];
+        const list = (s.cards || []).concat((s.conveyor && s.conveyor.cards) || []);
+        const card = list.find((x) => x.type === v) || list[Number(v)];
         return { ok: true, hit: !!(card && card.ready) };
+      }
+      if (/^conveyor_ready$/i.test(c)) {
+        return { ok: true, hit: !!(s.conveyor && s.conveyor.enabled && s.conveyor.cards && s.conveyor.cards.length) };
       }
       if ((m = /^zombie_in_lane\s*:\s*(\d+)$/i.exec(c))) {
         return { ok: true, hit: (s.zombies || []).some((z) => Number(z.lane) === Number(m[1])) };
@@ -2818,7 +2987,8 @@ export default {
           const ctxg = findComps();
           const pCards = ctxg && ctxg.map.Cards;
           const pLvl = ctxg && ctxg.map.levelController;
-          if (!prepReady(pCards, pLvl)) {
+          const pCv = ctxg && getConveyor(ctxg);
+          if (!prepReady(pCards, pLvl) && !isConveyorMode(pCv, pCards)) {
             if (run.lastPrepReason !== '选卡界面还没准备好') {
               mlog('等待选卡界面就绪…', 'warn');
               run.lastPrepReason = '选卡界面还没准备好';

@@ -117,12 +117,20 @@ LLLLLPPPP
   - `portals[]`、`hazards[]`（气功洞、巫师羊）
   - `tiles[]`：rail / tomb / mold / ice / vase / gold / endangered / slider
   - `unmappedTiles[]`：发现但还不认识的地块类名
-- **不支持关卡**：传送带 / 砸罐 / 天空 / 保龄球会标 `supported:false`，种植返回 `UNSUPPORTED_LEVEL`。
+- **不支持关卡**：砸罐 / 天空 / 保龄球会标 `supported:false`，种植返回 `UNSUPPORTED_LEVEL`。
 - **实测**：
   - 巨浪沙滩 15：`water + tide`，`tide.pos=3`，濒危植物 5 个
   - 黑暗时代 2：7 个墓碑
   - 遗落古城 15：金瓷砖 + 濒危植物
   - 侏罗纪 10：`stego/ptero/raptor` 三条恐龙
+
+### v0.2.8 · 传送带关卡
+
+- `snapshot().conveyor`：`cards[]`（当前带上的卡）、`plantList[]`、`slots[]`、`vertical`
+- `pvz_plant` 的 `card` 在传送带关卡里表示 `conveyor.cards` 的下标；不扣阳光、不吃种子冷却
+- 传送带开局：`pvz_choose_deck` 返回「无需选卡」，`pvz_start_level` 直接开战
+- `pvz_wait_until` 新增 `conveyor_ready`；`card_ready` 同时识别种子卡和传送带卡
+- 实测：遥远未来 8，传送带出现 citron/wallnut/laser_bean，`pvz_plant card=0` 成功种下 citron
 
 
 详见 [PvZ-MCP/README.md](PvZ-MCP/README.md)。
