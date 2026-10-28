@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>PvZ AI UI smoke</title></head>
+<body>
+<h3>UI smoke test（仅测试浮窗，不连接游戏）</h3>
+<script>
+  window.__ctx = {
+    unsafe: { engine: { getCc: () => null } },
+    controls: { definePanel() {}, clear() {} },
+    log: { info() {}, warn() {}, error() {} },
+    compat: { getPlatformVersion: () => 'smoke' },
+    plants: { listFeatureEntries() { return []; }, getFeature() { return null; }, getAlmanac() { return null; } },
+    zombies: { listFeatureEntries() { return []; }, getAlmanac() { return null; } },
+    files: {
+      own: () => ({
+        listPaths: () => ['strategy.md'],
+        readText: async (path) => {
+          if (path !== 'strategy.md') return null;
+          return window.__strategyText || '# 文件策略注释（会被忽略）\n1. 这是来自 strategy.md 的测试策略。\n2. 地刺放最前面。';
+        },
+      }),
+    },
+  };
+</script>
+<script type="module">
+  import mod from '../pvz-ai-agent-mod/scripts/main.js';
+  try {
+    window.__cleanup = mod.setup(window.__ctx);
+    window.__loaded = true;
+  } catch (e) {
+    window.__error = String((e && e.stack) || e);
+  }
+</script>
+</body>
+</html>

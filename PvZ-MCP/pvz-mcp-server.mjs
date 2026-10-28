@@ -17,7 +17,7 @@
 import readline from 'node:readline';
 
 const PORT = Number(process.env.PVZ_CDP_PORT || 9222);
-const VERSION = '0.1.0';
+const VERSION = '0.3.5';
 const log = (...args) => { try { console.error('[pvz-mcp]', ...args); } catch { /* ignore */ } };
 
 let ws = null;
@@ -38,13 +38,72 @@ const GUIDE = `你是《植物大战僵尸2 花园无尽》的操控者。通过
 - 能量豆会自动收集；需要时用 pvz_plant_food 给高输出植物释放大招。
 
 推荐循环：
-1. pvz_state（看关卡任务、阳光、卡槽、植物、僵尸、波次）
-2. 决策：先满足关卡任务，再补经济/输出/防御/一次性救场
-3. pvz_plant / pvz_plant_food / pvz_shovel
-4. 再 pvz_state 验证结果
+1. **开局前先想对策**：pvz_briefing 读一页简报（关卡任务/目标原文、预计僵尸+图鉴、地形/机制、可选卡组+图鉴），把计划写清楚后用 pvz_set_plan 记录下来，再 pvz_choose_deck / pvz_start_level。
+2. pvz_state（看关卡任务/倒计时、地形、阳光、卡槽、植物、僵尸、波次、可铲候选）
+3. 决策：先满足关卡任务，再补经济/输出/防御/一次性救场
+4. pvz_act 一次提交 1–6 个动作（种植/铲除/替换/能量豆/等待），比逐个调用省往返
+5. 需要等条件时用 pvz_wait_until（阳光够/卡冷却好/僵尸进某行/任务完成），不要用固定 pvz_wait 空转
+
+读图鉴的顺序（不要跳）：
+- 任务：tasks[].tip + hint，弄清楚靠什么赢、限制是什么（植物数/损失数/阳光/倒计时）。
+- 僵尸：state.zombies[].tags，以及 state.levelPreview.zombies / pvz_briefing 里的 zombieKnowledge（brief/special/tags/counters）。
+- 卡牌：state.cards[].knowledge（name/brief/special/tags），按“克制关系”选，不要凭记忆。
+- 战场：state.lanes、state.plants、state.shovelCandidates。
 
 phase=objective：停在“关卡目标”说明界面，先 pvz_dismiss_objective。
-phase=preparing：选卡，然后 pvz_start_level（它会自动关闭目标说明并开局）。
+phase=preparing：选卡（可 replace=true 换掉游戏预填卡组），然后 pvz_start_level（它会自动关闭目标说明并开局）。
+
+开局计划怎么用：
+- objective 阶段先 pvz_briefing 拿任务/世界/预计僵尸；关掉说明进入选卡界面后再调一次，deckOptions 此时才有值。
+- pvz_briefing 返回 levelPreview.zombies（本关预计僵尸；source=level-data 或 world-knowledge）、zombieKnowledge（图鉴+应对要点）、deckOptions（可选卡组+图鉴）、suggestedDeck、world（世界机制/要点）。
+- 综合后写 plan：goal（通关条件）/ threats / counters / deck（5–8 个 codename）/ buildOrder（前 60 秒怎么种）/ shovelPolicy（什么时候铲掉重种）/ dangerLanes。
+- pvz_set_plan 记录后，pvz_state.plan 会一直带着它；之后偏离计划要能说清原因。
+
+地形：
+- state.terrain.map 每行一个字符串：L=陆地 P=木板 W=水 S=天空 R=矿车轨道 ?=未知。
+- 水格（W/S）不能种普通植物，需要睡莲/弹簧豆等水生卡；state.blockedCells 是明确不可种植的格子。
+- 失败返回 code=TERRAIN 时不要重试同一格。
+
+位置（v0.3.1）：
+- state.board 是 5×9 结构化棋盘：每行 { lane, cells:[植物 codename 或 null], zombies:[{column,type,hp}] }；cells 下标就是 column。
+- 推荐列窗口：阳光生产者 c0-c2；普通输出 c0-c4；坚果/近战 c3-c7；地刺 c4-c7，且必须在坚果前面（坚果挡住的僵尸踩不到后面的地刺）。
+- 模组会拒绝明显浪费的种法，返回 code=POSITION，并在结果里给 alts（可改种格子）。看到 alts 就直接用，不要重试原格。
+- 普通种植失败（OCCUPIED/TERRAIN/CELL_BLOCKED/LANE_LIMIT）也会带 alts。
+- state.world = { key, name, mechanics, tips, zombies }：当前世界与机制；state.levelPreview.zombies 的 source 为 world-knowledge 时表示“关卡数据没读到，按世界常识估计”。
+
+矿车（西部等地图）：
+- state.carts 每辆给出 id / 当前 lane,column / 载着什么植物 / 可上可下。
+- 矿车是可在同一轨道列上下移动的植物平台，植物会跟着车走：用 pvz_move_cart {cart,direction:"up"|"down"}。
+- 某行有僵尸但没射手时，优先把载着射手的矿车移过去，而不是重复买植物；移车前确认原行不会失守。
+- 轨道格只有矿车停靠时才可种植（terrain 里是 R，blockedCells 里 reason=rail 表示车不在）。
+
+逐行信息：
+- state.lanes[] 直接给出每排 shooters / nearestZombie / needsShooter / danger / mower / cart。
+- needsShooter=true 表示这排有僵尸但没有射手，必须优先处理。
+- 僵尸带 tags：crush（碾压植物）、jump_over（跳过植物）、backline（绕后）、flying、spawner、armored、support、lane_switch。
+  典型：piano 会碾压植物并让牛仔换行；prospector 跳到最左侧；chicken_farmer 放鸡；west_bull 投小鬼。
+
+暂停：
+- state.paused=true 时种植/铲除/能量豆都会被游戏忽略；先 pvz_resume。
+
+其他地图机制（state.mechanics）：
+- features 会列出 tide / water / rail / dinosaur / portal / hazard / conveyor / vase / sky 等。
+- tide：潮水线 pos，水覆盖 pos 右侧的列；结合 terrain 判断哪些格需要睡莲。
+- dinosaurs：kind / lane / action，提前在对应行补火力。
+- portals：传送门位置与世界；specialTiles 里还有 gold / endangered / slider / tomb / mold 等。
+- supported=false 表示该关卡类型（砸罐/天空/保龄球）不在支持范围，不要继续种植。
+
+传送带关卡：
+- state.cards 为空、state.conveyor.cards 是当前带上的卡。
+- pvz_plant 的 card 用 conveyor.cards 的 index；不扣阳光、不吃种子冷却。
+- cards 为空时不要调用 pvz_choose_deck，直接 pvz_start_level / pvz_plant。
+
+关卡任务与计时（state.tasks）：
+- tasks[].tip 是任务文本，count 形如 "0/20" 或 "剩余 1"，completed/failed 表示状态，modeName/semantics 是可读类型。
+- modeName=timed_kill：最近 N 秒内击杀的滑动窗口，看 timeLeft/windowActive/urgent。
+- modeName=plant_lose_limit：left 是“还能损失几株”，left<=1 时 urgent；再丢一株就失败。
+- modeName=plant_count_limit：left 是“还能种几株”。
+- 任务失败通常直接判负，必须优先围绕任务打。
 
 策略：
 - 前期优先 2-3 个阳光生产者（column 0-2）。
@@ -52,18 +111,19 @@ phase=preparing：选卡，然后 pvz_start_level（它会自动关闭目标说�
 - 某行僵尸 column<=3 时优先补防御/输出；column<=1 紧急。
 - 只选择 ready=true 的卡；cd>0 或 affordable=false 不要用。
 - 每回合最多 3 个动作；没有值得做的就 pvz_wait。
-- 可以用 pvz_shovel 铲掉：同一行重复的坚果/弹簧豆、血量低于 30% 的危险行植物、明显低效需要腾位的植物。每次最多铲 1 个，铲完再种。
+- **铲除是正常战术**：state.shovelCandidates 会列出“超上限 / 可升级 / 位置不对 / 残血”的格子（带 reason 和 better/betterCard）。
+  - 只是腾位 → pvz_shovel。
+  - 同格换更强的卡 → pvz_act 用 {"type":"replace","card":<卡下标>,"lane":x,"column":y}，一步铲掉再种（先预检卡片可用，避免铲了种不上）。
+  - 每次最多处理 1 格；铲除不返还阳光，铲完要立刻补种。
+  - loss_limit 任务 left<=1 时不要主动铲（会返回 SHOVEL_BLOCKED；此时 state.shovelBlocked=true、shovelCandidates 为空）。
 - 如果某行已有 2 个坚果/弹簧豆/冰生菜，先用 pvz_shovel 铲掉多余的一个，再补输出。
-
-关卡任务（state.tasks）：
-- 每关开局都会有任务，例如“在 30 秒内击杀 20 个僵尸”。state.tasks[].tip 是任务文本，count 形如 "0/20"，completed/failed 表示状态。
-- 任务失败通常直接判负，必须优先围绕任务打：限时击杀就集中输出/地刺/能量豆；限制植物数量就不要多铺；限制阳光花费就先上便宜卡。
-- state.phase=objective 表示当前停在开局的“关卡目标”说明界面，先调用 pvz_dismiss_objective（或 pvz_start_level，会自动关闭）再选卡。`;
+- 同一张卡不要在一批动作里连续种两次（会撞冷却）；不同卡可以。
+- 动作失败带 code：PAUSED/TERRAIN/COOLDOWN/SUN/OCCUPIED/POSITION/LANE_LIMIT/LEVEL_LIMIT/SHOVEL_BLOCKED/PLANT_MISMATCH/CART_BLOCKED…按 code 换格、等待或移车，不要重复同一个失败动作。失败结果里的 alts 是模组算好的可种格子，直接用。`;
 
 const TOOLS = [
   {
     name: 'pvz_state',
-    description: '读取当前战场：阳光/能量豆、卡槽费用与冷却、植物、僵尸、波次、关卡任务（state.tasks）、当前卡牌与场上僵尸的图鉴知识。每回合先调用它。',
+    description: '读取当前战场：地形（terrain.map / blockedCells）、关卡任务与倒计时（tasks[].timeLeft/urgent）、阳光/能量豆、卡槽费用与冷却、植物、僵尸、波次，以及当前卡牌与场上僵尸的图鉴知识。每回合先调用它。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -113,23 +173,113 @@ const TOOLS = [
   },
   {
     name: 'pvz_shovel',
-    description: '铲除指定格子的植物；支持地刺/土豆雷/睡莲等 tile 植物，可清理重复或低血量植物。',
+    description: '铲除指定格子的植物（支持地刺/土豆雷/睡莲等 tile 植物）。用于腾位、清重复超限、清位置错误的植物。不返还阳光；只换更强的卡请用 pvz_act {type:"replace"}。损失上限任务 left<=1 时会返回 SHOVEL_BLOCKED。',
     inputSchema: {
       type: 'object',
       properties: {
         lane: { type: 'integer', minimum: 0, maximum: 4 },
         column: { type: 'integer', minimum: 0, maximum: 8 },
+        expect: { type: 'string', description: '可选：只铲这个 codename（例如 potatomine），不一致返回 PLANT_MISMATCH' },
       },
       required: ['lane', 'column'],
       additionalProperties: false,
     },
   },
   {
-    name: 'pvz_choose_deck',
-    description: '在选卡阶段选择卡组。传 plants 数组；不传则自动选。',
+    name: 'pvz_briefing',
+    description: '开局前的一页简报：关卡任务/目标原文 + 任务要点 + 预计僵尸（图鉴/标签/应对要点）+ 地形/机制/矿车 + 可选卡组（图鉴）+ 推荐卡组。开打前先读它，想好对策再选卡开局。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'pvz_set_plan',
+    description: '记录本关作战计划，之后 pvz_state.plan 会一直带着它。可传对象（goal/threats/counters/deck/buildOrder/shovelPolicy/dangerLanes/notes）或一句话字符串。',
     inputSchema: {
       type: 'object',
-      properties: { plants: { type: 'array', items: { type: 'string' } } },
+      properties: {
+        plan: {
+          anyOf: [{ type: 'object' }, { type: 'string' }],
+          description: '计划对象或一句话总结',
+        },
+      },
+      required: ['plan'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'pvz_move_cart',
+    description: '移动西部矿车（可移动植物平台）到同一轨道的上一行/下一行，植物会跟着车走。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cart: { type: 'integer', minimum: 0, description: 'state.carts[].id' },
+        direction: { type: 'string', enum: ['up', 'down'] },
+      },
+      required: ['cart', 'direction'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'pvz_resume',
+    description: '如果游戏处于暂停状态（state.paused=true），继续游戏；未暂停时无副作用。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'pvz_health',
+    description: '检查模组与 MCP Server 版本、关键能力（terrain/carts/execute/waitUntil）和安装路径，用于发现旧进程/旧模组。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'pvz_choose_deck',
+    description: '在选卡阶段选择卡组。传 plants 数组；replace=true 会先清空当前卡组（游戏预填也能换掉）。返回实际 deck / applied / skipped / started。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        plants: { type: 'array', items: { type: 'string' } },
+        replace: { type: 'boolean', description: '先清空当前卡组再选' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'pvz_act',
+    description: '一次执行最多 6 个动作（按顺序），返回每个动作的结构化结果。省掉“每个动作一次往返”。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        actions: {
+          type: 'array',
+          maxItems: 6,
+          items: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: ['plant', 'shovel', 'replace', 'plant_food', 'collect_sun', 'wait', 'choose_deck', 'start_level', 'dismiss_objective', 'move_cart', 'resume'] },
+              card: { type: 'integer', minimum: 0, maximum: 9 },
+              lane: { type: 'integer', minimum: 0, maximum: 4 },
+              column: { type: 'integer', minimum: 0, maximum: 8 },
+              plants: { type: 'array', items: { type: 'string' } },
+              replace: { type: 'boolean' },
+              expect: { type: 'string', description: '铲除时只铲这个 codename（可选）' },
+              cart: { type: 'integer', minimum: 0, description: '矿车编号（move_cart 用）' },
+              direction: { type: 'string', enum: ['up', 'down'] },
+            },
+            required: ['type'],
+          },
+        },
+      },
+      required: ['actions'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'pvz_wait_until',
+    description: '等到条件满足或超时（1–60 秒）。until: sun>=200 | sun<=50 | card_ready:repeater | zombie_in_lane:3 | zombie_near:2 | plantfood>=1 | cart_ready:0 | conveyor_ready | tasks_ready | phase:running | plants>=10。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        until: { type: 'string', description: '条件表达式' },
+        timeout: { type: 'number', minimum: 1, maximum: 60, description: '超时秒数，默认 15' },
+      },
+      required: ['until'],
       additionalProperties: false,
     },
   },
@@ -177,13 +327,18 @@ const PROMPTS = [
 ];
 
 const PLAY_PROMPT = `你现在要操控《植物大战僵尸2 花园无尽》。
-请先调用 pvz_rules，然后循环：
-1. 调用 pvz_state 读取战场和关卡任务（state.tasks）；
-2. 根据关卡任务、卡槽费用/冷却、植物和僵尸的图鉴能力做决策；
-3. 用 pvz_plant / pvz_plant_food / pvz_shovel 执行，最多 3 个动作；
-4. 如果 phase=objective 先 pvz_dismiss_objective；如果 phase=preparing 先 pvz_choose_deck 再 pvz_start_level；
-5. 如果没事可做就 pvz_wait 2-4 秒，再回到第 1 步。
-不要猜植物/僵尸能力；需要时先调用 pvz_knowledge 查询。关卡任务失败会直接判负，优先保证任务完成。`;
+请先调用 pvz_rules，然后：
+0. **开局前**：objective 阶段先 pvz_briefing（任务/世界/预计僵尸），关掉说明后到选卡界面**再调一次 pvz_briefing** 拿 deckOptions（此时才有可选卡），想清楚 goal/threats/counters/deck/buildOrder/shovelPolicy，用 pvz_set_plan 记录，再 pvz_choose_deck / pvz_start_level。
+之后循环：
+1. 调用 pvz_state 读取地形、关卡任务/倒计时、卡槽费用/冷却、植物和僵尸、可铲候选（shovelCandidates）；
+2. 按“任务 → 僵尸图鉴/标签 → 卡槽图鉴 → 战场”的顺序决策；
+3. 用 pvz_act 一次提交 1–6 个动作；需要等条件时用 pvz_wait_until（sun>=200 / card_ready:xxx / zombie_in_lane:3 / tasks_ready）；
+4. 如果 state.paused=true 先 pvz_resume；某排 needsShooter=true 时优先补射手，或 pvz_move_cart 把载着射手的矿车移过去；
+5. 如果 phase=objective 先 pvz_dismiss_objective；如果 phase=preparing 先 pvz_choose_deck（可 replace:true 换卡）再 pvz_start_level；
+6. 种错/太弱/重复/挡路就换：只腾位用 pvz_shovel，同格换强卡用 pvz_act {type:"replace",card,lane,column}；每次最多 1 格，铲完立刻补种；
+7. 如果没事可做就 pvz_wait 2-4 秒，再回到第 1 步。
+不要猜植物/僵尸能力；需要时先调用 pvz_knowledge 查询。任务失败会直接判负，优先保证任务完成；
+timed_kill 是“最近 N 秒内击杀”的滑动窗口，看到 urgent=true 就集中输出/能量豆；plant_lose_limit 看 left，left<=1 时绝不能再丢植物、也不要主动铲。`;
 
 async function getPages() {
   try {
@@ -274,6 +429,12 @@ function textResult(value, isError = false) {
   return { content: [{ type: 'text', text }], isError: !!isError };
 }
 
+function modResult(r) {
+  if (!r.ok) return textResult(r.error, true);
+  const value = r.value;
+  return textResult(value, !!(value && value.ok === false));
+}
+
 async function stateValue() {
   const r = await callMod(`(() => {
     const P = window.PvzAI;
@@ -286,6 +447,94 @@ async function stateValue() {
   })()`);
   if (!r.ok) throw new Error(r.error);
   return r.value;
+}
+
+async function rawState() {
+  const r = await callMod('window.PvzAI.snapshot()');
+  if (!r.ok) throw new Error(r.error);
+  return r.value;
+}
+
+function compact(state) {
+  if (!state || !state.ok) return state;
+  return {
+    phase: state.phase,
+    sun: state.sun,
+    plantFood: state.plantFood,
+    wave: state.level && state.level.wave,
+    plants: (state.plants || []).length,
+    zombies: (state.zombies || []).length,
+    tasks: (state.tasks || []).map((t) => ({
+      tip: t.tip, count: t.count, completed: t.completed,
+      failed: t.failed, timeLeft: t.timeLeft, urgent: t.urgent,
+    })),
+  };
+}
+
+function checkCondition(state, cond) {
+  const c = String(cond || '').trim();
+  let m;
+  if (!c) return { ok: false, reason: '空条件' };
+  if ((m = /^sun\s*>=\s*(-?\d+(?:\.\d+)?)$/i.exec(c))) return { ok: true, hit: Number(state.sun) >= Number(m[1]) };
+  if ((m = /^sun\s*<=\s*(-?\d+(?:\.\d+)?)$/i.exec(c))) return { ok: true, hit: Number(state.sun) <= Number(m[1]) };
+  if ((m = /^sun\s*>\s*(-?\d+(?:\.\d+)?)$/i.exec(c))) return { ok: true, hit: Number(state.sun) > Number(m[1]) };
+  if ((m = /^sun\s*<\s*(-?\d+(?:\.\d+)?)$/i.exec(c))) return { ok: true, hit: Number(state.sun) < Number(m[1]) };
+  if ((m = /^plantfood\s*>=\s*(\d+)$/i.exec(c))) return { ok: true, hit: Number(state.plantFood || 0) >= Number(m[1]) };
+  if ((m = /^card_ready\s*:\s*(.+)$/i.exec(c))) {
+    const v = m[1].trim();
+    const list = (state.cards || []).concat((state.conveyor && state.conveyor.cards) || []);
+    const card = list.find((x) => x.type === v) || list[Number(v)];
+    return { ok: true, hit: !!(card && card.ready) };
+  }
+  if (/^conveyor_ready$/i.test(c)) {
+    return { ok: true, hit: !!(state.conveyor && state.conveyor.enabled && state.conveyor.cards && state.conveyor.cards.length) };
+  }
+  if ((m = /^zombie_in_lane\s*:\s*(\d+)$/i.exec(c))) {
+    return { ok: true, hit: (state.zombies || []).some((z) => Number(z.lane) === Number(m[1])) };
+  }
+  if ((m = /^cart_ready\s*:\s*(\d+)$/i.exec(c))) {
+    const cart = (state.carts || [])[Number(m[1])];
+    return { ok: true, hit: !!(cart && (cart.canUp || cart.canDown)) };
+  }
+  if ((m = /^zombie_near\s*:\s*(-?\d+(?:\.\d+)?)$/i.exec(c))) {
+    return { ok: true, hit: (state.zombies || []).some((z) => Number(z.column) <= Number(m[1])) };
+  }
+  if (/^tasks_ready$/i.test(c)) {
+    const list = state.tasks || [];
+    return { ok: true, hit: list.length > 0 && list.every((t) => t.completed || t.failed) };
+  }
+  if ((m = /^phase\s*:\s*(\w+)$/i.exec(c))) return { ok: true, hit: state.phase === m[1].toLowerCase() };
+  if ((m = /^plants\s*>=\s*(\d+)$/i.exec(c))) return { ok: true, hit: (state.plants || []).length >= Number(m[1]) };
+  return { ok: false, reason: '无法识别的条件：' + c };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitUntilValue(cond, timeoutSec) {
+  const timeout = Math.max(1, Math.min(60, Number(timeoutSec) || 15)) * 1000;
+  const started = Date.now();
+  let last = null;
+  while (Date.now() - started <= timeout) {
+    let state;
+    try { state = await rawState(); } catch (e) { last = { ok: false, reason: String(e.message || e) }; await sleep(300); continue; }
+    last = state;
+    if (!state || !state.ok) { await sleep(300); continue; }
+    const r = checkCondition(state, cond);
+    if (!r.ok) return { ok: false, code: 'BAD_CONDITION', condition: String(cond), message: r.reason };
+    if (r.hit) {
+      return {
+        ok: true, satisfied: true, condition: String(cond),
+        elapsed: Math.round((Date.now() - started) / 100) / 10,
+        state: compact(state),
+      };
+    }
+    await sleep(250);
+  }
+  return {
+    ok: false, code: 'TIMEOUT', satisfied: false, retryable: true,
+    condition: String(cond), elapsed: Math.round((Date.now() - started) / 100) / 10,
+    state: last && last.ok ? compact(last) : null,
+  };
 }
 
 async function knowledgeValue(kind, id) {
@@ -311,35 +560,124 @@ async function listCodename(kind) {
   return r.value;
 }
 
+async function healthValue() {
+  const r = await callMod(`(() => {
+    const P = window.PvzAI;
+    if (!P) throw new Error('AI 模组还没有加载');
+    const s = P.snapshot();
+    return {
+      modVersion: P.version,
+      snapshotOk: !!(s && s.ok),
+      scene: s && s.scene,
+      phase: s && s.phase,
+      features: {
+        terrain: typeof P.terrain === 'function',
+        carts: Array.isArray(s && s.carts),
+        lanes: Array.isArray(s && s.lanes),
+        conveyor: !!(s && s.conveyor),
+        mechanics: !!(s && s.mechanics),
+        taskSemantics: !(s && s.tasks && s.tasks.length) || s.tasks.every((t) => !!t.semantics),
+        pausedFlag: typeof (s && s.paused) === 'boolean',
+        execute: typeof P.execute === 'function',
+        waitUntil: typeof P.waitUntil === 'function',
+        moveCart: typeof P.moveCart === 'function',
+        resume: typeof P.resume === 'function',
+        replacePlant: typeof P.replacePlant === 'function',
+        briefing: typeof P.briefing === 'function',
+        setPlan: typeof P.setPlan === 'function',
+        plan: !!(s && s.plan),
+        shovelCandidates: Array.isArray(s && s.shovelCandidates),
+        levelPreview: !!(s && s.levelPreview),
+      },
+    };
+  })()`);
+  if (!r.ok) throw new Error(r.error);
+  const v = r.value || {};
+  const expected = ['pvz_state', 'pvz_knowledge', 'pvz_plant', 'pvz_act', 'pvz_wait_until', 'pvz_move_cart', 'pvz_resume', 'pvz_health', 'pvz_briefing', 'pvz_set_plan'];
+  const serverTools = TOOLS.map((t) => t.name);
+  const missingTools = expected.filter((n) => serverTools.indexOf(n) < 0);
+  return {
+    ...v,
+    serverVersion: VERSION,
+    compatible: v.modVersion === VERSION,
+    missingTools,
+    installPath: process.env.APPDATA ? `${process.env.APPDATA}\\com.pvzge.game\\gp-next\\packs\\pvzai.agent` : null,
+    hint: v.modVersion === VERSION
+      ? '模组与 Server 版本一致'
+      : '模组与 MCP Server 版本不一致：重新安装模组并重启 MCP 客户端',
+  };
+}
+
 async function handleTool(name, args) {
   switch (name) {
     case 'pvz_state':
       return textResult(await stateValue());
     case 'pvz_knowledge':
       return textResult(await knowledgeValue(args.kind, args.id));
+    case 'pvz_briefing': {
+      const r = await callMod(`window.PvzAI.briefing ? window.PvzAI.briefing() : { ok: false, reason: '模组版本过低，请更新到 0.2.9+' }`);
+      return modResult(r);
+    }
+    case 'pvz_set_plan': {
+      const plan = args && args.plan !== undefined ? args.plan : (args || {});
+      const r = await callMod(`window.PvzAI.setPlan ? window.PvzAI.setPlan(${JSON.stringify(plan)}) : { ok: false, reason: '模组版本过低，请更新到 0.2.9+' }`);
+      return modResult(r);
+    }
     case 'pvz_plant': {
       const r = await callMod(`window.PvzAI.plant(${Number(args.card)}, ${Number(args.lane)}, ${Number(args.column)})`);
-      return textResult(r.ok ? r.value : r.error, !r.ok);
+      return modResult(r);
     }
     case 'pvz_collect': {
       const r = await callMod('window.PvzAI.collectPickups ? window.PvzAI.collectPickups() : window.PvzAI.collectSuns()');
-      return textResult(r.ok ? r.value : r.error, !r.ok);
+      return modResult(r);
     }
     case 'pvz_plant_food': {
       const r = await callMod(`window.PvzAI.plantFood(${Number(args.lane)}, ${Number(args.column)})`);
-      return textResult(r.ok ? r.value : r.error, !r.ok);
+      return modResult(r);
     }
     case 'pvz_shovel': {
       const r = await callMod(`window.PvzAI.shovel(${Number(args.lane)}, ${Number(args.column)})`);
-      return textResult(r.ok ? r.value : r.error, !r.ok);
+      return modResult(r);
     }
+    case 'pvz_move_cart': {
+      const r = await callMod(`window.PvzAI.moveCart(${Number(args.cart)}, ${JSON.stringify(String(args.direction || ''))})`);
+      return modResult(r);
+    }
+    case 'pvz_resume': {
+      const r = await callMod('window.PvzAI.resume ? window.PvzAI.resume() : { ok: false, code: "OLD_MOD", reason: "模组版本过低，请更新到 0.2.6+" }');
+      return modResult(r);
+    }
+    case 'pvz_health':
+      return textResult(await healthValue());
     case 'pvz_choose_deck': {
       const plants = Array.isArray(args.plants) ? args.plants.map(String) : [];
-      const r = await callMod(`window.PvzAI.autoDeckWith ? window.PvzAI.autoDeckWith(${JSON.stringify(plants)}) : window.PvzAI.autoDeck()`);
-      return textResult(r.ok ? r.value : r.error, !r.ok);
+      const replace = !!args.replace;
+      let r = null;
+      for (let i = 0; i < 24; i++) {
+        r = await callMod(`window.PvzAI.autoDeckWith ? window.PvzAI.autoDeckWith(${JSON.stringify(plants)}, ${replace}) : window.PvzAI.autoDeck()`);
+        if (!r.ok) break;
+        if (!(r.value && r.value.code === 'PREP_NOT_READY')) break;
+        await sleep(500);
+      }
+      return modResult(r);
+    }
+    case 'pvz_act': {
+      const actions = (Array.isArray(args.actions) ? args.actions : []).slice(0, 6);
+      if (!actions.length) return textResult({ ok: false, code: 'NO_ACTIONS' }, true);
+      const r = await callMod(`window.PvzAI.execute(${JSON.stringify(actions)})`);
+      if (!r.ok) return textResult(r.error, true);
+      const steps = r.value;
+      const allOk = steps.every((s) => s.result && s.result.ok);
+      return textResult({ ok: allOk, steps }, !allOk);
+    }
+    case 'pvz_wait_until': {
+      const res = await waitUntilValue(args.until, args.timeout);
+      return textResult(res, !res.ok);
     }
     case 'pvz_start_level': {
-      const r = await callMod(`(() => {
+      let r = null;
+      for (let i = 0; i < 24; i++) {
+        r = await callMod(`(() => {
         const P = window.PvzAI;
         const s = P.snapshot();
         if (!s || !s.ok) return { ok: false, reason: s && s.reason ? s.reason : '不在关卡内' };
@@ -353,10 +691,23 @@ async function handleTool(name, args) {
         const st = P.startLevel();
         out.push({ start_level: st });
         if (st.ok) return { ok: true, detail: st.detail, steps: out };
-        if (s.phase === 'preparing') return { ok: false, reason: st.reason || '开局失败', steps: out };
+        if (s.phase === 'preparing') return { ok: false, reason: st.reason || '开局失败', code: st.code, steps: out };
         return { ok: false, reason: '当前阶段是 ' + s.phase + '，不能开局', steps: out };
       })()`);
-      return textResult(r.ok ? r.value : r.error, !r.ok);
+        if (!r.ok) break;
+        if (!(r.value && r.value.code === 'PREP_NOT_READY')) break;
+        await sleep(500);
+      }
+      if (r.ok && r.value && r.value.ok) {
+        try {
+          const p = await callMod('window.PvzAI.plan ? window.PvzAI.plan() : null');
+          if (p.ok && !p.value) {
+            r.value.warning = (r.value.warning ? r.value.warning + '；' : '')
+              + '还没记录本关作战计划：建议先 pvz_briefing 再 pvz_set_plan，然后开局';
+          }
+        } catch { /* ignore */ }
+      }
+      return modResult(r);
     }
     case 'pvz_dismiss_objective': {
       const r = await callMod(`(() => {

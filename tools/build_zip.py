@@ -10,6 +10,7 @@ items = [
     ('pack.json', 'pack.json'),
     ('thumbnail.png', 'thumbnail.png'),
     ('README.md', 'README.md'),
+    ('strategy.md', 'strategy.md'),
     ('scripts/main.js', 'scripts/main.js'),
 ]
 with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:

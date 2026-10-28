@@ -19,9 +19,38 @@
 - **自动选卡开局**：在选卡页自动选一套卡并点“一起摇滚吧”。
 - **每行阵容约束**：同一行最多 1 个坚果墙、1 个弹簧豆、1 个冰冻生菜、2 个阳光生产者、4 个射手、2 个地刺；模型乱种会被代码拒绝，并在提示词里看到“该行已有坚果，禁止再种”。
 - **铲子**：支持普通植物和地刺/土豆雷/睡莲等 tile 植物；可以铲掉重复坚果、低血量植物或低效植物，腾位种更强的卡。
+- **v0.2.9 换卡重种**：`replace` 动作先铲后种，一步把弱卡换成强卡（豌豆→双发/西瓜、坚果→高坚果）；`snapshot().shovelCandidates[]` 直接给出可铲候选与原因（超上限 / 可升级 / 位置不对 / 残血）和更好的卡，`loss_limit` 只剩 1 株时拒绝铲除。
+- **v0.2.9 开局对策**：进入关卡目标/选卡阶段先读任务、地形机制、预计僵尸（从关卡配置 RTID + 图鉴）、可选卡组，产出整关计划（goal / threats / counters / deck / buildOrder / shovelPolicy / dangerLanes），选卡按计划自动配，战斗中每回合带着计划打。
+- **v0.3.0 思考浮窗**：独立悬浮卡片实时显示当前阶段与耗时（读取战场/模型思考/执行动作）、模型 `thought`、要执行的动作与结果、作战计划、最近几回合思考；支持流式输出（边生成边显示）与 F10 开关。
+- **v0.3.0 自动换卡**：`shovelCandidates` 大幅放宽（同行不到 4 个射手但只要关键位置种满、坚果升级、位置错误、残血），并且默认开启“自动铲换弱卡”兜底，6 秒最多换 1 格、留足阳光余量。
+- **v0.3.0 提速**：默认决策间隔 2200ms → 1600ms；动作成功后 0.9s 内就重新决策；场景组件/关卡预测/地形/机制/地块加入短缓存，状态浮窗 700ms 刷新不再重复全量扫描；提示词里的图鉴文本截断。
+- **v0.3.1 位置理解**：提示词新增 5×9 文字位置图和“空位建议”（直接给出可种的 `c` 下标）；`snapshot().board` 提供结构化棋盘；失败结果带 `alts` 可改种格子；明显浪费的种法（阳光 c≥5、坚果 c≤1、地刺 c≤1、普通射手 c≥7）直接返回 `POSITION`，不再硬种。
+- **v0.3.2 可编辑策略**：系统提示拆成“固定规则 + 可编辑决策原则”，浮窗里可直接改策略（恢复默认一键还原）；地刺改为必须放前排 c4-c7、且在坚果前面，否则拒绝并给 `alts`。
+- **v0.3.2 玩家指示**：思考浮窗里可直接输入一句提示（回车发送），会进入后续每回合的提示词（优先遵守），可随时清除。
+- **v0.3.2 开局侦察**：选卡阶段拿到“可用植物 + 预计僵尸 + 任务 + 世界机制”后再制定计划；关卡数据读不到僵尸时按世界常识兜底（`state.world`），并用 `source` 标明来源。
+- **v0.3.3 浮窗修复**：补上 `el.strategy` 引用（v0.3.2 的 UI 因它报错导致按钮全部失效、收不起来），新增安全绑定辅助，单个控件缺失不再拖垮整个浮窗。
+- **v0.3.4 策略文件化**：默认策略移到模组包内的 `strategy.md`，用 `ctx.files.own()` 读取；`#` 行是注释。编辑文件后点“重新读取”即可生效。
+- **v0.3.5 本关临时策略**：浮窗里的输入框只作用于当前关卡，不写默认策略/不持久化；发送后和实时状态一起进入下一次思考，并立即触发一次决策；换关自动清空。
 - **关卡任务识别**：读取每关任务（如“在 30 秒内击杀 20 个僵尸”），包括当前进度 `0/20`、完成/失败状态；任务会进入提示词，AI 围绕任务调整打法；开局的“关卡目标”说明界面会自动点“继续”。
+- **v0.2.5 地形矩阵**：`snapshot().terrain.map` 直接给出 5×9 地形（L 陆地 / P 木板 / W 水 / S 天空），`blockedCells` 标出不可种植格；种水格不再靠试错。
+- **v0.2.5 结构化错误**：种植/铲除/能量豆失败返回 `code`（`TERRAIN` / `COOLDOWN` / `SUN` / `OCCUPIED` / `LANE_LIMIT` / `LEVEL_LIMIT`…），`COOLDOWN` 带 `retryAfter`。
+- **v0.2.5 任务计时**：`timed_kill` 使用滑动窗口语义，给出 `windowActive` / `timeLeft` / `urgent` / `hint`，内置 AI 会在 `urgent` 时优先输出与能量豆。
+- **v0.2.5 批量动作 / 条件等待**：`window.PvzAI.execute(actions)` 一次执行最多 6 个动作；`waitUntil("sun>=200", 20000)` 内部 200ms 轮询。
+- **v0.2.5 换卡组**：`autoDeckWith(plants, true)` 会先 `Cards.spliceAllCards()` 清空游戏预填卡组，再逐张选入，返回 `deck / applied / skipped`。
+- **v0.2.6 矿车**：`snapshot().carts[]` + `moveCart(id, "up"|"down")`；矿车是可移动植物平台，植物跟着换行。地形用 `R` 标轨道。
+- **v0.2.6 全任务语义**：7 种关卡任务都有 `semantics / left / hint / urgent`（植物损失、植物上限、阳光预算、限时击杀等）。
+- **v0.2.6 逐行火力**：`snapshot().lanes[]` 给出每排 `shooters / nearestZombie / needsShooter / danger / mower / cart`。
+- **v0.2.6 暂停识别**：`paused` / `ui`，动作失败返回 `PAUSED`；`resume()` 继续。
+- **v0.2.6 僵尸标签**：`zombies[].tags`（crush / jump_over / backline / flying / spawner / armored / lane_switch）。
+- **v0.2.6 损失追踪**：`recentLosses[]` 记录刚消失的植物。
+- **v0.2.7 通用机制探测**：`snapshot().mechanics`（features / tide / dinosaurs / portals / hazards / tiles / unmappedTiles）；不按地图硬编码，按场景组件类名识别。
+- **v0.2.7 不支持关卡**：砸罐/天空/保龄球标 `supported:false`，种植返回 `UNSUPPORTED_LEVEL`。
+- **v0.2.8 传送带**：`snapshot().conveyor`（cards / plantList / slots / vertical）；`plant()` 在传送带关卡把 `card` 解释为 `conveyor.cards` 下标，走 `Conveyor.chooseCard()` + `PlaceUIPlant()`，不扣阳光、不吃冷却。
+- **v0.2.9 预计僵尸**：`snapshot().levelPreview = { zombies[], plants[] }`，直接扫关卡配置里的 RTID 得到本关将出现的单位。
+- **v0.2.9 任务要点**：`objective.hints` / `snapshot().missionHints` 把目标原文解析成“不能损失 / 有倒计时 / 击杀数 / 植物上限 / 阳光目标 / 以守为主”。
+- **v0.2.9 图鉴强化**：卡槽行标注定位（阳光/坚果/输出/一次性/地雷/辅助），僵尸标签配一句话应对要点，`plantRole` 新增 aoe / mine / support。
 - **原生种植**：走 `UIInGame.tryChangingIndex()` + `LnC.PlaceUIPlant()`，会正常扣阳光、进冷却、受关卡植物上限/地形限制。
-- **支持动作**：种植、铲除、喂植物能量、等待、选卡、关闭任务说明、开局。
+- **支持动作**：种植、**替换（replace = 铲除+种植）**、铲除、喂植物能量、等待、选卡、关闭任务说明、开局。
 - **F8 热键**：随时开始/停止；按 F9 可打开 GP-Next 官方侧栏作为兜底。
 
 ## 适用版本
@@ -62,6 +91,39 @@
 5. 浮窗会收起为右下角胶囊，显示阳光/波次；点胶囊可展开看日志。
 6. 再按 **F8** 停止。关卡胜利/失败会自动停止。
 
+### 思考浮窗（v0.3.0）
+
+开始操控后，左下角会出现一张 **🧠 AI 思考** 卡片（可拖动，不影响主浮窗收起）：
+
+```text
+┌ 🧠 AI 思考 ────────── 模型思考 · 2.4s ┐
+│ 💭 第3排铁桶快到了，先补双发再给坚果   │
+│ · 种卡#2 → 2,1                         │
+│ · 换卡#1 → 3,4                         │
+│ 📋 目标：坚持 60 秒｜卡组：…            │
+│ 第18回合 · 补经济，先向日葵             │
+└──────────────────────────────────────┘
+```
+
+- 顶部计时显示当前阶段花了多久（超过 6 秒变黄）。
+- 动作先以 `·` 显示，执行后变成 ✅/⚠️ 并带失败原因。
+- 计划（开局对策）一直显示在卡片里。
+- **“位置图（模型看到的）”**：展开就能看到模型这一回合收到的 5×9 棋盘，方便核对它是不是看错了格子。
+- **本关临时策略输入框**：输入“这关地刺放最前面”“别种坚果”等提示，回车或点“发送并思考”会把它拼进下一次模型请求并**立即触发决策**；只在本关生效，换关/点“清除”自动消失，不会修改默认策略。
+- 开启“流式思考”（默认开）时，模型还没输出完就能看到 `thought` 逐步出现。
+- **F10** 显示/隐藏；也可以点卡片右上角 **—**，或在主浮窗勾选“显示思考浮窗”。
+
+勾选项说明：
+
+| 勾选 | 作用 |
+| --- | --- |
+| 自动收阳光/能量豆 | 定期收取掉落物 |
+| 自动选卡开局 | 选卡阶段按作战计划选卡并点“一起摇滚吧” |
+| 自动铲换弱卡 | 模型没理会候选时，自动执行 1 次“明显该换”的 replace/铲除（6 秒冷却，保留阳光余量） |
+| 显示思考浮窗 | F10 同款开关 |
+| 流式思考（更快） | 请求改为 SSE 流式，思考窗边生成边显示；服务端不支持时自动退回普通请求 |
+| 本地策略 | 不调用模型，用内置规则 |
+
 浮窗默认在右上角，可拖拽标题栏移动。如果它挡住“一起摇滚吧”或暂停按钮，拖到别处，或点标题栏的 **—** 收起；右下角的小胶囊点一下可以重新展开。
 
 ### 模型配置示例
@@ -88,15 +150,21 @@
 | 阳光 | `SunCount.CurrentValue` |
 | 卡槽/费用/冷却 | `Cards.CFs`、`Cards.cardsUIUpper[i].CD` |
 | 种植 | `UIInGame.tryChangingIndex()` + `LnC.PlaceUIPlant()` |
-| 铲除 | `LnC.removePlant()`（遍历 plantInSquare / tilePlantInSquare / vineInSquare 等所有容器） |
-| 关卡任务 | `LevelTaskCount`（`tip` / `count.string` / `completed` / `failed` / `objdata`） |
+| 铲除 | `LnC.removePlant()`（遍历 plantInSquare / tilePlantInSquare / vineInSquare 等所有容器）；替换 = 铲除 + 原生种植 |
+| 关卡任务 | `LevelTaskCount`（`tip` / `count.string` / `mode` / `startingObjdata` / `objdata` / `completed` / `failed`） |
+| 地形 | `LnC.squareType`（0=solid 1=sky 2=water 3=sea 4=deck） |
 | 目标说明界面 | `LevelObjectiveScreen.continue()` |
 | 收阳光 | `sun.collect()`（回退 `specialGoToUI()`） |
 | 植物能量 | `plant.food()` + `PlantFoodCount.plantFoodDec()` |
 | 棋盘 | `Square.getLnC(row, col)` |
 | 僵尸 | `Square.getLane(i).zombiePool()` |
-| 选卡开局 | `Cards.addCardByPlantTypeFromSeedbank()` + `levelController.letsRock()` |
+| 选卡开局 | `Cards.addCardByPlantTypeFromSeedbank()` / `Cards.spliceAllCards()` + `levelController.letsRock()` |
 | 波次/胜负 | `levelController.currentWave / waveManagerProps / gameWon / gameLost` |
+
+对外 API（MCP 通过 `window.PvzAI` 调用）：`snapshot` / `plant` / `shovel` / `replacePlant(card, lane, column)` /
+`plantFood` / `autoDeck` / `autoDeckWith(plants, replace)` / `startLevel` / `dismissObjective` /
+`execute(actions)` / `waitUntil(cond, timeoutMs)` / `terrain(lane, column)` /
+`briefing()`（开局简报） / `plan()` / `setPlan(plan)` / `makePlan()`（立即重新制定） / `knowledge.plant|zombie`。
 
 大模型每回合收到一份紧凑 JSON + 一行行战场摘要，输出：
 
@@ -114,14 +182,95 @@
 
 - `snapshot().phase = "objective"`：停在开局的目标说明界面，AI 会自动点“继续”，也可以手动调用 `PvzAI.dismissObjective()`。
 - `snapshot().tasks`：本关任务列表，例如
-  `[{ tip: "在 30 秒内击杀 20 个僵尸", count: "0/20", value: 0, total: 20, percent: 0, completed: false, failed: false }]`。
-- `snapshot().objective`：说明界面的标题与任务文本（`screenName` / `missions` / `active`）。
+  `[{ tip: "在 30 秒内击杀 20 个僵尸", count: "20/20", value: 20, total: 20, percent: 100,
+      mode: 6, modeName: "timed_kill", timeSemantics: "sliding_window",
+      windowActive: false, timeLeft: null, urgent: false, completed: true, failed: false }]`。
+- `timed_kill` 不是“整关倒计时”，而是**最近 30 秒内击杀 ≥ 20** 的滑动窗口：
+  每次击杀 30 秒后计数减 1。`timeLeft` 表示最老一次击杀还剩几秒过期，
+  `urgent` 在窗口快过期或进度 ≥75% 时为 true；内置 AI 会优先能量豆/一次性植物。
+- `snapshot().terrain`：`{ lanes, columns, map: ["LLLLLWWWW", ...], legend }`；
+  海盗港湾 17 实测：0–2 行第 5–8 列海面，3–4 行第 5–8 列木板。
+- `snapshot().blockedCells`：`[{ lane, column, terrain: "W", reason: "water" }]`，
+  含游戏地形与 15 秒学习缓存。
 - 任务文本会写进提示词第一屏（`本关任务（必须完成）：… 0/20`），任务进度变化也会触发重新决策。
+- `objective.hints` / `snapshot().missionHints` 会把目标原文解析成可执行要点：不能损失植物、有倒计时、要击杀 N 个、植物数量上限、阳光目标、以守为主。
 - 如果任务带 `plantCountLimit` 这类限制，本地策略会据此停止超量种植。
+
+## 开局对策（v0.2.9）
+
+进入关卡目标说明或选卡阶段时，模组会先做一次“参谋”调用，而不是直接开打：
+
+1. 汇总 `briefing()`：关卡目标原文 + 任务要点 + 地形/机制 + 矿车 + 预计僵尸（关卡配置里的 RTID 反查图鉴）+ 可选卡组（含图鉴）与推荐卡组。
+2. 模型返回 `plan`：`goal / threats / counters / deck / buildOrder / shovelPolicy / dangerLanes / notes`。
+3. 选卡阶段按 `plan.deck` 自动选卡（不足卡槽会补满，选不到的卡会跳过并回退到游戏推荐卡组）。
+4. 战斗中每回合的提示词都带“本关作战计划”，模型按计划打；局势突变可以偏离。
+
+计划也会出现在 `snapshot().plan`，MCP 侧可以用 `pvz_briefing` + `pvz_set_plan` 走同样的流程。
+
+## 铲除与换卡
+
+- `shovel(lane, column)`：铲掉一格；支持地刺/土豆雷/睡莲等 tile 植物，不返还阳光。
+- `replacePlant(card, lane, column)`：先预检卡片（存在/可用/地形），再铲掉并立刻种上，用于同格升级。
+- `snapshot().shovelCandidates[]`：`{ lane, column, type, name, hpPercent, reason, better, betterCard, needSun }`
+  - `over_limit`：同行同角色超过软上限，建议铲最弱的
+  - `upgrade`：该行已满员且手上有更强的同类卡，建议 `replace` 成 `better`
+  - `misplaced`：阳光生产者太靠前 / 坚果在最左侧 / 地刺太靠后或在坚果后面
+  - `low_hp`：血量 ≤15% 且同角色有卡可补
+- 安全限制：`loss_limit` 任务 `left<=1` 时拒绝主动铲（`SHOVEL_BLOCKED`），并把 `shovelCandidates` 清空、`shovelBlocked=true`；`expect` 参数不匹配返回 `PLANT_MISMATCH`；铲除会清掉该格 15 秒不可种缓存，并避免被记成“植物损失”。
+
+## 位置与落点（v0.3.1 / v0.3.2）
+
+每回合提示词里现在有直接可读的坐标信息，不再只丢一堆数组：
+
+```text
+位置图（c0 在房子侧，c8 在僵尸出生侧；· 为空）：
+　　　c0 c1 c2 c3 c4 c5 c6 c7 c8
+第1排 向日 豌豆 ·  ·  ·  ·  坚果 ·  · ｜僵尸 c7海盗(500)
+第3排 ·  ·  ·  ·  ·  ·  ·  ·  ·
+空位建议（可直接用）：第2排：输出 c1/c2/c3，坚果 c5
+位置窗口：阳光 c0-c2；普通输出 c0-c4；坚果/近战 c3-c7；地刺 c4-c7（必须在坚果前面）。
+```
+
+- 地刺规则：必须放前排（c4-c7）且在坚果前面；放后面或在坚果后面会被 `POSITION` 拒绝，`alts` 给出前排空位。紧急情况下（僵尸已压到 c≤3）不强行阻止补墙。
+- 种错位置时返回 `code=POSITION`，并带 `alts: [{lane, column}]`；普通失败（`OCCUPIED` / `TERRAIN` / `CELL_BLOCKED` / `LANE_LIMIT`）也带 `alts`。
+- 下一回合的“上一回合结果”会把这些可改种格子原样给模型，减少反复撞同一格。
+- `snapshot().board` 是同一信息的结构化版本，MCP 侧直接用 `lane.cells[column]` 读格子。
+- 只有“明显浪费”才拦截；该行推荐窗口都满了时仍允许种在非常规位置，避免最后一道防线被规则堵死。
+
+## 策略文件与本关临时策略（v0.3.4 / v0.3.5）
+
+两者是分开的：
+
+### 默认策略 `strategy.md`（全局）
+
+- 模组包根目录的 `strategy.md` 就是默认“决策原则”，直接用文本编辑器改；`#` 开头的行是注释，不发给模型。
+- 主浮窗 → **默认策略（strategy.md）** 显示加载状态，点 **“重新读取 strategy.md”** 即可生效，不必重启。
+- 安装版路径：`%APPDATA%\com.pvzge.game\gp-next\packs\pvzai.agent\strategy.md`；ZIP 版与 `pack.json` 同级。
+- 文件不存在 / 为空 / 旧版 GP-Next 没有 `ctx.files` 时，自动回退到脚本内置默认。
+
+### 本关临时策略（只影响当前关卡）
+
+- 在 🧠 AI 思考卡片底部的输入框里写一句，例如“这关地刺放 c6，先补双发”，按回车或点 **“发送并思考”**。
+- 内容只保存在内存里，**不会写入 `strategy.md`，也不会存在 localStorage**；换关自动清空，点“清除”也会清掉。
+- 发送后会拼进下一次模型请求（和实时关卡状态一起），并**立即触发一次决策**，不用等下一个决策间隔。
+- 之后的同一关每回合仍会带上它（作为“本关临时策略”）；如果不希望继续生效，点“清除”。
+
+优先级：`本关临时策略`（本关每回合）> `strategy.md`（全局默认）> 脚本内置默认。
+
+## 开局侦察（v0.3.2）
+
+进入选卡阶段、拿到可选卡之后才制定计划，保证参谋同时看到：
+
+- **可用植物**：`seedSelection.available`（codename / 费用 / 定位 / 图鉴简介），并保证卡组至少 1 阳光 + 2 输出；
+- **预计僵尸**：关卡配置里的 RTID；读不到时用 `state.world.zombies`（世界常识）兜底，`levelPreview.source` 标明 `level-data` 还是 `world-knowledge`；
+- **关卡任务**：目标说明原文 + `missionHints` + 任务进度；
+- **世界特点**：`state.world = { key, name, mechanics, tips, zombies }`，例如潮汐/墓碑/矿车/恐龙/气功洞。
+
+参考世界资料：[PvZ2 BWiki](https://wiki.biligame.com/pvzz/)。世界常识只是兜底，实际以游戏内 almanac 与 `state.mechanics` 为准。
 
 ## 限制
 
-- **只支持标准种子卡槽关卡**。传送带关、保龄球、砸罐子、天空关、特殊小游戏可能无法种植（没有 `Cards.CFs` 或没有 `LnC.PlaceUIPlant`），此时 AI 会停在等待。
+- **支持标准种子卡槽关卡与传送带关卡**。砸罐子、保龄球、天空关、特殊小游戏仍可能无法操作，`snapshot().mechanics.supported=false` 时 AI 会停止尝试种植。
 - **依赖 0.16.x 的内部字段**。游戏大版本更新后可能失效；届时需要重新适配组件名/字段。
 - **不是“无敌挂”**。种植会扣阳光、进冷却、受关卡植物上限和地形限制；AI 也可能打输。
 - **浮窗可能被指针锁定挡住**。游戏中鼠标被锁定时，先按 Esc 解锁，或用 F8 热键。
@@ -184,6 +333,7 @@ Key 错误、Base URL 少了 `/v1`、或模型名不对。
 pvz-ai-agent-mod/
 ├── pack.json          # GP-Next 清单
 ├── thumbnail.png      # 模组封面
+├── strategy.md        # 决策原则（可编辑，可加 # 注释）
 ├── scripts/
 │   └── main.js        # 入口：浮窗 + 状态读取 + 动作 + 模型调用
 └── README.md
@@ -195,9 +345,12 @@ pvz-ai-agent-mod/
 pvz-ai-agent.zip
 ├── pack.json
 ├── thumbnail.png
+├── strategy.md
 ├── scripts/main.js
 └── README.md
 ```
+
+> `strategy.md` 通过 `ctx.files.own().readText('strategy.md')` 读取；如果旧版 GP-Next 没有 `ctx.files`，会自动回退到 `scripts/main.js` 内置的默认策略。
 
 ## 适配 / 二次开发
 
