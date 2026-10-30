@@ -301,6 +301,8 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:an
 
 当前版本：**模组 0.1.19 + 启动器 1.0.0**（OpenCode Go 本地代理 + 一键发布包）。
 
+> v0.2.x / v0.3.x 的旧发布（`pvz-ai-agent-mod` 时代）已归档为 Pre-release，只作存档，不再更新；下载请用 [v0.4.9+](https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/latest)。
+
 完整版本记录见 **[CHANGELOG.md](CHANGELOG.md)**；逐版本实现细节另见 **[pvz-llm-agent/CHANGELOG.md](pvz-llm-agent/CHANGELOG.md)**。
 
 ## License
