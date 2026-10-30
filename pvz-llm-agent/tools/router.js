@@ -61,7 +61,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-export function createToolRouter({ bridge, version = '0.1.15', sleep = routerSleep }) {
+export function createToolRouter({ bridge, version = '0.1.16', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -160,8 +160,10 @@ export function createToolRouter({ bridge, version = '0.1.15', sleep = routerSle
       let r = await bridge.act(one);
       let retries = 0;
       while (r && r.ok === false && r.code === 'COOLDOWN' && retries < 3 && Date.now() < deadline) {
-        const waitMs = Math.min(8000, Math.max(200, (Number(r.retryAfter) || 1) * 1000));
-        await sleep(waitMs);
+        const secs = Number(r.retryAfter) || 0;
+        // 长冷却（墙卡 20s 这类）干等不划算：停手，让模型换张卡补线
+        if (secs > 3.5) break;
+        await sleep(Math.max(200, secs * 1000) + 120);
         retries += 1;
         r = await bridge.act(one);
       }
@@ -296,13 +298,14 @@ export function createToolRouter({ bridge, version = '0.1.15', sleep = routerSle
       } catch (e) {
         r = normalizeError('ACT_THREW', {}, String(e && e.message || e));
       }
-      // 同一张卡在一批动作里会出现两次：等它自己的冷却，而不是把 COOLDOWN 甩给模型。
-      // 单次最多等 6 秒、重试 2 次；整批最多再花 20 秒，避免一次调用把人晾住。
+      // 同一张卡在一批动作里会出现两次：短冷却（≤3.5s）自动等，长冷却直接返回让模型换卡。
+      // 20 秒的墙卡在这里干等，等于把整轮节奏晾死。
       if (r && r.ok === false && r.code === 'COOLDOWN') {
         const budget = Date.now() + 20000;
         for (let retry = 0; retry < 2 && r && r.code === 'COOLDOWN' && Date.now() < budget; retry++) {
-          const waitMs = Math.min(6000, Math.max(200, (Number(r.retryAfter) || 1) * 1000));
-          await sleep(waitMs);
+          const secs = Number(r.retryAfter) || 0;
+          if (secs > 3.5) break;
+          await sleep(Math.max(200, secs * 1000) + 120);
           try { r = await bridge.act(a); } catch (e) { r = normalizeError('ACT_THREW', {}, String(e && e.message || e)); }
         }
       }

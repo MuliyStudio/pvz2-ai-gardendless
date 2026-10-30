@@ -23,7 +23,7 @@ test('agent 执行 tool_calls、回填结果、显示推理，并在收到停止
   const router = {
     call: async (name, args) => {
       calls.push({ name, args });
-      if (name === 'pvz_health') return { ok: true, version: '0.1.15', phase: 'running' };
+      if (name === 'pvz_health') return { ok: true, version: '0.1.16', phase: 'running' };
       if (name === 'pvz_state') return { ok: true, phase: 'running', sun: 100, plantFood: 1, level: { wave: 1, waves: 2 }, cards: [], plants: [], zombies: [], tasks: [], lanes: [] };
       return { ok: true };
     },

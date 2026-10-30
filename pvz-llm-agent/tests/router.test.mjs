@@ -10,7 +10,7 @@ function setup(opts) {
   resetAssetCache();
   const game = createFakeGame(opts);
   const bridge = createBridge(game.ctx);
-  const router = createToolRouter({ bridge, version: '0.1.15' });
+  const router = createToolRouter({ bridge, version: '0.1.16' });
   return { game, bridge, router };
 }
 
@@ -100,7 +100,7 @@ test('router: health 带工具清单和版本', async () => {
     assert.equal(h.ok, true);
     assert.equal(h.tools.length, 16);
     assert.equal(h.namespace, 'pvz-llm-agent');
-    assert.equal(h.serverVersion, '0.1.15');
+    assert.equal(h.serverVersion, '0.1.16');
   } finally { teardown(bridge); }
 });
 
@@ -237,5 +237,21 @@ test('router: 一批动作里同一张卡出现两次，自动等冷却后仍能
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(r.results[1].ok, true, '第二次撞冷却后自动等待重试成功');
     assert.equal(bridge.snapshot().plants.length, 2);
+  } finally { teardown(bridge); }
+});
+
+test('router: 长冷却（>3.5s）不干等，直接返回 COOLDOWN 让模型换卡', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 300;
+    let calls = 0;
+    bridge.act = async () => { calls += 1; return { ok: false, code: 'COOLDOWN', retryAfter: 12, type: 'wallnut' }; };
+    const t0 = Date.now();
+    const r = await router.call('pvz_act', { actions: [{ type: 'plant', plant: 'wallnut', lane: 0, column: 0 }] });
+    const ms = Date.now() - t0;
+    assert.equal(r.results[0].code, 'COOLDOWN');
+    assert.equal(calls, 1, '长冷却不应该反复重试');
+    assert.ok(ms < 1500, `不该阻塞等待，实际 ${ms}ms`);
   } finally { teardown(bridge); }
 });

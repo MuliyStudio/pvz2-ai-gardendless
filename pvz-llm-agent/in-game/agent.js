@@ -337,9 +337,9 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
 
   function compactOldToolResults() {
     const toolMsgs = messages.filter((m) => m.role === 'tool');
-    // 最近 4 条工具结果保留原文；更早的大结果压成一句状态摘要。
-    // 每份 pvz_state 约 9KB，留 8 份会让单轮 prompt 冲到 30k+ token，模型响应直接慢到 20-30 秒。
-    for (let i = 0; i < toolMsgs.length - 4; i++) {
+    // 最近 2 条工具结果保留原文；更早的大结果压成一句状态摘要。
+    // 每份 pvz_state 约 9KB，留 4 份实测单轮输入仍有 14k token（一局 73 万），留 2 份够用。
+    for (let i = 0; i < toolMsgs.length - 2; i++) {
       const m = toolMsgs[i];
       if (!m.content || m.content.length <= 800) continue;
       let note = '旧工具结果已省略；需要时重新调用 pvz_state / pvz_knowledge';

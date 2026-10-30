@@ -1579,9 +1579,13 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
         hint: '卡组已满但有指定卡没选中；请核对 actualDeck 后重试',
       }, `这些卡没有选中：${missing.join(', ')}`);
     }
+    const warn = (missing.length || skipped.length)
+      ? `实际卡组和你请求的不一致：缺 ${missing.join('、') || '无'}；被跳过 ${skipped.map((s) => `${s.type}(${s.reason})`).join('、') || '无'}。以 actualDeck 为准，没带上的卡不要当它有。`
+      : undefined;
     return {
       ok: true,
       ...result,
+      warning: warn,
       detail: `选卡完成（${actualDeck.length}/${slots}）`,
     };
   }
@@ -1777,9 +1781,19 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
       if (counter && !(counter.plantFoodNum > 0)) return fail('NO_FOOD', { have: counter.plantFoodNum || 0 });
       const cell = C.getLnC(lane, column);
       if (!cell) return fail('NO_CELL', { lane, column });
-      const p = reader.cellPlants(cell)[0];
-      if (!p) return fail('NO_PLANT', { lane, column });
-      if (!p.foodable) return fail('NOT_FOODABLE', { lane, column, type: cleanType(p.Plant_Type) });
+      // 同一批里「先种再给豆」时植物还没落地：等一小会儿再读，别直接 NO_PLANT。
+      let p = reader.cellPlants(cell)[0];
+      if (!p) {
+        await waitFor(() => reader.cellPlants(cell).length > 0, 1200);
+        p = reader.cellPlants(cell)[0];
+      }
+      if (!p) {
+        return fail('NO_PLANT', {
+          lane, column,
+          hint: '这一格没有植物（可能刚被吃掉，或同一批里刚种下还没落地）；先 pvz_state 确认再用能量豆',
+        }, `${lane} 行 ${column} 列没有植物`);
+      }
+      if (p.foodable === false) return fail('NOT_FOODABLE', { lane, column, type: cleanType(p.Plant_Type) });
       try {
         p.fooding = true;
         if (typeof p.doPlantFood === 'function') p.doPlantFood();
@@ -2334,7 +2348,7 @@ function createEventStreamApi({ snapshot }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.1.15';
+const BRIDGE_VERSION = '0.1.16';
 
 function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -2586,7 +2600,7 @@ const TOOLS = [
     description:
       '执行 1–6 个精确动作：plant（种植）、replace（同格换植）、shovel（铲除）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、restart（重开本关）、dismiss_objective、collect。' +
       'plant/replace 传 cells 可以把同一张卡一次种到多个格子（工具按冷却自动等待重试）。' +
-      '同一张卡在一批动作里出现两次时，工具也会自动等它的冷却（单次≤6 秒、最多重试 2 次）再执行。' +
+      '同一张卡在一批动作里出现两次时：冷却 ≤3.5 秒工具会自动等它再试（最多 2 次）；更长的冷却直接返回 COOLDOWN，让你换一张卡，不把这一轮晾住。' +
       '每个动作返回真实 ok/code/reason/retryAfter（如 COOLDOWN/SUN/OCCUPIED/CELL_BLOCKED）。部分失败不会抛异常；按每个 result 自己决定下一步。',
     inputSchema: {
       type: 'object',
@@ -3194,7 +3208,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.1.15', sleep = routerSleep }) {
+function createToolRouter({ bridge, version = '0.1.16', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -3293,8 +3307,10 @@ function createToolRouter({ bridge, version = '0.1.15', sleep = routerSleep }) {
       let r = await bridge.act(one);
       let retries = 0;
       while (r && r.ok === false && r.code === 'COOLDOWN' && retries < 3 && Date.now() < deadline) {
-        const waitMs = Math.min(8000, Math.max(200, (Number(r.retryAfter) || 1) * 1000));
-        await sleep(waitMs);
+        const secs = Number(r.retryAfter) || 0;
+        // 长冷却（墙卡 20s 这类）干等不划算：停手，让模型换张卡补线
+        if (secs > 3.5) break;
+        await sleep(Math.max(200, secs * 1000) + 120);
         retries += 1;
         r = await bridge.act(one);
       }
@@ -3429,13 +3445,14 @@ function createToolRouter({ bridge, version = '0.1.15', sleep = routerSleep }) {
       } catch (e) {
         r = normalizeError('ACT_THREW', {}, String(e && e.message || e));
       }
-      // 同一张卡在一批动作里会出现两次：等它自己的冷却，而不是把 COOLDOWN 甩给模型。
-      // 单次最多等 6 秒、重试 2 次；整批最多再花 20 秒，避免一次调用把人晾住。
+      // 同一张卡在一批动作里会出现两次：短冷却（≤3.5s）自动等，长冷却直接返回让模型换卡。
+      // 20 秒的墙卡在这里干等，等于把整轮节奏晾死。
       if (r && r.ok === false && r.code === 'COOLDOWN') {
         const budget = Date.now() + 20000;
         for (let retry = 0; retry < 2 && r && r.code === 'COOLDOWN' && Date.now() < budget; retry++) {
-          const waitMs = Math.min(6000, Math.max(200, (Number(r.retryAfter) || 1) * 1000));
-          await sleep(waitMs);
+          const secs = Number(r.retryAfter) || 0;
+          if (secs > 3.5) break;
+          await sleep(Math.max(200, secs * 1000) + 120);
           try { r = await bridge.act(a); } catch (e) { r = normalizeError('ACT_THREW', {}, String(e && e.message || e)); }
         }
       }
@@ -3515,6 +3532,9 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2 花园无尽》的唯一决�
 - 铺同一种卡到多格时用 pvz_act 的 cells，工具会按冷却自动等待重试；不要为了同一张卡连续调用 5 次。
 - 想重开本关用 pvz_restart（不用先进暂停菜单）。
 - 每次工具往返都有网络延迟：一轮尽量把能做的都做完（pvz_act 最多 6 个动作，铺同一种卡用 cells），不要每轮只种一株。
+- 能量豆只给已经落地的植物：同一批动作里刚种下的植物还没落地，给豆会 NO_PLANT；下一轮再给。留着不用等于浪费，血多的输出/尖刀/墙优先。
+- pvz_choose_deck 返回 warning / actualDeck 时以 actualDeck 为准：计划里没带上的卡不要当自己有（例如计划写噬碑藤但卡组没带）。
+- 樱桃炸弹、倭瓜、冰冻生菜这类一次性/控制卡是拿来救场的，不是存着看的：某行有僵尸贴到 c2 以内就该用。
 - 每次动作前先看 pvz_state（至少看阳光、卡槽冷却、格子占用、僵尸位置）。失败后读 code，不要对同一个格子/同一张卡反复撞同一个错误。
 - 阳光、能量豆、金币会自动收；需要时也可以 pvz_collect。
 - 关卡任务失败可能直接判负：把 tasks 的 tip/hint/timeLeft/urgent 当作硬约束。
@@ -3902,9 +3922,9 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
 
   function compactOldToolResults() {
     const toolMsgs = messages.filter((m) => m.role === 'tool');
-    // 最近 4 条工具结果保留原文；更早的大结果压成一句状态摘要。
-    // 每份 pvz_state 约 9KB，留 8 份会让单轮 prompt 冲到 30k+ token，模型响应直接慢到 20-30 秒。
-    for (let i = 0; i < toolMsgs.length - 4; i++) {
+    // 最近 2 条工具结果保留原文；更早的大结果压成一句状态摘要。
+    // 每份 pvz_state 约 9KB，留 4 份实测单轮输入仍有 14k token（一局 73 万），留 2 份够用。
+    for (let i = 0; i < toolMsgs.length - 2; i++) {
       const m = toolMsgs[i];
       if (!m.content || m.content.length <= 800) continue;
       let note = '旧工具结果已省略；需要时重新调用 pvz_state / pvz_knowledge';

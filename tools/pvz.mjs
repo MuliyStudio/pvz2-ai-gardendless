@@ -8,7 +8,8 @@
 import fs from 'node:fs';
 
 const PORT = Number(process.env.PVZ_CDP_PORT || 9222);
-const [cmd, ...rest] = process.argv.slice(2);
+const argv = process.argv.slice(2).filter((a) => !a.startsWith('--out='));
+const [cmd, ...rest] = argv;
 if (!cmd) {
   console.error('usage: node tools/pvz.mjs <state|briefing|events|call|eval> [...]');
   process.exit(1);
@@ -156,11 +157,14 @@ if (r.exceptionDetails) {
   process.exit(1);
 }
 const out = r.result.value;
+let text;
 try {
   const parsed = JSON.parse(out);
-  console.log(JSON.stringify(parsed.ok === false ? parsed : parsed.value, null, 2));
+  text = JSON.stringify(parsed.ok === false ? parsed : parsed.value, null, 2);
 } catch {
-  console.log(out);
+  text = out;
 }
+const outArg = (process.argv.find((a) => a.startsWith('--out=')) || '').slice(6);
+if (outArg) { fs.writeFileSync(outArg, text, 'utf8'); console.log('written ' + outArg); } else { console.log(text); }
 ws.close();
 process.exit(0);

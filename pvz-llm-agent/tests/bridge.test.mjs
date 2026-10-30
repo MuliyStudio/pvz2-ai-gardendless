@@ -169,7 +169,7 @@ test('health 报告能力，且明确没有本地策略/自动卡组/队列', ()
   try {
     const h = bridge.health();
     assert.equal(h.ok, true);
-    assert.equal(h.version, '0.1.15');
+    assert.equal(h.version, '0.1.16');
     assert.equal(h.features.localStrategy, false);
     assert.equal(h.features.autoDeck, false);
     assert.equal(h.features.queue, false);

@@ -216,9 +216,13 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
         hint: '卡组已满但有指定卡没选中；请核对 actualDeck 后重试',
       }, `这些卡没有选中：${missing.join(', ')}`);
     }
+    const warn = (missing.length || skipped.length)
+      ? `实际卡组和你请求的不一致：缺 ${missing.join('、') || '无'}；被跳过 ${skipped.map((s) => `${s.type}(${s.reason})`).join('、') || '无'}。以 actualDeck 为准，没带上的卡不要当它有。`
+      : undefined;
     return {
       ok: true,
       ...result,
+      warning: warn,
       detail: `选卡完成（${actualDeck.length}/${slots}）`,
     };
   }
@@ -414,9 +418,19 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
       if (counter && !(counter.plantFoodNum > 0)) return fail('NO_FOOD', { have: counter.plantFoodNum || 0 });
       const cell = C.getLnC(lane, column);
       if (!cell) return fail('NO_CELL', { lane, column });
-      const p = reader.cellPlants(cell)[0];
-      if (!p) return fail('NO_PLANT', { lane, column });
-      if (!p.foodable) return fail('NOT_FOODABLE', { lane, column, type: cleanType(p.Plant_Type) });
+      // 同一批里「先种再给豆」时植物还没落地：等一小会儿再读，别直接 NO_PLANT。
+      let p = reader.cellPlants(cell)[0];
+      if (!p) {
+        await waitFor(() => reader.cellPlants(cell).length > 0, 1200);
+        p = reader.cellPlants(cell)[0];
+      }
+      if (!p) {
+        return fail('NO_PLANT', {
+          lane, column,
+          hint: '这一格没有植物（可能刚被吃掉，或同一批里刚种下还没落地）；先 pvz_state 确认再用能量豆',
+        }, `${lane} 行 ${column} 列没有植物`);
+      }
+      if (p.foodable === false) return fail('NOT_FOODABLE', { lane, column, type: cleanType(p.Plant_Type) });
       try {
         p.fooding = true;
         if (typeof p.doPlantFood === 'function') p.doPlantFood();
