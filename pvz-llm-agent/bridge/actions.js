@@ -396,10 +396,14 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
       if (!canPlace) {
         reader.learnCell(lane, column, 'CELL_BLOCKED');
         const alternatives = emptyCellsInLane(C, lane, column, cf);
+        const emptied = a.type === 'replace' && reader.cellPlants(cell).length === 0;
         return fail('CELL_BLOCKED', {
           lane, column, card: index, type, alternatives,
-          hint: alternatives.length ? '这格不能种（墓碑/水面/障碍）；alternatives 是同行可种位' : '这行没有可种的空位',
-        }, `${lane} 行 ${column} 列不能种${alternatives.length ? `，可改种 ${alternatives.map((x) => `c${x.column}`).join('/')}` : ''}`);
+          emptyAfterRemoval: emptied || undefined,
+          hint: emptied
+            ? '旧植物已经被铲掉，这一格现在是空的；换个格子种，或者这一格其实不能种这种卡'
+            : (alternatives.length ? '这格不能种（墓碑/水面/障碍）；alternatives 是同行可种位' : '这行没有可种的空位'),
+        }, `${lane} 行 ${column} 列不能种${emptied ? '（旧植物已铲掉，现在空着）' : ''}${alternatives.length ? `，可改种 ${alternatives.map((x) => `c${x.column}`).join('/')}` : ''}`);
       }
       if (ui && typeof ui.tryChangingIndex === 'function' && ui.index !== index) {
         ui.tryChangingIndex(index);

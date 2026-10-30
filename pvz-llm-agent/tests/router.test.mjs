@@ -10,7 +10,7 @@ function setup(opts) {
   resetAssetCache();
   const game = createFakeGame(opts);
   const bridge = createBridge(game.ctx);
-  const router = createToolRouter({ bridge, version: '0.1.17' });
+  const router = createToolRouter({ bridge, version: '0.1.18' });
   return { game, bridge, router };
 }
 
@@ -100,7 +100,7 @@ test('router: health 带工具清单和版本', async () => {
     assert.equal(h.ok, true);
     assert.equal(h.tools.length, 16);
     assert.equal(h.namespace, 'pvz-llm-agent');
-    assert.equal(h.serverVersion, '0.1.17');
+    assert.equal(h.serverVersion, '0.1.18');
   } finally { teardown(bridge); }
 });
 
@@ -268,5 +268,37 @@ test('router: OCCUPIED 带同行 alternatives，方便直接换格重种', async
     assert.ok(Array.isArray(res.alternatives) && res.alternatives.length > 0, JSON.stringify(res));
     assert.ok(res.alternatives.every((x) => x.lane === 1 && x.column !== 3), '候选必须是同行的其它格子');
     assert.ok(res.reason.includes('可改种'), res.reason);
+  } finally { teardown(bridge); }
+});
+
+test('router: replace 一步换植（先铲后种）', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 400;
+    const cell = game.grid[2][2];
+    cell.addPlant('sunflower');
+    cell.PlaceUIPlant = () => cell.addPlant('wallnut');
+    const r = await router.call('pvz_act', { actions: [{ type: 'replace', plant: 'wallnut', lane: 2, column: 2 }] });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const own = bridge.snapshot().plants.filter((p) => p.lane === 2 && p.column === 2);
+    assert.equal(own.length, 1, '同格只能剩一株');
+    assert.equal(own[0].type, 'wallnut');
+  } finally { teardown(bridge); }
+});
+
+test('router: replace 后新卡种不上时，明确告诉模型格子已经空了', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 400;
+    const cell = game.grid[4][1];
+    cell.addPlant('peashooter');
+    cell.putPlantAvailable = () => false;
+    const r = await router.call('pvz_act', { actions: [{ type: 'replace', plant: 'wallnut', lane: 4, column: 1 }] });
+    const res = r.results[0];
+    assert.equal(res.code, 'CELL_BLOCKED');
+    assert.equal(res.emptyAfterRemoval, true, JSON.stringify(res));
+    assert.equal(bridge.snapshot().plants.filter((p) => p.lane === 4 && p.column === 1).length, 0);
   } finally { teardown(bridge); }
 });

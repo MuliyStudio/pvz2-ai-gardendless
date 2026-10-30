@@ -4,6 +4,17 @@
 
 ---
 
+## v0.4.8
+
+**让"铲弱换强"真的发生（模组 0.1.18）**
+
+- `shovel` / `replace` 一直都在（`replace` 同格先铲后种一步完成），但上一局 51 次调用里 0 次使用 —— prompt 从没提"可以升级"，模型就只新建。
+- prompt 现在明确：阳光 >300 且买得起时，把低级输出/经济 replace 成更强同定位卡；并给出 replace 用法。
+- `replace` 若铲完新卡种不上，返回 `CELL_BLOCKED` + `emptyAfterRemoval: true`，不会让模型误以为旧植物还在。
+- 发布包重建为 `PvZAI-LLM-Agent-Bundle-v0.1.18.zip`，57 项测试通过。
+
+---
+
 ## v0.4.7
 
 **占用时给同行空位（模组 0.1.17）**

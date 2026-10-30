@@ -1,4 +1,4 @@
-# 工具契约（v0.1.17）
+# 工具契约（v0.1.18）
 
 > 运行时权威定义在 `tools/definitions.js`；错误码在 `tools/errors.js`。
 > 本文是给接入方（MCP 客户端 / 游戏内客户端开发）看的字段与语义说明。
@@ -35,7 +35,7 @@ won / lost  → 停止
 ```json
 {
   "ok": true,
-  "version": "0.1.17",
+  "version": "0.1.18",
   "phase": "preparing",
   "scene": "inGameScene",
   "objective": { "screenName": "...", "missions": ["..."], "active": false, "canContinue": true },
@@ -133,7 +133,7 @@ won / lost  → 停止
 ```json
 {
   "ok": true,
-  "version": "0.1.17",
+  "version": "0.1.18",
   "scene": "inGameScene",
   "phase": "running",
   "paused": false,
@@ -423,8 +423,8 @@ won / lost  → 停止
 ```json
 {
   "ok": true,
-  "version": "0.1.17",
-  "serverVersion": "0.1.17",
+  "version": "0.1.18",
+  "serverVersion": "0.1.18",
   "namespace": "pvz-llm-agent",
   "scene": "inGameScene",
   "phase": "preparing",
