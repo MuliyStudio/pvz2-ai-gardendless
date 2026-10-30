@@ -1,0 +1,294 @@
+/**
+ * router：工具名 → handler。
+ *
+ * MCP 和游戏内 LLM 客户端调用同一个 router；bridge 可以是异步的（CDP）也可以是同步的（游戏内）。
+ * 这里只做参数校验、动作编排、等待和错误归一化，不做任何策略决定。
+ */
+import { TOOL_NAMES } from './definitions.js';
+import { normalizeError } from './errors.js';
+import { checkCondition, CONDITION_HELP } from './wait.js';
+import { compactState } from './format.js';
+
+const routerSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const ACTION_TYPE_SET = new Set(['plant', 'replace', 'shovel', 'plant_food', 'move_cart', 'resume', 'wait', 'dismiss_objective', 'collect']);
+
+/**
+ * 对比两次 pvz_state，算出"自上次读取以来"的变化。
+ *
+ * 存在的理由：模型每轮只看到当前快照，历史快照会被 compactOldToolResults 压掉，
+ * 所以它无法自己 diff 出"哪株被吃了"。这里由工具直接算好，字段很小，不会被压缩。
+ */
+function diffSnapshot(prev, cur) {
+  if (!prev || !cur || !prev.ok || !cur.ok) return null;
+  // 跨 phase / 跨关卡不报 diff，避免把上一局的数据算进来
+  if (prev.phase !== cur.phase) return null;
+  const pk = (p) => `${p.lane}:${p.column}`;
+  const prevPlants = new Map((prev.plants || []).map((p) => [pk(p), p]));
+  const curPlants = new Map((cur.plants || []).map((p) => [pk(p), p]));
+
+  const plantsLost = [];
+  const plantsAdded = [];
+  for (const [k, p] of prevPlants) {
+    if (!curPlants.has(k)) plantsLost.push({ lane: p.lane, column: p.column, type: p.type });
+  }
+  for (const [k, p] of curPlants) {
+    if (!prevPlants.has(k)) plantsAdded.push({ lane: p.lane, column: p.column, type: p.type });
+  }
+
+  const mowerLost = [];
+  for (const lane of cur.lanes || []) {
+    const before = (prev.lanes || []).find((l) => l.lane === lane.lane);
+    if (before && before.mower !== false && lane.mower === false) mowerLost.push(lane.lane);
+  }
+
+  const prevWave = (prev.level && prev.level.wave) || 0;
+  const curWave = (cur.level && cur.level.wave) || 0;
+  const sunDelta = prev.sun == null || cur.sun == null ? null : cur.sun - prev.sun;
+  const zombieDelta = (cur.zombies || []).length - (prev.zombies || []).length;
+
+  const none = !plantsLost.length && !plantsAdded.length && !mowerLost.length
+    && curWave === prevWave && !zombieDelta && !sunDelta;
+
+  return {
+    none,
+    plantsLost,
+    plantsAdded,
+    mowerLost,
+    waveDelta: curWave - prevWave,
+    sunDelta,
+    zombieDelta,
+    plantsLeft: cur.limits ? cur.limits.plantsLeft : null,
+  };
+}
+
+export function createToolRouter({ bridge, version = '0.1.10', sleep = routerSleep }) {
+  if (!bridge) throw new Error('createToolRouter 需要 bridge');
+
+  // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
+  // 仅由 pvz_state 更新，UI 直接调 bridge.snapshot() 不会污染它。
+  let lastSeenState = null;
+
+  async function call(name, args = {}) {
+    try {
+      switch (name) {
+        case 'pvz_briefing': return await bridge.briefing();
+        case 'pvz_knowledge': return await bridge.knowledge(args || {});
+        case 'pvz_state': {
+          const s = await bridge.snapshot();
+          if (s && s.ok) {
+            const changes = diffSnapshot(lastSeenState, s);
+            if (changes) s.changesSinceLast = changes;
+            lastSeenState = s;
+          }
+          return s;
+        }
+        case 'pvz_events': {
+          const limit = Math.max(1, Math.min(200, Number(args && args.limit) || 200));
+          const list = typeof bridge.pollEvents === 'function' ? await bridge.pollEvents(limit) : await bridge.events(limit);
+          return Array.isArray(list) ? list : [];
+        }
+        case 'pvz_set_plan': {
+          if (!args || !('plan' in args)) return normalizeError('BAD_PLAN', {}, '需要 plan 字段');
+          return await bridge.setPlan(args.plan);
+        }
+        case 'pvz_choose_deck': return await chooseDeck(args);
+        case 'pvz_start_level': return await startLevel(args);
+        case 'pvz_act': return await act(args);
+        case 'pvz_wait_until': return await waitUntil(args);
+        case 'pvz_collect': {
+          const r = await bridge.collect();
+          return r && r.ok === false ? r : { ok: true, ...r };
+        }
+        case 'pvz_plant_food': {
+          if (!isPos(args)) return normalizeError('BAD_POSITION');
+          const r = await bridge.act({ type: 'plant_food', lane: Number(args.lane), column: Number(args.column) });
+          return r;
+        }
+        case 'pvz_move_cart': {
+          if (!args || !Number.isFinite(Number(args.cart))) return normalizeError('NO_CART', {}, '需要 cart');
+          const dir = String(args.direction || '').toLowerCase();
+          if (dir !== 'up' && dir !== 'down') return normalizeError('CART_BLOCKED', { direction: dir }, 'direction 只能是 up/down');
+          return await bridge.moveCart(Number(args.cart), dir);
+        }
+        case 'pvz_resume': return await bridge.resume();
+        case 'pvz_dismiss_objective': {
+          const r = await bridge.dismissObjective();
+          return r;
+        }
+        case 'pvz_health': {
+          const h = await bridge.health();
+          return {
+            ...h,
+            serverVersion: version,
+            namespace: 'pvz-llm-agent',
+            tools: TOOL_NAMES,
+            expectedTools: TOOL_NAMES.length,
+            conditions: CONDITION_HELP,
+          };
+        }
+        default:
+          return normalizeError('UNKNOWN_TOOL', { tool: name }, `没有这个工具：${name}`);
+      }
+    } catch (e) {
+      return normalizeError(e && e.code ? e.code : 'BRIDGE_ERROR', { tool: name, ...(e && e.extra ? e.extra : {}) }, String(e && e.message || e));
+    }
+  }
+
+  function isPos(a) {
+    return a && Number.isFinite(Number(a.lane)) && Number.isFinite(Number(a.column));
+  }
+
+  async function chooseDeck(args) {
+    const cards = args && Array.isArray(args.cards) ? args.cards.map((x) => String(x || '').trim()).filter(Boolean) : [];
+    if (!cards.length) return normalizeError('BAD_DECK', { cards: [] }, 'cards 不能为空');
+    const replace = args && args.replace !== false;
+    const r = await bridge.chooseDeck(cards, replace);
+    if (!r || typeof r !== 'object') return normalizeError('BAD_RESPONSE', {}, '选卡没有返回结果');
+    return r;
+  }
+
+  async function startLevel(args) {
+    const dismiss = !args || args.dismiss_objective !== false;
+    const timeout = Math.max(1, Math.min(20, Number(args && args.timeout) || 8));
+    const before = await bridge.snapshot();
+    if (before && before.ok && before.phase === 'running') {
+      return { ok: true, started: true, phase: before.phase, elapsed: 0, detail: '已经在战斗中' };
+    }
+    if (dismiss && before && before.ok && before.objective && before.objective.active) {
+      const d = await bridge.dismissObjective();
+      if (d && d.ok === false && d.code !== 'NO_OBJECTIVE') return d;
+      await sleep(350);
+    }
+    const r = await bridge.startLevel();
+    if (r && r.ok === false && !r.started) return r;
+    const startedAt = Date.now();
+    let last = null;
+    while (Date.now() - startedAt <= timeout * 1000) {
+      last = await bridge.snapshot();
+      if (last && last.ok && last.phase === 'running') {
+        return { ok: true, started: true, phase: last.phase, elapsed: Math.round((Date.now() - startedAt) / 100) / 10, detail: (r && r.detail) || '已开局' };
+      }
+      if (last && last.ok && (last.phase === 'won' || last.phase === 'lost')) {
+        return { ok: true, started: true, phase: last.phase, elapsed: Math.round((Date.now() - startedAt) / 100) / 10, detail: '战斗直接结束' };
+      }
+      await sleep(300);
+    }
+    return normalizeError('START_FAILED', {
+      started: !!(r && r.started),
+      phase: last && last.phase,
+      waited: timeout,
+      detail: r && r.detail,
+      hint: '调用 pvz_state 看 phase；如果还在 preparing，检查卡组是否满、选卡界面是否就绪。',
+    }, `开局后 ${timeout}s 内 phase 没有进入 running`);
+  }
+
+  async function act(args) {
+    const list = args && Array.isArray(args.actions) ? args.actions.slice(0, 6) : [];
+    if (!list.length) return normalizeError('NO_ACTIONS');
+    let state = null;
+    try { state = await bridge.snapshot(); } catch { state = null; }
+    const cards = (state && state.cards) || [];
+    const results = [];
+    for (let i = 0; i < list.length; i++) {
+      const raw = list[i] || {};
+      const type = String(raw.type || '');
+      if (!ACTION_TYPE_SET.has(type)) {
+        results.push({ index: i, action: type, type, ...normalizeError('UNKNOWN_ACTION', { type }) });
+        continue;
+      }
+      if (type === 'wait') {
+        const sec = Math.max(0, Math.min(15, Number(raw.seconds) || 0));
+        if (sec > 0) await sleep(sec * 1000);
+        results.push({ index: i, action: type, type, ok: true, seconds: sec, detail: sec ? `等待 ${sec}s` : '等待' });
+        continue;
+      }
+      const a = { ...raw, type };
+      if (type === 'plant' || type === 'replace') {
+        if (!Number.isFinite(Number(a.card)) && !a.plant) {
+          results.push({ index: i, action: type, type, ...normalizeError('BAD_ACTION', {}, '需要 card（下标）或 plant（codename）') });
+          continue;
+        }
+        if (!isPos(a)) {
+          results.push({ index: i, action: type, type, ...normalizeError('BAD_POSITION') });
+          continue;
+        }
+        if (!Number.isFinite(Number(a.card)) && a.plant) {
+          const hit = cards.find((c) => String(c.type) === String(a.plant));
+          if (!hit) {
+            results.push({ index: i, action: type, type, ...normalizeError('CARD_NOT_IN_DECK', { plant: a.plant, deck: cards.map((c) => c.type) }) });
+            continue;
+          }
+          a.card = hit.index;
+        }
+        a.lane = Number(a.lane);
+        a.column = Number(a.column);
+      }
+      if (type === 'shovel' || type === 'plant_food') {
+        if (!isPos(a)) {
+          results.push({ index: i, action: type, type, ...normalizeError('BAD_POSITION') });
+          continue;
+        }
+        a.lane = Number(a.lane);
+        a.column = Number(a.column);
+      }
+      if (type === 'move_cart') {
+        if (!Number.isFinite(Number(a.cart))) {
+          results.push({ index: i, action: type, type, ...normalizeError('NO_CART', {}, '需要 cart') });
+          continue;
+        }
+        a.cart = Number(a.cart);
+      }
+      let r;
+      try {
+        r = await bridge.act(a);
+      } catch (e) {
+        r = normalizeError('ACT_THREW', {}, String(e && e.message || e));
+      }
+      results.push({ index: i, action: type, ...(r || normalizeError('ACT_THREW', {}, '没有返回')) });
+    }
+    return {
+      ok: results.every((r) => r.ok),
+      results,
+      okCount: results.filter((r) => r.ok).length,
+      failCount: results.filter((r) => !r.ok).length,
+    };
+  }
+
+  async function waitUntil(args) {
+    const cond = String((args && args.until) || '').trim();
+    const timeout = Math.max(1, Math.min(60, Number(args && args.timeout) || 15));
+    if (!cond) return normalizeError('BAD_CONDITION', { help: CONDITION_HELP }, 'until 不能为空');
+    const startedAt = Date.now();
+    let last = null;
+    let firstCheck = null;
+    while (Date.now() - startedAt <= timeout * 1000) {
+      try {
+        last = await bridge.snapshot();
+      } catch (e) {
+        last = { ok: false, code: 'BRIDGE_ERROR', reason: String(e && e.message || e) };
+      }
+      if (last && last.ok !== false) {
+        const r = checkCondition(last, cond);
+        firstCheck = firstCheck || r;
+        if (!r.ok) return normalizeError('BAD_CONDITION', { condition: cond, help: CONDITION_HELP }, r.reason);
+        if (r.hit) {
+          return {
+            ok: true, satisfied: true, condition: cond,
+            elapsed: Math.round((Date.now() - startedAt) / 100) / 10,
+            match: r,
+            state: compactState(last),
+          };
+        }
+      }
+      await sleep(250);
+    }
+    return normalizeError('TIMEOUT', {
+      satisfied: false, condition: cond,
+      elapsed: Math.round((Date.now() - startedAt) / 100) / 10,
+      state: last && last.ok ? compactState(last) : null,
+      check: firstCheck,
+    }, `等待 ${timeout}s 后条件仍未满足`);
+  }
+
+  return { call, names: TOOL_NAMES };
+}

@@ -25,10 +25,18 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const SERVER = path.join(ROOT, 'PvZ-MCP', 'pvz-mcp-server.mjs');
 const NODE = process.execPath;
-const NAME = 'pvz-gardendless';
 const PORT = process.env.PVZ_CDP_PORT || '9222';
+
+// 两种目录结构都支持：
+//   发布包：<根>/mcp/server.mjs + <根>/tools/*.js（本脚本在 tools/ 里）
+//   源码仓：<根>/PvZ-MCP/pvz-mcp-server.mjs
+const CANDIDATES = [
+  path.join(ROOT, 'mcp', 'server.mjs'),
+  path.join(ROOT, 'PvZ-MCP', 'pvz-mcp-server.mjs'),
+];
+const SERVER = CANDIDATES.find((p) => { try { fs.accessSync(p); return true; } catch { return false; } }) || CANDIDATES[0];
+const NAME = path.basename(path.dirname(SERVER)) === 'mcp' ? 'pvz-llm-agent' : 'pvz-gardendless';
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
@@ -139,7 +147,7 @@ function main() {
   console.log('');
 
   if (!exists(SERVER)) {
-    console.error('❌ 找不到 PvZ-MCP/pvz-mcp-server.mjs，请确认目录结构完整。');
+    console.error('❌ 找不到 MCP Server，请确认目录结构完整（mcp/server.mjs 或 PvZ-MCP/pvz-mcp-server.mjs）。');
     process.exit(1);
   }
 
@@ -163,9 +171,9 @@ function main() {
 
   console.log('');
   console.log('下一步：');
-  console.log('  1. 完全退出并重启对应的 MCP 客户端（Claude Desktop / Cursor / Cline）。');
-  console.log('  2. 用 PvZAI_Launcher.exe 启动游戏（会开 9222 调试端口）。');
-  console.log('  3. 进关卡，让 Agent 先调用 pvz_rules / pvz_state。');
+  console.log('  1. 完全退出并重启对应的 MCP 客户端（OpenCode / Claude Desktop / Cursor / Cline）。');
+  console.log('  2. 用 PvZAI_Launcher.exe 启动游戏（会开 9222 调试端口，并自动装好模组）。');
+  console.log('  3. 进关卡，让 Agent 先调用 pvz_health，再 pvz_briefing → pvz_set_plan → pvz_choose_deck → pvz_start_level。');
   console.log('');
   if (dryRun) console.log('这是 dry-run，没有修改任何文件。去掉 --dry-run 才会写入。');
 }

@@ -1,0 +1,128 @@
+PvZ2 Gardendless · AI 草坪指挥官
+================================
+
+让大模型（或 Claude / Cursor / OpenCode 这类 Agent）读取《植物大战僵尸2 花园无尽》
+的战场，自己决定种什么、种哪一格、什么时候铲掉重种，并自动打完一关。
+
+这个文件夹里同时有模组、启动器和 MCP Server：
+  pvz-llm-agent.zip   GP-Next 模组本体（只给事实 / 执行动作 / 记录计划）
+  PvZAI_Launcher.exe  启动器（装模组 + 开调试端口 + 解 CSP + 本地代理）
+  配置MCP.bat        一键写 MCP 客户端配置（给 Claude Desktop / Cursor / OpenCode）
+  mcp/ + tools/      MCP Server 与它依赖的工具模块
+
+非官方社区项目，与 EA / PopCap / PvZ2 Gardendless 作者无关。
+单机向，请勿用于联机或排行榜。
+
+
+一、准备
+--------
+1. 确认游戏能正常启动（PvZ2 Gardendless 0.16.x 桌面版，GP-Next 1.5.2 以上）。
+2. 把整个文件夹解压到任意位置，不要只复制一个 exe。
+   PvZAI_Launcher.exe 和 pvz-llm-agent.zip 必须放在同一层。
+3. 游戏内浮窗模式不需要装别的东西；只有 MCP 模式需要 Node.js 22+。
+4. 如果你装过旧的「AI 草坪指挥官」（pvz-ai-agent.zip），先在 F9 → 模组里
+   取消勾选，两个模组不能同时启用，会抢操作。
+
+
+二、第一次使用
+--------------
+1. 先完全退出游戏（不是最小化）。
+2. 双击 PvZAI_Launcher.exe。
+   - 它会自动把 pvz-llm-agent.zip 装进 GP-Next 并启用；
+   - 然后带 9222 调试端口启动游戏；
+   - 解除当前游戏页面的 CSP（浮窗调模型接口靠它）；
+   - 顺手起本地代理 127.0.0.1:8787（只有 OpenCode Go 用得到）。
+3. 看到“✅ CSP 已绕过”后，保持黑窗口打开（可以最小化）。
+   关掉窗口 CSP 和代理都会失效。
+4. 游戏回到主菜单后，按 F9 打开 GP-Next：
+   - 实验室 → JS Modding → 打开（第一次需要确认风险）
+   - 模组 → 确认「PvZ LLM Agent」已勾选 → 应用 / 重启
+   （启动器一般已经勾好，这一步只是核对；脚本更新后可能要重新确认信任。）
+5. 进入一个普通关卡（不要用教程关测试，教程有脚本限制）。
+6. 右上角「PVZ · AI 指挥」浮窗里填：
+   - 服务商：DeepSeek 官方 / OpenCode Go（本地代理）/ 自定义
+   - DeepSeek：API Base https://api.deepseek.com/v1，模型 deepseek-chat
+   - OpenCode Go：先到 opencode.ai/console 取 Key，并在 Settings → Privacy →
+     Regions 选 Global，否则 DeepSeek 会被上游拒绝；模型 deepseek-v4.1-flash
+   - API Key：你自己的 Key（勾选“记住 Key”才会存到本机，否则只存内存）
+   - 点「测试」，成功后再点「开始 AI」（或按 F8）
+7. 左下角「AI 思考」浮窗（F10 显示/隐藏）会显示它在想什么、调了什么工具、
+   真实结果和它自己写的本关计划。
+8. 再按 F8 停止；关卡胜利/失败会自动停止。
+
+
+三、以后每次
+------------
+1. 先完全退出游戏。
+2. 双击 PvZAI_Launcher.exe。
+3. 保持黑窗口打开（可最小化），进关卡即可。
+   不要直接双击游戏 EXE 用 AI，否则 CSP 会拦截模型请求。
+
+
+四、找不到游戏 / 双击没反应
+--------------------------
+- 把 pvzge-*.exe 直接拖到 PvZAI_Launcher.exe 上。
+- 或者双击后，在弹窗里手动选择游戏 EXE。
+- 提示“游戏正在运行”：先完全退出游戏，再重新双击（它不给已经跑起来的游戏补开端口）。
+- 提示权限不足：右键 PvZAI_Launcher.exe → 以管理员身份运行。
+- 如果 Windows 提示“Windows 已保护你的电脑”：点“更多信息” → “仍要运行”。
+- 如果杀毒软件误报：把 PvZAI_Launcher.exe 加入信任。它只在本机
+  127.0.0.1 的 9222 / 8787 两个端口上工作，不会把数据发到外部，
+  也不改游戏文件、不改存档。
+
+
+五、常见问题
+------------
+- 浮窗没出现：按 F9 → 模组 → PvZ LLM Agent → 官方控制面板。
+  如果官方面板也没有，检查 JS Modding 是否打开、模组是否已应用。
+- 测试连接失败：点浮窗里的“测试”看真实报错；确认 Base URL 带 /v1、模型名正确。
+- 提示 Failed to fetch / CSP 阻止：必须用启动器启动游戏（MCP 模式不受影响）。
+- OpenCode Go 连不上：确认启动器窗口还开着（代理在 8787），并且 Regions 设成了 Global。
+- 浮窗点不动 / 收不起来：完全重启游戏让 GP-Next 重新加载；仍异常就把 F9 里的
+  模组错误信息发出来。
+- AI 不种 / 一直等：看思考窗里的 code —— 可能阳光不够、卡在冷却、任务限制植物数量，
+  或这关类型不支持（砸罐/保龄球/天空关）。
+- 浮窗挡住按钮：拖标题栏移动，或点“—”收起；双击标题栏恢复默认位置和大小。
+- 改了文件名/解压成散文件后启动器找不到模组：把 pvz-llm-agent.zip 放回和
+  PvZAI_Launcher.exe 同一层，或直接在 F9 → 模组 → 导入 ZIP 里手动导入。
+
+
+六、卸载
+--------
+1. F9 → 模组 → 取消勾选 PvZ LLM Agent → 应用 / 重启。
+2. 想彻底清掉，删目录：%APPDATA%\com.pvzge.game\gp-next\installed\<那串 digest>
+   （旧版本模组在 gp-next\packs\pvzai.agent，可以一起删）。
+3. 想撤销 MCP 配置：把客户端配置里 pvz-llm-agent 这一段删掉
+   （配置脚本写入前留了 .bak-时间戳 备份，直接还原也行）。
+
+
+七、MCP 模式（可选，给 Claude Desktop / Cursor / Cline / OpenCode）
+------------------------------------------------------------------
+两种模式不要同时“开始 AI”，会抢种植/铲除操作。
+
+1. 先按上面第 2 步用 PvZAI_Launcher.exe 启动游戏（9222 端口会被打开）。
+2. 双击 配置MCP.bat。它会把本目录的 MCP Server 写入已安装客户端的配置
+   （配置项名 pvz-llm-agent，先备份，只合并这一项，不覆盖其它 MCP Server）。
+   需要 Node.js 22+。
+3. 完全退出并重启对应的 MCP 客户端。
+4. 让 Agent 先调 pvz_health，再按这个顺序走：
+
+   pvz_health
+     → pvz_briefing（任务 / 世界 / 地形 / 波次 / 预计僵尸 / 可选卡组）
+     → pvz_dismiss_objective
+     → pvz_set_plan（让它自己写下整关计划）
+     → pvz_choose_deck → pvz_start_level
+     → pvz_state / pvz_events → 自己决策 → pvz_act（1–6 个动作）→ pvz_wait_until
+
+5. 完整参数、返回值和错误码见本目录的 MCP工具契约.md。
+
+MCP 模式不需要解除 CSP，Agent 通过本地 CDP 和游戏通信，不经过页面网络。
+如果游戏内浮窗已经点了“开始 AI”，先按 F8 停止，避免和 MCP Agent 抢操作。
+
+
+八、给作者反馈
+--------------
+如果出问题，请提供：
+1. 浮窗“测试/状态”里的真实报错，或 MCP 工具返回的 code / reason；
+2. 游戏版本（例如 0.16.1）和模组版本（安装说明同目录 pack.json 里的 0.1.10）；
+3. 你的 Base URL 和模型名（不要发 API Key）。

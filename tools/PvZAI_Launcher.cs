@@ -5,6 +5,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -93,6 +94,7 @@ namespace PvZAI
             }
 
             Console.WriteLine("等待游戏 WebView2 启动（最多 90 秒）...");
+            StartProxy();
             string pageId = null;
             Cdp cdp = null;
             for (int i = 0; i < 90; i++)
@@ -133,13 +135,13 @@ namespace PvZAI
             Console.WriteLine("✅ CSP 已绕过，AI 现在可以正常调用大模型接口了。");
             Console.WriteLine();
             Console.WriteLine("首次使用：");
-            Console.WriteLine("  1. 游戏里按 F9 打开 GP-Next");
-            Console.WriteLine("  2. 实验室 → JS Modding → 打开");
-            Console.WriteLine("  3. 模组 → 保存并重载 → 勾选“AI 草坪指挥官”");
-            Console.WriteLine("  4. 应用 / 重启，然后进入关卡");
-            Console.WriteLine("  5. 右上角浮窗填 Key → 测试连接 → 开始操控");
+            Console.WriteLine("  1. 游戏里按 F9 打开 GP-Next → 确认已启用「PvZ LLM Agent」");
+            Console.WriteLine("  2. 右上角浮窗选服务商：DeepSeek 官方 / OpenCode Go（本地代理）");
+            Console.WriteLine("  3. 填 API Key → 测试连接 → 开始 AI（F8）");
+            Console.WriteLine("  4. OpenCode Go 需要到 opencode.ai/console 取 Key，并在 Privacy 里把 Regions 设为 Global");
             Console.WriteLine();
-            Console.WriteLine("请保持此窗口打开（可以最小化），关闭后 CSP 修复可能失效。");
+            Console.WriteLine("OpenCode Go 已由本启动器自动代理（127.0.0.1:8787），不用另开脚本。");
+            Console.WriteLine("请保持此窗口打开（可以最小化），关闭后 CSP 和代理都会失效。");
             Console.WriteLine();
 
             int fail = 0;
@@ -322,64 +324,229 @@ namespace PvZAI
             catch { }
         }
 
-        static void InstallMod(string baseDir)
+        static string FindGpNextRoot()
         {
-            string zip = Path.Combine(baseDir, "pvz-ai-agent.zip");
-            if (!File.Exists(zip))
-            {
-                Console.WriteLine("未找到 pvz-ai-agent.zip，跳过自动安装。");
-                return;
-            }
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string gpRoot = Path.Combine(appData, "com.pvzge.game", "gp-next");
-            if (!Directory.Exists(Path.Combine(appData, "com.pvzge.game")))
-            {
-                try
-                {
-                    foreach (var d in Directory.GetDirectories(appData))
-                    {
-                        if (Directory.Exists(Path.Combine(d, "gp-next"))) { gpRoot = Path.Combine(d, "gp-next"); break; }
-                    }
-                }
-                catch { }
-            }
-            string dest = Path.Combine(gpRoot, "packs", "pvzai.agent");
-            Directory.CreateDirectory(dest);
+            if (Directory.Exists(gpRoot)) return gpRoot;
             try
             {
-                // 逐文件覆盖解压：游戏运行时也能更新大部分文件，不必先删整个目录。
-                using (var archive = ZipFile.OpenRead(zip))
+                foreach (var d in Directory.GetDirectories(appData))
                 {
-                    foreach (var entry in archive.Entries)
+                    if (Directory.Exists(Path.Combine(d, "gp-next"))) return Path.Combine(d, "gp-next");
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // GP-Next 的 pack 快照摘要：前缀 + 按文件名排序的 (名字长度, 内容长度, 名字, 内容)，SHA256。
+        static string ComputePackDigest(string dir)
+        {
+            var files = new List<string>();
+            var walk = (Action<string, string>)null;
+            walk = (cur, rel) =>
+            {
+                foreach (var full in Directory.GetFiles(cur))
+                {
+                    var name = Path.GetFileName(full);
+                    files.Add(string.IsNullOrEmpty(rel) ? name : rel + "/" + name);
+                }
+                foreach (var sub in Directory.GetDirectories(cur))
+                {
+                    var name = Path.GetFileName(sub);
+                    walk(sub, string.IsNullOrEmpty(rel) ? name : rel + "/" + name);
+                }
+            };
+            walk(dir, "");
+            files.Sort(StringComparer.Ordinal);
+
+            using (var sha = SHA256.Create())
+            using (var ms = new MemoryStream())
+            {
+                byte[] prefix = Encoding.UTF8.GetBytes("gp-next-pack-snapshot-v1\0");
+                ms.Write(prefix, 0, prefix.Length);
+                foreach (var rel in files)
+                {
+                    byte[] nameBytes = Encoding.UTF8.GetBytes(rel);
+                    byte[] content = File.ReadAllBytes(Path.Combine(dir, rel.Replace('/', Path.DirectorySeparatorChar)));
+                    byte[] head = new byte[12];
+                    head[0] = (byte)(nameBytes.Length >> 24);
+                    head[1] = (byte)(nameBytes.Length >> 16);
+                    head[2] = (byte)(nameBytes.Length >> 8);
+                    head[3] = (byte)nameBytes.Length;
+                    ulong len = (ulong)content.Length;
+                    for (int i = 0; i < 8; i++) head[4 + i] = (byte)(len >> (8 * (7 - i)));
+                    ms.Write(head, 0, head.Length);
+                    ms.Write(nameBytes, 0, nameBytes.Length);
+                    ms.Write(content, 0, content.Length);
+                }
+                return BitConverter.ToString(sha.ComputeHash(ms.ToArray())).Replace("-", "").ToLowerInvariant();
+            }
+        }
+
+        static void CopyDirectory(string src, string dst)
+        {
+            Directory.CreateDirectory(dst);
+            foreach (var f in Directory.GetFiles(src))
+                File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), true);
+            foreach (var d in Directory.GetDirectories(src))
+                CopyDirectory(d, Path.Combine(dst, Path.GetFileName(d)));
+        }
+
+        // 把包注册进 configuration-state.json，让 GP-Next 下次启动直接启用它。
+        static bool RegisterPack(string gpRoot, string uuid, string version, string digest, string name)
+        {
+            string cfgPath = Path.Combine(gpRoot, "configuration-state.json");
+            if (!File.Exists(cfgPath)) return false;
+            try
+            {
+                var root = (Dictionary<string, object>)Ser.DeserializeObject(File.ReadAllText(cfgPath, Encoding.UTF8));
+                var desired = root["desired"] as Dictionary<string, object>;
+                var active = root["active"] as Dictionary<string, object>;
+                if (desired == null || active == null) return false;
+
+                // 已经是这个版本且启用，就不重复改写配置
+                var current = desired["mods"] as object[];
+                if (current != null)
+                {
+                    foreach (var m in current)
                     {
-                        string target = Path.Combine(dest, entry.FullName.Replace('/', Path.DirectorySeparatorChar));
-                        if (string.IsNullOrEmpty(entry.Name))
+                        var mm = m as Dictionary<string, object>;
+                        if (mm == null) continue;
+                        if (Convert.ToString(mm["id"]) != uuid) continue;
+                        if (Convert.ToString(mm["contentDigest"]) != digest) continue;
+                        if (!Convert.ToBoolean(mm["enabled"])) continue;
+
+                        bool inActive = false;
+                        var pkgs = active["packages"] as object[];
+                        if (pkgs != null)
                         {
-                            Directory.CreateDirectory(target);
-                            continue;
+                            foreach (var p in pkgs)
+                            {
+                                var pp = p as Dictionary<string, object>;
+                                if (pp != null && Convert.ToString(pp["id"]) == uuid && Convert.ToString(pp["contentDigest"]) == digest) { inActive = true; break; }
+                            }
                         }
-                        string dir = Path.GetDirectoryName(target);
-                        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-                        entry.ExtractToFile(target, true);
+                        var ordered = active["ordered"] as object[];
+                        bool inOrdered = ordered != null && ordered.Length == 1 && Convert.ToString(ordered[0]) == uuid;
+                        if (inActive && inOrdered) return true;
                     }
                 }
+
+                desired["revision"] = Convert.ToInt32(desired["revision"]) + 1;
+
+                var mods = new List<object>();
+                bool replaced = false;
+                var existing = desired["mods"] as object[];
+                if (existing != null)
+                {
+                    foreach (var m in existing)
+                    {
+                        var mm = m as Dictionary<string, object>;
+                        if (mm != null && Convert.ToString(mm["id"]) == uuid)
+                        {
+                            mm["version"] = version;
+                            mm["contentDigest"] = digest;
+                            mm["enabled"] = true;
+                            mm["fallbackName"] = name;
+                            mm["legacy"] = false;
+                            mm["runtimeNamespace"] = uuid;
+                            if (mm["settings"] == null) mm["settings"] = new Dictionary<string, object>();
+                            replaced = true;
+                        }
+                        mods.Add(m);
+                    }
+                }
+                if (!replaced)
+                {
+                    mods.Add(new Dictionary<string, object> {
+                        { "id", uuid }, { "version", version }, { "contentDigest", digest },
+                        { "fallbackName", name }, { "runtimeNamespace", uuid }, { "legacy", false },
+                        { "enabled", true }, { "settings", new Dictionary<string, object>() },
+                    });
+                }
+                desired["mods"] = mods.ToArray();
+
+                active["configuration"] = desired;
+                active["packages"] = new object[] {
+                    new Dictionary<string, object> {
+                        { "id", uuid }, { "version", version }, { "contentDigest", digest },
+                        { "fallbackName", name }, { "runtimeNamespace", uuid }, { "legacy", false },
+                        { "enabled", true }, { "settings", new Dictionary<string, object>() },
+                        { "depends", new object[0] }, { "optionalDepends", new object[0] },
+                    }
+                };
+                active["ordered"] = new object[] { uuid };
+                active["generation"] = Convert.ToInt32(active["generation"]) + 1;
+                root["sequence"] = Convert.ToInt32(root["sequence"]) + 1;
+
+                string outgoing = Ser.Serialize(root);
+                File.Copy(cfgPath, cfgPath + ".bak-before-launcher", true);
+                string tmp = cfgPath + ".tmp";
+                File.WriteAllText(tmp, outgoing, new UTF8Encoding(false));
+                File.Delete(cfgPath);
+                File.Move(tmp, cfgPath);
+                return true;
             }
             catch (Exception ex)
             {
-                try
-                {
-                    Directory.Delete(dest, true);
-                    Directory.CreateDirectory(dest);
-                    ZipFile.ExtractToDirectory(zip, dest);
-                }
-                catch
-                {
-                    throw new Exception("写入模组目录失败（请先关闭游戏再试）：" + ex.Message);
-                }
+                Console.WriteLine("⚠️ 更新 GP-Next 配置失败：" + ex.Message);
+                return false;
             }
-            if (!File.Exists(Path.Combine(dest, "pack.json")))
-                throw new Exception("ZIP 里没有 pack.json，安装包可能不完整。");
-            Console.WriteLine("模组已安装/更新到：" + dest);
+        }
+
+        static void InstallMod(string baseDir)
+        {
+            string zip = Path.Combine(baseDir, "pvz-llm-agent.zip");
+            if (!File.Exists(zip))
+            {
+                if (File.Exists(Path.Combine(baseDir, "pvz-ai-agent.zip")))
+                    Console.WriteLine("⚠️ 目录里只有旧模组 pvz-ai-agent.zip；请换成 pvz-llm-agent.zip。");
+                else
+                    Console.WriteLine("未找到 pvz-llm-agent.zip，跳过自动安装。");
+                return;
+            }
+
+            string gpRoot = FindGpNextRoot();
+            if (gpRoot == null)
+            {
+                Console.WriteLine("没找到 GP-Next 目录，跳过自动安装；请在游戏里手动导入。");
+                return;
+            }
+
+            string temp = Path.Combine(Path.GetTempPath(), "pvzllm-pack-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                ZipFile.ExtractToDirectory(zip, temp);
+                string packPath = Path.Combine(temp, "pack.json");
+                if (!File.Exists(packPath))
+                    throw new Exception("ZIP 里没有 pack.json，安装包可能不完整。");
+
+                string digest = ComputePackDigest(temp);
+                string dest = Path.Combine(gpRoot, "installed", digest);
+                if (!Directory.Exists(dest))
+                {
+                    Directory.CreateDirectory(dest);
+                    CopyDirectory(temp, dest);
+                }
+
+                var pack = (Dictionary<string, object>)Ser.DeserializeObject(File.ReadAllText(packPath, Encoding.UTF8));
+                string uuid = pack.ContainsKey("uuid") ? Convert.ToString(pack["uuid"]) : "";
+                string version = pack.ContainsKey("version") ? Convert.ToString(pack["version"]) : "";
+                string name = pack.ContainsKey("name") ? Convert.ToString(pack["name"]) : uuid;
+                if (string.IsNullOrEmpty(uuid)) throw new Exception("pack.json 缺少 uuid");
+
+                bool ok = RegisterPack(gpRoot, uuid, version, digest, name);
+                Console.WriteLine("模组已就位：" + uuid + " v" + version + "  (" + digest.Substring(0, 12) + "…)");
+                Console.WriteLine(ok
+                    ? "已在 GP-Next 配置中启用，重载页面后生效。"
+                    : "⚠️ 未能写入 GP-Next 配置，请在游戏里手动导入一次 pvz-llm-agent.zip。");
+            }
+            finally
+            {
+                try { if (Directory.Exists(temp)) Directory.Delete(temp, true); } catch { }
+            }
         }
 
         static void StartGame(string game)
@@ -392,8 +559,153 @@ namespace PvZAI
             Process.Start(psi);
         }
 
+        // ── 本地 LLM 代理 ────────────────────────────────────────────────
+        // OpenCode Go 的 chat 接口不返回 CORS 头，WebView2 里直连会报 Failed to fetch。
+        // 启动器顺手起一个本机代理，玩家不用额外操作；API Key 只从请求头透传，不落盘。
+        const int ProxyPort = 8787;
+        const string ProxyUpstream = "https://opencode.ai/inference/go/openai/v1";
+        static HttpListener proxyListener;
+
+        static void StartProxy()
+        {
+            try
+            {
+                proxyListener = new HttpListener();
+                proxyListener.Prefixes.Add("http://127.0.0.1:" + ProxyPort + "/");
+                proxyListener.Prefixes.Add("http://localhost:" + ProxyPort + "/");
+                proxyListener.Start();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("⚠️ 本地代理未启动（端口 " + ProxyPort + "）：" + ex.Message);
+                Console.WriteLine("   如果只是用 DeepSeek 官方，可以忽略；要用 OpenCode Go 需要代理。");
+                try { if (proxyListener != null) proxyListener.Close(); } catch { }
+                proxyListener = null;
+                return;
+            }
+
+            var thread = new Thread(() =>
+            {
+                while (proxyListener != null && proxyListener.IsListening)
+                {
+                    HttpListenerContext ctx;
+                    try { ctx = proxyListener.GetContext(); }
+                    catch { break; }
+                    ThreadPool.QueueUserWorkItem(_ => { try { HandleProxy(ctx); } catch { } });
+                }
+            });
+            thread.IsBackground = true;
+            thread.Start();
+            Console.WriteLine("本地代理已启动：http://127.0.0.1:" + ProxyPort + "/v1  ->  " + ProxyUpstream);
+        }
+
+        static void StopProxy()
+        {
+            try { if (proxyListener != null) { proxyListener.Stop(); proxyListener.Close(); } } catch { }
+            proxyListener = null;
+        }
+
+        static void HandleProxy(HttpListenerContext ctx)
+        {
+            var req = ctx.Request;
+            var res = ctx.Response;
+            res.AddHeader("Access-Control-Allow-Origin", "*");
+            res.AddHeader("Access-Control-Allow-Headers", "authorization,content-type,x-opencode-session");
+            res.AddHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+            res.AddHeader("Access-Control-Max-Age", "86400");
+
+            try
+            {
+                if (req.HttpMethod == "OPTIONS")
+                {
+                    res.StatusCode = 204;
+                    res.Close();
+                    return;
+                }
+
+                string path = req.Url.AbsolutePath;
+                if (!path.StartsWith("/v1/"))
+                {
+                    res.StatusCode = 404;
+                    WriteAscii(res, "{\"error\":{\"message\":\"代理只接受 /v1/* 路径\"}}");
+                    res.Close();
+                    return;
+                }
+
+                string target = ProxyUpstream + path.Substring(3) + req.Url.Query;
+                var outReq = (HttpWebRequest)WebRequest.Create(target);
+                outReq.Method = req.HttpMethod;
+                outReq.ContentType = string.IsNullOrEmpty(req.ContentType) ? "application/json" : req.ContentType;
+                outReq.AllowReadStreamBuffering = false;
+                outReq.Timeout = 120000;
+                outReq.ReadWriteTimeout = 300000;
+                string auth = req.Headers["Authorization"];
+                if (!string.IsNullOrEmpty(auth)) outReq.Headers["Authorization"] = auth;
+                string session = req.Headers["x-opencode-session"];
+                outReq.Headers["x-opencode-session"] = string.IsNullOrEmpty(session) ? "pvzllm-launcher" : session;
+
+                if (req.HasEntityBody)
+                {
+                    using (var buffer = new MemoryStream())
+                    {
+                        req.InputStream.CopyTo(buffer);
+                        byte[] body = buffer.ToArray();
+                        outReq.ContentLength = body.Length;
+                        using (var s = outReq.GetRequestStream()) s.Write(body, 0, body.Length);
+                    }
+                }
+
+                HttpWebResponse outRes = null;
+                try { outRes = (HttpWebResponse)outReq.GetResponse(); }
+                catch (WebException we) { outRes = we.Response as HttpWebResponse; if (outRes == null) throw; }
+
+                using (outRes)
+                {
+                    res.StatusCode = (int)outRes.StatusCode;
+                    res.ContentType = string.IsNullOrEmpty(outRes.ContentType) ? "application/json" : outRes.ContentType;
+                    using (var src = outRes.GetResponseStream())
+                    {
+                        var buf = new byte[8192];
+                        int n;
+                        while (src != null && (n = src.Read(buf, 0, buf.Length)) > 0)
+                        {
+                            res.OutputStream.Write(buf, 0, n);
+                            res.OutputStream.Flush();   // SSE 需要逐块送达
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    res.StatusCode = 502;
+                    WriteAscii(res, "{\"error\":{\"message\":\"代理转发失败：" + EscapeJson(ex.Message) + "\"}}");
+                }
+                catch { }
+            }
+            finally
+            {
+                try { res.Close(); } catch { }
+            }
+        }
+
+        static void WriteAscii(HttpListenerResponse res, string text)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(text);
+            res.ContentType = "application/json; charset=utf-8";
+            res.ContentLength64 = bytes.Length;
+            res.OutputStream.Write(bytes, 0, bytes.Length);
+        }
+
+        static string EscapeJson(string s)
+        {
+            return (s ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", " ");
+        }
+
         static void Pause()
         {
+            StopProxy();
             Console.WriteLine();
             Console.WriteLine("按回车退出...");
             try { Console.ReadLine(); } catch { }

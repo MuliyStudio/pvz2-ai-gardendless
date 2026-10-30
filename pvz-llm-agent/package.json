@@ -1,0 +1,20 @@
+{
+  "name": "pvz-llm-agent",
+  "version": "0.1.10",
+  "private": true,
+  "type": "module",
+  "description": "PvZ2 Gardendless 的 LLM 工具层：唯一决策者是 LLM；代码只给事实、执行动作、返回真实结果、记录计划。",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "knowledge": "node scripts/build-knowledge.mjs",
+    "build": "node scripts/build.mjs",
+    "pack": "node scripts/build-pack.mjs",
+    "mcp": "node mcp/server.mjs",
+    "verify": "node scripts/verify-live.mjs",
+    "acceptance": "node scripts/acceptance.mjs",
+    "live": "node scripts/live-play.mjs"
+  }
+}

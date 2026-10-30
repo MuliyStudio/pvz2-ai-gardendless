@@ -10,9 +10,17 @@ launcher.ini
 .mcp.json
 .cursor/
 PvZAI-发布包/
+dist/
 pvz-ai-agent.zip
 PvZAI-AI草坪指挥官-发布包.zip
 
 # 编辑器
 .vscode/
 .idea/
+
+# 本地依赖 / 游戏源码（体积大，不进仓库）
+game code/
+dist/
+__pycache__/
+tools/.live_probe.js
+pvz-llm-agent/pvz-llm-agent.zip

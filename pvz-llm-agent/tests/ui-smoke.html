@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>pvz-llm-agent UI smoke</title>
+<style>html,body{margin:0;height:100%;background:#1b2a1f;color:#fff;font-family:sans-serif}body:before{content:"游戏背景（测试用）";position:fixed;left:40%;top:45%;opacity:.35;font-size:28px}#outside{display:none}</style>
+</head>
+<body>
+<div id="outside" style="position:fixed;left:40%;top:55%;">
+  <div class="entry"><span class="time">00:00</span><span class="text">outside</span></div>
+  <button class="btn primary">outside</button>
+</div>
+<script type="module">
+import { createInGameUI } from '../in-game/ui.js?v=10';
+
+const events = [];
+const agent = {
+  version: '0.1.6',
+  setConfig() {},
+  setEventHandler(fn) { this.handler = fn; },
+  start: async () => ({ ok: true }),
+  stop() {},
+  isRunning: () => false,
+  testConnection: async () => ({ ok: true, latencyMs: 12, model: 'deepseek-chat' }),
+  getStats: () => ({ toolCalls: 0, promptTokens: 0, completionTokens: 0 }),
+  getPlan: () => null,
+  getPhase: () => null,
+};
+const bridge = {
+  snapshot: () => ({
+    ok: true, phase: 'preparing', sun: 150, plantFood: 1,
+    level: { wave: 1, waves: 8, name: 'Pirate Seas - Day 1' },
+    plants: [], zombies: [], cards: [], tasks: [], lanes: [],
+    plan: null,
+  }),
+  health: () => ({ ok: true }),
+};
+window.__events = events;
+window.__agent = agent;
+window.__ui = createInGameUI({ agent, bridge });
+window.__ready = true;
+
+if (location.search.includes('demo')) {
+  const h = agent.handler;
+  h({ type: 'run_start', model: 'deepseek-chat' });
+  h({ type: 'plan', plan: {
+    style: '经济优先 + 双层防线',
+    deck: { sunshroom: '25，早期经济', cabbagepult: '100，越墙输出', melonpult: '325，主力溅射', tallnut: '125，8000 血前墙' },
+    layout: { col0: '阳光菇 ×5', col4: '高坚果 ×5', col2: '西瓜投手 4 个' },
+    thresholds: { permanentPlants: 16, freeSlots: '>=2' },
+    contingency: { 某行被突破: '樱桃清行，再补高坚果', 阳光富余: '卷心菜换西瓜' },
+  }, savedAt: new Date().toISOString() });
+  h({ type: 'thinking_final', text: 'The lane is getting crowded. Better to plant tallnut at (4,4)? Zombies at col 4 already there, cell occupied by zombie. Plant tallnut at (4,3): zombies at lane 4, walking left, will hit it at col 3 and eat 8000hp, long stall. Then use melonpult splash behind it.' });
+  h({ type: 'tool_call', name: 'pvz_act', args: { actions: [{ type: 'plant', plant: 'tallnut', lane: 4, column: 3 }] } });
+  h({ type: 'tool_result', name: 'pvz_act', ok: true, result: { ok: true, results: [{ action: 'plant', type: 'tallnut', ok: true, pending: true, detail: 'tallnut 已发起，等待落地' }] } });
+  h({ type: 'state', state: {
+    ok: true, phase: 'running', sun: 225, plantFood: 3,
+    level: { wave: 10, waves: 16 }, plants: [{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}],
+    tasks: [{ tip: 'Never have more than 18 plants', urgent: false }], lanes: [],
+  } });
+  h({ type: 'tool_call', name: 'pvz_act', args: { actions: [{ type: 'plant', plant: 'melonpult', lane: 2, column: 3 }] } });
+  h({ type: 'tool_result', name: 'pvz_act', ok: false, result: { ok: false, results: [{ action: 'plant', type: 'melonpult', ok: false, code: 'COOLDOWN', reason: 'melonpult 冷却中 2.0s', retryAfter: 2 }] } });
+  h({ type: 'assistant', text: '先补第 5 行坚果，等西瓜投手冷却好再补第 3 行输出。' });
+  h({ type: 'tool_result', name: 'pvz_wait_until', ok: true, result: { ok: true, satisfied: true, condition: 'sun>=325', elapsed: 12.4 } });
+  h({ type: 'tool_call', name: 'pvz_act', args: { actions: [{ type: 'plant', plant: 'squash', lane: 4, column: 4 }] } });
+  h({ type: 'tool_result', name: 'pvz_act', ok: true, result: { ok: true, results: [{ action: 'plant', type: 'squash', ok: true, detail: '种下 squash @ 4,4' }] } });
+}
+
+if (location.search.includes('mini')) {
+  setTimeout(() => {
+    const btn = document.querySelector('#pvzllm-panel [data-act="min"]');
+    if (btn) btn.click();
+  }, 50);
+}
+</script>
+</body>
+</html>

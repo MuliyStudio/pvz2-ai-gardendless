@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "pvz-llm-agent": {
+      "command": "node",
+      "args": [
+        "D:\\桌面\\植物大战僵尸\\pvz-llm-agent\\mcp\\server.mjs"
+      ],
+      "env": {
+        "PVZ_CDP_PORT": "9222"
+      }
+    }
+  }
+}

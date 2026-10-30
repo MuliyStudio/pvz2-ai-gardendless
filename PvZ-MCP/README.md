@@ -93,11 +93,16 @@ phase=objective 先 pvz_dismiss_objective；phase=preparing 先 pvz_choose_deck�
 ## v0.2.5 新增
 
 - **地形**：`state.terrain.map`（每行字符串：`L` 陆地 / `P` 木板 / `W` 水 / `S` 天空 / `?` 未知）与 `state.blockedCells`。水格不会再被盲目试种。
-- **结构化错误**：`pvz_plant` / `pvz_shovel` / `pvz_plant_food` 失败返回 `code`（`TERRAIN` / `COOLDOWN` / `SUN` / `OCCUPIED` / `LANE_LIMIT` / `LEVEL_LIMIT` …）。`COOLDOWN` 带 `retryAfter`。
+- **结构化错误**：`pvz_plant` / `pvz_shovel` / `pvz_plant_food` 失败返回 `code`（`TERRAIN` / `COOLDOWN` / `SUN` / `OCCUPIED` / `LEVEL_LIMIT` / `ENDANGERED_PLANT` …）。`COOLDOWN` 带 `retryAfter`。位置和每行数量不再是硬限制（由 AI 自行判断）。
 - **任务计时**：`tasks[].modeName`、`timeSemantics`、`windowActive`、`timeLeft`、`urgent`、`hint`。`timed_kill` 是“最近 N 秒内击杀”的滑动窗口。
 - **批量动作**：`pvz_act` 一次执行最多 6 个动作。
 - **条件等待**：`pvz_wait_until` 支持 `sun>=200`、`card_ready:repeater`、`zombie_in_lane:3`、`zombie_near:2`、`plantfood>=1`、`tasks_ready`、`phase:running`、`plants>=10`。
 - **换卡组**：`pvz_choose_deck({replace:true})` 清空游戏预填卡组后重新选，返回 `deck / applied / skipped / started`。
+- **关卡脚本**：`state.levelScript` 直接来自游戏合并后的关卡对象，含每波僵尸明细（`waves[].zombies`、`rows`、`extraFood`、`flag`）、动态增援池 `dynamic[]`、濒危配置 `protectConfig`。
+- **植物数值**：`state.cards[].stats` / `state.seedSelection.available[].stats` 含 `cost / cd / hp / family / range / attack{dmg,interval,dps} / splash / chance / plantFood / brief / special`；多发卡不硬算 dps（避免双发被算成一半）。
+- **濒危预警**：`state.endangered[].dps`、`ttd`（预计还能撑几秒），`state.protect` 给出 `must / alive / source`。
+- **僵尸数值**：`state.zombieStats[type]` 含 `hp / speed / rush / eatDps / tier / speedTier / armor / shield / immunities / chance / behaviors`（如钢琴碾压间隔、淘金者落地眩晕与引爆倒计时、鸡农放鸡血量阈值、巨尸砸击伤害、斗篷护盾）。
+- **保护花朵关**：`state.flowers[]` 给出鲜花所在 `lane/column`（来自游戏 `flowerLine` 组件）；提示词会说明“墙必须种在花格右侧”，左侧的墙会进低效候选。
 
 ## v0.2.6 新增
 
@@ -146,7 +151,7 @@ phase=objective 先 pvz_dismiss_objective；phase=preparing 先 pvz_choose_deck�
 ## v0.3.1 新增
 
 - **`state.board`**：5×9 结构化棋盘，`board[lane].cells[column]` 是植物 codename（空格为 null），`board[lane].zombies[]` 是该行僵尸的 `column/type/hp`。
-- **可种落点**：`pvz_act` / `pvz_plant` 失败时结果里可能带 `alts: [{lane,column}]`；`POSITION` 表示“这格明显浪费（阳光太靠前/坚果太靠后/地刺太左/射手太靠右）”。
+- **可种落点**：`pvz_plant` 失败时结果里可能带 `alts: [{lane,column}]`（例如地形不可种、格子被占）。位置窗口只是建议，不再返回 `POSITION` 硬拒绝。
 - **位置窗口**：阳光 c0-c2、普通输出 c0-c4、坚果/近战 c3-c7、地刺 c2-c6；明显越界会被拒绝并给出 `alts`。
 - **推荐**：选落点前先读 `state.board` 和 `state.terrain`，不要猜；失败后按 `alts` 改种，别反复撞同一格。
 
@@ -154,14 +159,14 @@ phase=objective 先 pvz_dismiss_objective；phase=preparing 先 pvz_choose_deck�
 
 - **`state.world`**：`{ key, name, mechanics, tips, zombies }`，来自关卡名/ID 的世界识别（BWiki 常识兜底）。
 - **预计僵尸来源**：`state.levelPreview.zombies[].source` 可能是 `level-data` 或 `world-knowledge`；后者表示关卡数据没读到，按世界常识估计。
-- **地刺规则**：必须 c4-c7 且在坚果前面；违反返回 `POSITION` + 前排 `alts`。
+- **地刺建议**：放 c4-c7 且在坚果前面效果最好，但代码不再拒绝越界种植。
 - **开局计划时机（模组）**：等选卡界面拿到可选卡后再调用参谋，计划里的卡组/克制更贴合本关。
 - **策略/指示（模组侧）**：策略提示词可编辑、思考窗可发玩家指示；MCP 侧无需改动，但 `pvz_set_plan` 仍可覆盖计划。
 
 ## v0.3.4 新增（模组侧）
 
 - 默认策略移到模组包根目录 `strategy.md`，用文本编辑器直接改，重启游戏生效；`#` 行是注释。
-- 游戏内保存的策略覆盖文件，点“恢复默认”读回文件；旧版 GP-Next 没有 `ctx.files` 时自动回退到内置默认。
+- 旧版 GP-Next 没有 `ctx.files` 时只回退到一句极简兜底，策略正文仍以 `strategy.md` 为准。
 - MCP 工具本身无变化；如果你用 MCP 客户端，仍通过 `pvz_set_plan` 控制策略方向。
 
 ## v0.3.5 新增（模组侧）
