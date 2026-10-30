@@ -10,7 +10,7 @@ function setup(opts) {
   resetAssetCache();
   const game = createFakeGame(opts);
   const bridge = createBridge(game.ctx);
-  const router = createToolRouter({ bridge, version: '0.1.16' });
+  const router = createToolRouter({ bridge, version: '0.1.17' });
   return { game, bridge, router };
 }
 
@@ -100,7 +100,7 @@ test('router: health 带工具清单和版本', async () => {
     assert.equal(h.ok, true);
     assert.equal(h.tools.length, 16);
     assert.equal(h.namespace, 'pvz-llm-agent');
-    assert.equal(h.serverVersion, '0.1.16');
+    assert.equal(h.serverVersion, '0.1.17');
   } finally { teardown(bridge); }
 });
 
@@ -253,5 +253,20 @@ test('router: 长冷却（>3.5s）不干等，直接返回 COOLDOWN 让模型换
     assert.equal(r.results[0].code, 'COOLDOWN');
     assert.equal(calls, 1, '长冷却不应该反复重试');
     assert.ok(ms < 1500, `不该阻塞等待，实际 ${ms}ms`);
+  } finally { teardown(bridge); }
+});
+
+test('router: OCCUPIED 带同行 alternatives，方便直接换格重种', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 300;
+    game.grid[1][3].addPlant('wallnut');
+    const r = await router.call('pvz_act', { actions: [{ type: 'plant', plant: 'sunflower', lane: 1, column: 3 }] });
+    const res = r.results[0];
+    assert.equal(res.code, 'OCCUPIED');
+    assert.ok(Array.isArray(res.alternatives) && res.alternatives.length > 0, JSON.stringify(res));
+    assert.ok(res.alternatives.every((x) => x.lane === 1 && x.column !== 3), '候选必须是同行的其它格子');
+    assert.ok(res.reason.includes('可改种'), res.reason);
   } finally { teardown(bridge); }
 });

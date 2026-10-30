@@ -317,6 +317,24 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     return { ok: true, restarted: true, from: before, phase: 'preparing', detail: '本关已重开（回到选卡阶段）' };
   }
 
+  // 同行还能种的空格（按离目标列的距离排序）：占用/不可种时直接给候选，
+  // 省掉"撞一次错误、再想一轮"的往返。
+  function emptyCellsInLane(C, lane, wantColumn, cf, limit = 3) {
+    const cols = C.ColumnCount || 9;
+    const out = [];
+    for (let c = 0; c < cols; c++) {
+      if (c === wantColumn) continue;
+      const cell = C.getLnC(lane, c);
+      if (!cell) continue;
+      try { if (reader.cellPlants(cell).length) continue; } catch { continue; }
+      let ok = true;
+      try { ok = cell.putPlantAvailable ? cell.putPlantAvailable(true, cf && cf.ID, true, true, cf && cf.spf) : true; } catch { ok = true; }
+      if (ok) out.push({ lane, column: c });
+    }
+    out.sort((a, b) => Math.abs(a.column - wantColumn) - Math.abs(b.column - wantColumn));
+    return out.slice(0, limit);
+  }
+
   async function act(a) {
     const ctxg = findComps();
     if (!ctxg) return fail('NO_SCENE');
@@ -360,10 +378,13 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
       if (!cell) return fail('NO_CELL', { lane, column });
       if (a.type !== 'replace' && reader.cellPlants(cell).length > 0) {
         const occupants = reader.cellPlants(cell).map((p) => cleanType(p.Plant_Type));
+        const alternatives = emptyCellsInLane(C, lane, column, cf);
         return fail('OCCUPIED', {
-          lane, column, plants: occupants,
-          hint: '同格已有植物；要换植用 replace（先铲后种），只腾位用 shovel',
-        }, `${lane} 行 ${column} 列已被 ${occupants.join('/') || '植物'} 占用，可用 replace 先铲后种`);
+          lane, column, plants: occupants, alternatives,
+          hint: alternatives.length
+            ? '同格已有植物（可能是你自己或玩家手动种的）；直接换一格，alternatives 里就是同行空位'
+            : '同格已有植物；这一行没有空位了，换行或先铲',
+        }, `${lane} 行 ${column} 列已被 ${occupants.join('/') || '植物'} 占用${alternatives.length ? `，可改种 ${alternatives.map((x) => `c${x.column}`).join('/')}` : ''}`);
       }
       if (a.type === 'replace') {
         try { cell.removePlant(); } catch { /* ignore */ }
@@ -374,7 +395,11 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
       try { canPlace = cell.putPlantAvailable ? cell.putPlantAvailable(true, cf.ID, true, true, cf.spf) : true; } catch { canPlace = true; }
       if (!canPlace) {
         reader.learnCell(lane, column, 'CELL_BLOCKED');
-        return fail('CELL_BLOCKED', { lane, column, card: index, type }, `${lane} 行 ${column} 列不能种`);
+        const alternatives = emptyCellsInLane(C, lane, column, cf);
+        return fail('CELL_BLOCKED', {
+          lane, column, card: index, type, alternatives,
+          hint: alternatives.length ? '这格不能种（墓碑/水面/障碍）；alternatives 是同行可种位' : '这行没有可种的空位',
+        }, `${lane} 行 ${column} 列不能种${alternatives.length ? `，可改种 ${alternatives.map((x) => `c${x.column}`).join('/')}` : ''}`);
       }
       if (ui && typeof ui.tryChangingIndex === 'function' && ui.index !== index) {
         ui.tryChangingIndex(index);

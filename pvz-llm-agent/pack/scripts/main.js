@@ -1680,6 +1680,24 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     return { ok: true, restarted: true, from: before, phase: 'preparing', detail: '本关已重开（回到选卡阶段）' };
   }
 
+  // 同行还能种的空格（按离目标列的距离排序）：占用/不可种时直接给候选，
+  // 省掉"撞一次错误、再想一轮"的往返。
+  function emptyCellsInLane(C, lane, wantColumn, cf, limit = 3) {
+    const cols = C.ColumnCount || 9;
+    const out = [];
+    for (let c = 0; c < cols; c++) {
+      if (c === wantColumn) continue;
+      const cell = C.getLnC(lane, c);
+      if (!cell) continue;
+      try { if (reader.cellPlants(cell).length) continue; } catch { continue; }
+      let ok = true;
+      try { ok = cell.putPlantAvailable ? cell.putPlantAvailable(true, cf && cf.ID, true, true, cf && cf.spf) : true; } catch { ok = true; }
+      if (ok) out.push({ lane, column: c });
+    }
+    out.sort((a, b) => Math.abs(a.column - wantColumn) - Math.abs(b.column - wantColumn));
+    return out.slice(0, limit);
+  }
+
   async function act(a) {
     const ctxg = findComps();
     if (!ctxg) return fail('NO_SCENE');
@@ -1723,10 +1741,13 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
       if (!cell) return fail('NO_CELL', { lane, column });
       if (a.type !== 'replace' && reader.cellPlants(cell).length > 0) {
         const occupants = reader.cellPlants(cell).map((p) => cleanType(p.Plant_Type));
+        const alternatives = emptyCellsInLane(C, lane, column, cf);
         return fail('OCCUPIED', {
-          lane, column, plants: occupants,
-          hint: '同格已有植物；要换植用 replace（先铲后种），只腾位用 shovel',
-        }, `${lane} 行 ${column} 列已被 ${occupants.join('/') || '植物'} 占用，可用 replace 先铲后种`);
+          lane, column, plants: occupants, alternatives,
+          hint: alternatives.length
+            ? '同格已有植物（可能是你自己或玩家手动种的）；直接换一格，alternatives 里就是同行空位'
+            : '同格已有植物；这一行没有空位了，换行或先铲',
+        }, `${lane} 行 ${column} 列已被 ${occupants.join('/') || '植物'} 占用${alternatives.length ? `，可改种 ${alternatives.map((x) => `c${x.column}`).join('/')}` : ''}`);
       }
       if (a.type === 'replace') {
         try { cell.removePlant(); } catch { /* ignore */ }
@@ -1737,7 +1758,11 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
       try { canPlace = cell.putPlantAvailable ? cell.putPlantAvailable(true, cf.ID, true, true, cf.spf) : true; } catch { canPlace = true; }
       if (!canPlace) {
         reader.learnCell(lane, column, 'CELL_BLOCKED');
-        return fail('CELL_BLOCKED', { lane, column, card: index, type }, `${lane} 行 ${column} 列不能种`);
+        const alternatives = emptyCellsInLane(C, lane, column, cf);
+        return fail('CELL_BLOCKED', {
+          lane, column, card: index, type, alternatives,
+          hint: alternatives.length ? '这格不能种（墓碑/水面/障碍）；alternatives 是同行可种位' : '这行没有可种的空位',
+        }, `${lane} 行 ${column} 列不能种${alternatives.length ? `，可改种 ${alternatives.map((x) => `c${x.column}`).join('/')}` : ''}`);
       }
       if (ui && typeof ui.tryChangingIndex === 'function' && ui.index !== index) {
         ui.tryChangingIndex(index);
@@ -2348,7 +2373,7 @@ function createEventStreamApi({ snapshot }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.1.16';
+const BRIDGE_VERSION = '0.1.17';
 
 function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -3208,7 +3233,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.1.16', sleep = routerSleep }) {
+function createToolRouter({ bridge, version = '0.1.17', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -3533,6 +3558,7 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2 花园无尽》的唯一决�
 - 想重开本关用 pvz_restart（不用先进暂停菜单）。
 - 每次工具往返都有网络延迟：一轮尽量把能做的都做完（pvz_act 最多 6 个动作，铺同一种卡用 cells），不要每轮只种一株。
 - 能量豆只给已经落地的植物：同一批动作里刚种下的植物还没落地，给豆会 NO_PLANT；下一轮再给。留着不用等于浪费，血多的输出/尖刀/墙优先。
+- OCCUPIED / CELL_BLOCKED 会带 alternatives（同行空位）：直接换 alternatives 里的格子重种，不要原地重试，也不要因为一次被占就放弃这张卡。
 - pvz_choose_deck 返回 warning / actualDeck 时以 actualDeck 为准：计划里没带上的卡不要当自己有（例如计划写噬碑藤但卡组没带）。
 - 樱桃炸弹、倭瓜、冰冻生菜这类一次性/控制卡是拿来救场的，不是存着看的：某行有僵尸贴到 c2 以内就该用。
 - 每次动作前先看 pvz_state（至少看阳光、卡槽冷却、格子占用、僵尸位置）。失败后读 code，不要对同一个格子/同一张卡反复撞同一个错误。

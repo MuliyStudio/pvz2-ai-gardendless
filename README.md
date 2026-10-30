@@ -299,7 +299,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:an
 
 ## 更新日志
 
-当前版本：**模组 0.1.16 + 启动器 1.0.0**（OpenCode Go 本地代理 + 一键发布包）。
+当前版本：**模组 0.1.17 + 启动器 1.0.0**（OpenCode Go 本地代理 + 一键发布包）。
 
 完整版本记录见 **[CHANGELOG.md](CHANGELOG.md)**；逐版本实现细节另见 **[pvz-llm-agent/CHANGELOG.md](pvz-llm-agent/CHANGELOG.md)**。
 
