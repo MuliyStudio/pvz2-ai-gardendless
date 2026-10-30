@@ -43,7 +43,9 @@ PvZ2 Gardendless · AI 草坪指挥官
    - 服务商：DeepSeek 官方 / OpenCode Go（本地代理）/ 自定义
    - DeepSeek：API Base https://api.deepseek.com/v1，模型 deepseek-chat
    - OpenCode Go：先到 opencode.ai/console 取 Key，并在 Settings → Privacy →
-     Regions 选 Global，否则 DeepSeek 会被上游拒绝；模型 deepseek-v4.1-flash
+     Regions 选 Global，否则 DeepSeek 会被上游拒绝。
+     模型只认 deepseek-flash 或 deepseek-v4-pro；写别的名字（如 deepseek-v4.1-flash）
+     上游会直接报 invalid_request_error，浮窗显示「连接失败 LLM_HTTP」。
    - API Key：你自己的 Key（勾选“记住 Key”才会存到本机，否则只存内存）
    - 点「测试」，成功后再点「开始 AI」（或按 F8）
 7. 左下角「AI 思考」浮窗（F10 显示/隐藏）会显示它在想什么、调了什么工具、

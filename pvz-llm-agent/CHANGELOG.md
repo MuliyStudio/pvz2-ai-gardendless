@@ -1,5 +1,17 @@
 ﻿# Changelog
 
+## 0.1.15 — 2026-10-30
+
+**修 OpenCode Go 模型名 + 再砍一轮单轮耗时**
+
+- **模型名写错了**：OpenCode Go 那组只认 `deepseek-flash` 和 `deepseek-v4-pro`，预设里写的 `deepseek-v4.1-flash` 会让上游直接返回
+  `invalid_request_error: the supported API model names are deepseek-flash, deepseek-v4-pro`（浮窗就是「连接失败 LLM_HTTP」）。
+  预设改成 `deepseek-flash`，候选只留这两个，hint 里写清合法名字；README / 安装说明同步。
+- 精简版 `pvz_state` 再去掉 `zombieStats`（完整数值只在 `pvz_briefing`）；`pvz_events` 的波次 EHP 改用每只僵尸自带的 `ehp/ehpMax`。
+  实测 state 10.9 KB → 约 9.4 KB。
+- system prompt 加一条「推理最多 2 句、不复述数值、直接给动作」：上一局 31 次调用输出 23,905 token（平均 770/次），生成速度已经是主要耗时，砍输出长度比砍输入更直接。
+- 离线测试 53 项全通过。
+
 ## 0.1.14 — 2026-10-30
 
 **一批动作里同一张卡不用再手动等冷却**

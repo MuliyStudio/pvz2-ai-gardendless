@@ -23,7 +23,7 @@ test('agent 执行 tool_calls、回填结果、显示推理，并在收到停止
   const router = {
     call: async (name, args) => {
       calls.push({ name, args });
-      if (name === 'pvz_health') return { ok: true, version: '0.1.14', phase: 'running' };
+      if (name === 'pvz_health') return { ok: true, version: '0.1.15', phase: 'running' };
       if (name === 'pvz_state') return { ok: true, phase: 'running', sun: 100, plantFood: 1, level: { wave: 1, waves: 2 }, cards: [], plants: [], zombies: [], tasks: [], lanes: [] };
       return { ok: true };
     },
@@ -179,10 +179,13 @@ test('PROVIDER_PRESETS：OpenCode Go 指向 OpenAI 兼容端点', () => {
 
   const go = PROVIDER_PRESETS.find((p) => p.id === 'opencode-go');
   assert.equal(go.baseUrl, 'http://127.0.0.1:8787/v1', '浏览器不能直连，必须走本地代理');
-  assert.equal(go.model, 'deepseek-v4.1-flash');
+  assert.equal(go.model, 'deepseek-flash', '上游只认 deepseek-flash / deepseek-v4-pro');
   assert.equal(normalizeBaseUrl(go.baseUrl), 'http://127.0.0.1:8787/v1/chat/completions');
-  assert.ok(go.models.includes('deepseek-v4.1-flash'));
+  assert.ok(go.models.includes('deepseek-flash'));
+  assert.ok(go.models.includes('deepseek-v4-pro'));
+  assert.ok(!go.models.some((m) => /v4\.1/.test(m)), '别再把上游不认的模型名塞进候选');
   assert.ok(/local-proxy/.test(go.hint), '提示里要告诉用户先起代理');
+  assert.ok(/deepseek-flash/.test(go.hint), '提示里要写清合法模型名');
 });
 
 test('OpenCode Go 请求带 x-opencode-session，DeepSeek 官方不带', async () => {

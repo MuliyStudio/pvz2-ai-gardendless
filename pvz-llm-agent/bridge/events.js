@@ -31,7 +31,7 @@ export function createEventStreamApi({ snapshot }) {
     const w2 = (state.level && state.level.wave) || 0;
     if (w2 > w1) {
       const types = [...new Set((state.zombies || []).map((z) => z.type))];
-      const ehpTotal = (state.zombies || []).reduce((s, z) => s + (((state.zombieStats || {})[z.type] || {}).ehp || 0), 0);
+      const ehpTotal = (state.zombies || []).reduce((s, z) => s + (z.ehp != null ? z.ehp : (z.ehpMax || 0)), 0);
       emit(out, { t: 'wave_started', wave: w2, types, ehpTotal, detail: `第${w2}波${types.length ? ' ' + types.join(',') : ''}` }, now);
     }
 

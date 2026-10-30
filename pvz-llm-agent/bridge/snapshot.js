@@ -857,6 +857,9 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
     out.limits.plantsPlanted = out.plants.length;
     out.limits.plantsLeft = limit != null ? Math.max(0, limit - out.plants.length) : null;
 
+    // 每回合都发的精简版不带 zombieStats（完整数值 + 标签只在 pvz_briefing 里给）
+    if (!full) delete out.zombieStats;
+
     return out;
   }
 

@@ -4,6 +4,16 @@
 
 ---
 
+## v0.4.5
+
+**修 OpenCode Go 模型名 + 再砍单轮耗时（模组 0.1.15）**
+
+- OpenCode Go 只认 `deepseek-flash` / `deepseek-v4-pro`，预设里写的 `deepseek-v4.1-flash` 会被上游直接拒绝（`invalid_request_error`）。预设、候选、README、安装说明全部改过来。
+- `pvz_state` 再瘦身：去掉每回合重复的 `zombieStats`，波次 EHP 改用僵尸自带的 `ehp/ehpMax`；加一条「推理 ≤2 句、不复述数值」的提示词规则。
+- 发布包重建为 `PvZAI-LLM-Agent-Bundle-v0.1.15.zip`，离线 53 项测试通过。
+
+---
+
 ## v0.4.4
 
 **旁观第二局后的吞吐修复（模组 0.1.14）**

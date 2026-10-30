@@ -106,7 +106,7 @@
 | --- | --- | --- |
 | 服务商 | `DeepSeek 官方` / `OpenCode Go（本地代理）` / `自定义` | 切换后自动填 API Base 和模型，模型名仍可手改 |
 | API Base | `https://api.deepseek.com/v1` | 必须包含 `/v1` |
-| 模型 | `deepseek-chat` / `deepseek-v4.1-flash` | 支持 OpenAI 兼容且支持 tool calling 的接口 |
+| 模型 | `deepseek-chat` / `deepseek-flash` | 支持 OpenAI 兼容且支持 tool calling 的接口 |
 | API Key | `sk-...` | 默认只保存在内存；勾选“记住 Key”后明文存本机 localStorage |
 
 3. 点 **测试**（发一条 8 token 的请求）确认模型可用。
@@ -144,7 +144,7 @@
 
 想影响它的打法，按优先级：
 
-1. **换模型**：tool calling 稳的模型效果差别很大（DeepSeek `deepseek-chat`、OpenCode Go `deepseek-v4.1-flash` 都测过）。
+1. **换模型**：tool calling 稳的模型效果差别很大（DeepSeek `deepseek-chat`、OpenCode Go `deepseek-flash` 都测过）。
 2. **MCP 模式**：在你自己的 Agent 里写系统提示（比如“阳光卡只放 c0-c2”“这周目优先双发射手”），再让它调 `pvz_*` 工具，比改模组文件灵活。
 3. **看计划再纠正**：思考窗的“本关计划”会显示模型自己写的 buildOrder / shovelPolicy，不对就停掉重开一局，或在 MCP 客户端里让它重写计划。
 
@@ -219,6 +219,8 @@ Key 错误、Base URL 少了 `/v1`、模型名不对，或中转不兼容。先�
 ### OpenCode Go 连不上？
 
 它需要本地代理：启动器会自动在 `127.0.0.1:8787` 起代理；不开启动器可以手动 `node pvz-llm-agent/scripts/local-proxy.mjs`。另外要在 OpenCode Console → Settings → Privacy → Regions 选 **Global**，否则 DeepSeek 会被上游拒绝。
+
+模型名只认 **`deepseek-flash`** 和 **`deepseek-v4-pro`**。写成别的（例如 `deepseek-v4.1-flash`）上游会直接返回 `invalid_request_error: the supported API model names are deepseek-flash, deepseek-v4-pro`，浮窗里显示就是 `连接失败 LLM_HTTP`。
 
 ### AI 不种 / 一直等？
 
@@ -297,7 +299,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:an
 
 ## 更新日志
 
-当前版本：**模组 0.1.11 + 启动器 1.0.0**（OpenCode Go 本地代理 + 一键发布包）。
+当前版本：**模组 0.1.15 + 启动器 1.0.0**（OpenCode Go 本地代理 + 一键发布包）。
 
 完整版本记录见 **[CHANGELOG.md](CHANGELOG.md)**；逐版本实现细节另见 **[pvz-llm-agent/CHANGELOG.md](pvz-llm-agent/CHANGELOG.md)**。
 

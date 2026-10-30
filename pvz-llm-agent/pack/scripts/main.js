@@ -1335,6 +1335,9 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
     out.limits.plantsPlanted = out.plants.length;
     out.limits.plantsLeft = limit != null ? Math.max(0, limit - out.plants.length) : null;
 
+    // 每回合都发的精简版不带 zombieStats（完整数值 + 标签只在 pvz_briefing 里给）
+    if (!full) delete out.zombieStats;
+
     return out;
   }
 
@@ -2219,7 +2222,7 @@ function createEventStreamApi({ snapshot }) {
     const w2 = (state.level && state.level.wave) || 0;
     if (w2 > w1) {
       const types = [...new Set((state.zombies || []).map((z) => z.type))];
-      const ehpTotal = (state.zombies || []).reduce((s, z) => s + (((state.zombieStats || {})[z.type] || {}).ehp || 0), 0);
+      const ehpTotal = (state.zombies || []).reduce((s, z) => s + (z.ehp != null ? z.ehp : (z.ehpMax || 0)), 0);
       emit(out, { t: 'wave_started', wave: w2, types, ehpTotal, detail: `第${w2}波${types.length ? ' ' + types.join(',') : ''}` }, now);
     }
 
@@ -2331,7 +2334,7 @@ function createEventStreamApi({ snapshot }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.1.14';
+const BRIDGE_VERSION = '0.1.15';
 
 function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -3191,7 +3194,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.1.14', sleep = routerSleep }) {
+function createToolRouter({ bridge, version = '0.1.15', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -3504,6 +3507,7 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2 花园无尽》的唯一决�
 
 硬性规则：
 - 思考过程尽量用中文；工具调用参数和 codename 除外。推理原文只显示在顶部滚动框，决策日志只记录你的动作、真实结果和计划。
+- 推理要短：最多 2 句（不超过 80 字），不复述阳光/波次/血量这些数字（工具结果里已经有），直接给下一步动作。想更久就拆成多轮，每轮都去做事。
 - 没有任何"推荐卡组"或本地打法。不要等系统给你建议；先 pvz_briefing / pvz_knowledge 查事实，再自己决定。
 - 选卡用 pvz_choose_deck。工具不会自动补卡，也不会替换你指定的卡。数量不足会返回 DECK_NOT_FULL；补满后重新调用。
 - 卡槽状态看 cards：cdReady（冷却好了）/ affordable（买得起）/ sunShort（还差多少阳光）；ready 只有两者都满足才是 true。
@@ -3618,18 +3622,9 @@ const PROVIDER_PRESETS = Object.freeze([
     id: 'opencode-go',
     label: 'OpenCode Go（本地代理）',
     baseUrl: 'http://127.0.0.1:8787/v1',
-    model: 'deepseek-v4.1-flash',
-    hint: '先运行 node scripts/local-proxy.mjs。opencode.ai 的 chat 接口不带 CORS 头，浏览器不能直连，必须经本地代理。Key 在 opencode.ai/console 取。',
-    models: [
-      'deepseek-v4.1-flash',
-      'glm-5.3-flash',
-      'kimi-k2.7-code',
-      'mimo-v2.6-flash',
-      'qwen3.8-flash',
-      'minimax-m3.1-flash',
-      'longcat-2.0',
-      'glm-5.2',
-    ],
+    model: 'deepseek-flash',
+    hint: '先运行 node scripts/local-proxy.mjs。opencode.ai 的 chat 接口不带 CORS 头，浏览器不能直连，必须经本地代理。Key 在 opencode.ai/console 取。注意：这组只认 deepseek-flash / deepseek-v4-pro，写别的名字上游会直接报 invalid_request_error。',
+    models: ['deepseek-flash', 'deepseek-v4-pro'],
   },
   {
     id: 'custom',
