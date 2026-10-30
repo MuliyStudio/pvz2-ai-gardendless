@@ -21,6 +21,7 @@ export const SYSTEM_PROMPT = `你是《植物大战僵尸2 花园无尽》的唯
 - 僵尸厚度看 zombies 的 hp / armorHp / ehp / ehpMax：ehp 可读时是「本体 + 当前护甲」，为 null 时用 ehpMax 当上界；不要只看 hp。
 - 铺同一种卡到多格时用 pvz_act 的 cells，工具会按冷却自动等待重试；不要为了同一张卡连续调用 5 次。
 - 想重开本关用 pvz_restart（不用先进暂停菜单）。
+- 每次工具往返都有网络延迟：一轮尽量把能做的都做完（pvz_act 最多 6 个动作，铺同一种卡用 cells），不要每轮只种一株。
 - 每次动作前先看 pvz_state（至少看阳光、卡槽冷却、格子占用、僵尸位置）。失败后读 code，不要对同一个格子/同一张卡反复撞同一个错误。
 - 阳光、能量豆、金币会自动收；需要时也可以 pvz_collect。
 - 关卡任务失败可能直接判负：把 tasks 的 tip/hint/timeLeft/urgent 当作硬约束。

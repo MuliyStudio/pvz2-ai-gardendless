@@ -95,7 +95,8 @@ test('snapshot 有棋盘、限制、地形和真实卡组', async () => {
     assert.ok(Array.isArray(s.plantable));
     const ps = s.cards.find((c) => c.type === 'peashooter');
     assert.equal(ps.cost, 100);
-    assert.ok(ps.stats.attack.dps > 0);
+    assert.ok(!('stats' in ps), 'state.cards 不再重复带完整数值（在 pvz_briefing.cards 里）');
+    assert.ok(s.levelScript == null || s.levelScript.waves === undefined, 'state 的 levelScript 只给波数摘要');
   } finally { teardown(bridge); }
 });
 
@@ -168,7 +169,7 @@ test('health 报告能力，且明确没有本地策略/自动卡组/队列', ()
   try {
     const h = bridge.health();
     assert.equal(h.ok, true);
-    assert.equal(h.version, '0.1.12');
+    assert.equal(h.version, '0.1.13');
     assert.equal(h.features.localStrategy, false);
     assert.equal(h.features.autoDeck, false);
     assert.equal(h.features.queue, false);

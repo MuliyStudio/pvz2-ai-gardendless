@@ -510,7 +510,7 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
             // ready = 冷却好了 且 买得起（旧字段，语义保持）
             ready: cdReady && affordable,
             cooling: !cdReady,
-            stats: st,
+            // 完整数值只在 pvz_briefing.cards 里给一次；每回合都带会让 prompt 翻几倍
           };
         });
         out.deck = out.cards.map((c) => c.type);
@@ -542,7 +542,11 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
     return out;
   }
 
-  function snapshot() {
+  function snapshot(opts) {
+    const full = !!(opts && opts.full);
+    // lean = 每回合都发的状态：cards 不带数值、levelScript 只留波数摘要。
+    // full = pvz_briefing 用：要完整波次表。完整数值体积差 3-4 倍，直接决定模型延迟。
+    const leanLevelScript = (ls) => (ls ? { waveCount: ls.waveCount, flagInterval: ls.flagInterval, isAtNight: !!(ls.lawn && ls.lawn.isAtNight) } : null);
     const ctxg = findComps();
     if (!ctxg) return { ok: false, code: 'NO_SCENE', reason: '不在游戏场景内' };
     const { map, scene } = ctxg;
@@ -580,8 +584,9 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
       try { sunNow = map.SunCount ? map.SunCount.CurrentValue : null; } catch { /* ignore */ }
       try { foodNow = map.PlantFoodCount ? map.PlantFoodCount.plantFoodNum : null; } catch { /* ignore */ }
       const cs = cardState(cards, sunNow);
-      let ls = null;
-      try { ls = lvl ? stats.levelScriptOf(lvl) : null; } catch { ls = null; }
+      let lsFull = null;
+      try { lsFull = lvl ? stats.levelScriptOf(lvl) : null; } catch { lsFull = null; }
+      const ls = full ? lsFull : leanLevelScript(lsFull);
       const limitFromTask = taskPlantLimit(tasks);
       const limit = limitFromTask != null ? limitFromTask : parsePlantLimit(missionHints);
       return {
@@ -630,13 +635,15 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
     try { out.sun = map.SunCount ? map.SunCount.CurrentValue : null; } catch { /* ignore */ }
     try { out.plantFood = map.PlantFoodCount ? map.PlantFoodCount.plantFoodNum : null; } catch { /* ignore */ }
 
+    let lsFull = null;
     if (lvl) {
       out.level.wave = Number.isFinite(lvl.currentWave) ? lvl.currentWave + 1 : 0;
       out.level.waves = lvl.waveManagerProps ? lvl.waveManagerProps.WaveCount : null;
       out.level.nextWaveIn = Number.isFinite(lvl.NextWaveCountdown) ? Math.max(0, Math.round(lvl.NextWaveCountdown)) : null;
       out.level.gameStarted = !!lvl.gameStarted;
-      try { out.levelScript = stats.levelScriptOf(lvl); } catch { out.levelScript = null; }
-      if (!out.level.waves && out.levelScript) out.level.waves = out.levelScript.waveCount || null;
+      try { lsFull = stats.levelScriptOf(lvl); } catch { lsFull = null; }
+      out.levelScript = full ? lsFull : leanLevelScript(lsFull);
+      if (!out.level.waves && lsFull) out.level.waves = lsFull.waveCount || null;
     }
     if (phase === 'preparing' || phase === 'objective') out.startingSun = out.sun;
 
@@ -820,7 +827,7 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
       for (const g of tagSet) if (TAG_TEXT[g]) out.mechanicFacts.push({ id: g, text: TAG_TEXT[g], source: 'zombie-tags' });
     } catch { /* ignore */ }
 
-    const ls = out.levelScript;
+    const ls = lsFull;
     if (out.terrain.map.some((row) => /[WS]/.test(row))) out.mechanicFacts.push({ id: 'water', text: '存在水面/天空格：普通植物不能直接种在这些格子上', source: 'terrain' });
     if (out.terrain.map.some((row) => /R/.test(row))) out.mechanicFacts.push({ id: 'rail', text: '存在矿车轨道：矿车可载植物上下移动', source: 'terrain' });
     if (obstacles.some((o) => o.type === 'tomb')) out.mechanicFacts.push({ id: 'tomb', text: '墓碑占格并阻挡直线弹道', source: 'terrain' });

@@ -10,7 +10,7 @@ import { createBriefing } from './briefing.js';
 import { createPlanStore } from './plan.js';
 import { createEventStreamApi } from './events.js';
 
-export const BRIDGE_VERSION = '0.1.12';
+export const BRIDGE_VERSION = '0.1.13';
 
 export function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -87,7 +87,7 @@ export function createBridge(ctx) {
         cards: (s && s.cards || []).length,
         plants: (s && s.plants || []).length,
         zombies: (s && s.zombies || []).length,
-        waves: (s && s.levelScript && s.levelScript.waves || []).length,
+        waves: (s && s.levelScript && (s.levelScript.waveCount || (s.levelScript.waves || []).length)) || 0,
       },
     };
   }

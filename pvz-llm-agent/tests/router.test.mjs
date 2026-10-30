@@ -10,7 +10,7 @@ function setup(opts) {
   resetAssetCache();
   const game = createFakeGame(opts);
   const bridge = createBridge(game.ctx);
-  const router = createToolRouter({ bridge, version: '0.1.12' });
+  const router = createToolRouter({ bridge, version: '0.1.13' });
   return { game, bridge, router };
 }
 
@@ -100,7 +100,7 @@ test('router: health 带工具清单和版本', async () => {
     assert.equal(h.ok, true);
     assert.equal(h.tools.length, 16);
     assert.equal(h.namespace, 'pvz-llm-agent');
-    assert.equal(h.serverVersion, '0.1.12');
+    assert.equal(h.serverVersion, '0.1.13');
   } finally { teardown(bridge); }
 });
 

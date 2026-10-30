@@ -332,7 +332,7 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
   }
 
   function trimMessages() {
-    const MAX = 60;
+    const MAX = 40;
     if (messages.length > MAX) {
       const system = messages[0];
       let rest = messages.slice(1);
@@ -346,12 +346,21 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
 
   function compactOldToolResults() {
     const toolMsgs = messages.filter((m) => m.role === 'tool');
-    // 最近 8 条工具结果保留原文；更早的大结果压成一句，避免整局 prompt 越滚越大。
-    for (let i = 0; i < toolMsgs.length - 8; i++) {
+    // 最近 4 条工具结果保留原文；更早的大结果压成一句状态摘要。
+    // 每份 pvz_state 约 9KB，留 8 份会让单轮 prompt 冲到 30k+ token，模型响应直接慢到 20-30 秒。
+    for (let i = 0; i < toolMsgs.length - 4; i++) {
       const m = toolMsgs[i];
-      if (m.content && m.content.length > 1500) {
-        m.content = JSON.stringify({ ok: true, omitted: true, note: '旧工具结果已省略；需要时重新调用 pvz_state / pvz_knowledge' });
-      }
+      if (!m.content || m.content.length <= 800) continue;
+      let note = '旧工具结果已省略；需要时重新调用 pvz_state / pvz_knowledge';
+      try {
+        const o = JSON.parse(m.content);
+        if (o && o.phase) {
+          note = `旧状态已省略：phase=${o.phase} 阳光=${o.sun} 第${(o.level && o.level.wave) || '?'}波 植物${(o.plants || []).length} 僵尸${(o.zombies || []).length}`;
+        } else if (o && o.ok === false && o.code) {
+          note = `旧失败结果：${o.code} ${String(o.reason || '').slice(0, 60)}`;
+        }
+      } catch { /* 非 JSON 结果就只留一句 */ }
+      m.content = JSON.stringify({ ok: true, omitted: true, note });
     }
   }
 

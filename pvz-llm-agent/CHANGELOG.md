@@ -1,5 +1,22 @@
 ﻿# Changelog
 
+## 0.1.13 — 2026-10-30
+
+**砍 prompt 体积：单轮决策从 20–30 秒降下来**
+
+旁观模组自己打（F8）实测：45 秒里决策日志只增加 8 条，有 26 秒完全没动静；同时阳光堆到 1275、植物只有 7 株、推车全丢。定位到瓶颈不是工具层，而是**每轮 prompt 太大**：
+
+- `pvz_state.cards[]` 每回合重复带每张卡的完整数值（实测 4.0 KB / 次）；`levelScript` 每回合重发完整波次表（2.9 KB）；`zombieStats`、`board` 也逐轮重复。单次 state 16.6 KB。
+- 内嵌 agent 保留最近 8 份完整工具结果 → 单轮 prompt ≈ 8 × 15 KB ≈ 30k+ token，DeepSeek 光读就要十几秒。
+
+改动：
+
+- `pvz_state` 改精简版：`cards[]` 去掉 `stats`（完整数值只在 `pvz_briefing.cards`），`levelScript` 只留 `waveCount / flagInterval / isAtNight`；`pvz_briefing` 通过 `snapshot({full:true})` 拿完整波次表。实测单次 state 16.6 KB → 约 9.7 KB。
+- agent 历史压缩：最近完整工具结果 8 → 4 份，压缩阈值 1500 → 800 字符；旧结果不再只写「已省略」，而是留一句状态摘要（phase / 阳光 / 波次 / 植物 / 僵尸）或失败 code，历史仍可读。
+- `MAX` 消息数 60 → 40。
+- system prompt 增加一条：每轮尽量把动作做完（≤6 个，铺同卡用 `cells`），不要每轮只种一株。
+- 预期单轮 prompt 从 ~120 KB 降到 ~40 KB；离线 52 项测试仍全通过。
+
 ## 0.1.12 — 2026-10-30
 
 **按实战暴露的问题重做事实层（远程驱动打了一整局后修的 7 条）**

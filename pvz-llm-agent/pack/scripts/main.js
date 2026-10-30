@@ -988,7 +988,7 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
             // ready = 冷却好了 且 买得起（旧字段，语义保持）
             ready: cdReady && affordable,
             cooling: !cdReady,
-            stats: st,
+            // 完整数值只在 pvz_briefing.cards 里给一次；每回合都带会让 prompt 翻几倍
           };
         });
         out.deck = out.cards.map((c) => c.type);
@@ -1020,7 +1020,11 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
     return out;
   }
 
-  function snapshot() {
+  function snapshot(opts) {
+    const full = !!(opts && opts.full);
+    // lean = 每回合都发的状态：cards 不带数值、levelScript 只留波数摘要。
+    // full = pvz_briefing 用：要完整波次表。完整数值体积差 3-4 倍，直接决定模型延迟。
+    const leanLevelScript = (ls) => (ls ? { waveCount: ls.waveCount, flagInterval: ls.flagInterval, isAtNight: !!(ls.lawn && ls.lawn.isAtNight) } : null);
     const ctxg = findComps();
     if (!ctxg) return { ok: false, code: 'NO_SCENE', reason: '不在游戏场景内' };
     const { map, scene } = ctxg;
@@ -1058,8 +1062,9 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
       try { sunNow = map.SunCount ? map.SunCount.CurrentValue : null; } catch { /* ignore */ }
       try { foodNow = map.PlantFoodCount ? map.PlantFoodCount.plantFoodNum : null; } catch { /* ignore */ }
       const cs = cardState(cards, sunNow);
-      let ls = null;
-      try { ls = lvl ? stats.levelScriptOf(lvl) : null; } catch { ls = null; }
+      let lsFull = null;
+      try { lsFull = lvl ? stats.levelScriptOf(lvl) : null; } catch { lsFull = null; }
+      const ls = full ? lsFull : leanLevelScript(lsFull);
       const limitFromTask = taskPlantLimit(tasks);
       const limit = limitFromTask != null ? limitFromTask : parsePlantLimit(missionHints);
       return {
@@ -1108,13 +1113,15 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
     try { out.sun = map.SunCount ? map.SunCount.CurrentValue : null; } catch { /* ignore */ }
     try { out.plantFood = map.PlantFoodCount ? map.PlantFoodCount.plantFoodNum : null; } catch { /* ignore */ }
 
+    let lsFull = null;
     if (lvl) {
       out.level.wave = Number.isFinite(lvl.currentWave) ? lvl.currentWave + 1 : 0;
       out.level.waves = lvl.waveManagerProps ? lvl.waveManagerProps.WaveCount : null;
       out.level.nextWaveIn = Number.isFinite(lvl.NextWaveCountdown) ? Math.max(0, Math.round(lvl.NextWaveCountdown)) : null;
       out.level.gameStarted = !!lvl.gameStarted;
-      try { out.levelScript = stats.levelScriptOf(lvl); } catch { out.levelScript = null; }
-      if (!out.level.waves && out.levelScript) out.level.waves = out.levelScript.waveCount || null;
+      try { lsFull = stats.levelScriptOf(lvl); } catch { lsFull = null; }
+      out.levelScript = full ? lsFull : leanLevelScript(lsFull);
+      if (!out.level.waves && lsFull) out.level.waves = lsFull.waveCount || null;
     }
     if (phase === 'preparing' || phase === 'objective') out.startingSun = out.sun;
 
@@ -1298,7 +1305,7 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
       for (const g of tagSet) if (TAG_TEXT[g]) out.mechanicFacts.push({ id: g, text: TAG_TEXT[g], source: 'zombie-tags' });
     } catch { /* ignore */ }
 
-    const ls = out.levelScript;
+    const ls = lsFull;
     if (out.terrain.map.some((row) => /[WS]/.test(row))) out.mechanicFacts.push({ id: 'water', text: '存在水面/天空格：普通植物不能直接种在这些格子上', source: 'terrain' });
     if (out.terrain.map.some((row) => /R/.test(row))) out.mechanicFacts.push({ id: 'rail', text: '存在矿车轨道：矿车可载植物上下移动', source: 'terrain' });
     if (obstacles.some((o) => o.type === 'tomb')) out.mechanicFacts.push({ id: 'tomb', text: '墓碑占格并阻挡直线弹道', source: 'terrain' });
@@ -1898,7 +1905,7 @@ function createBriefing({ stats, reader, planStore, version, featureList, nameOf
   }
 
   function briefing() {
-    const state = reader.snapshot();
+    const state = reader.snapshot({ full: true });
     if (!state.ok) return { ok: false, code: state.code || 'NO_SCENE', reason: state.reason || '不在关卡内' };
     const seed = state.seedSelection;
     const pool = (seed && seed.available) || state.cards || [];
@@ -2046,7 +2053,7 @@ function createBriefing({ stats, reader, planStore, version, featureList, nameOf
       return { ok: false, code: 'BAD_QUERY', reason: 'kind 只能是 plant / zombie / level' };
     }
     if (kind === 'level') {
-      const state = reader.snapshot();
+      const state = reader.snapshot({ full: true });
       if (!state.ok) return { ok: false, code: state.code || 'NO_SCENE', reason: state.reason };
       return {
         ok: true,
@@ -2097,7 +2104,7 @@ function createBriefing({ stats, reader, planStore, version, featureList, nameOf
       if (entry) return { ok: true, kind: 'zombie', entry };
     }
     if ((!kind || kind === 'level') && (t === 'level' || t === '本关')) {
-      const state = reader.snapshot();
+      const state = reader.snapshot({ full: true });
       if (!state.ok) return { ok: false, code: state.code || 'NO_SCENE', reason: state.reason };
       return {
         ok: true,
@@ -2324,7 +2331,7 @@ function createEventStreamApi({ snapshot }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.1.12';
+const BRIDGE_VERSION = '0.1.13';
 
 function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -2401,7 +2408,7 @@ function createBridge(ctx) {
         cards: (s && s.cards || []).length,
         plants: (s && s.plants || []).length,
         zombies: (s && s.zombies || []).length,
-        waves: (s && s.levelScript && s.levelScript.waves || []).length,
+        waves: (s && s.levelScript && (s.levelScript.waveCount || (s.levelScript.waves || []).length)) || 0,
       },
     };
   }
@@ -3183,7 +3190,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.1.12', sleep = routerSleep }) {
+function createToolRouter({ bridge, version = '0.1.13', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -3492,6 +3499,7 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2 花园无尽》的唯一决�
 - 僵尸厚度看 zombies 的 hp / armorHp / ehp / ehpMax：ehp 可读时是「本体 + 当前护甲」，为 null 时用 ehpMax 当上界；不要只看 hp。
 - 铺同一种卡到多格时用 pvz_act 的 cells，工具会按冷却自动等待重试；不要为了同一张卡连续调用 5 次。
 - 想重开本关用 pvz_restart（不用先进暂停菜单）。
+- 每次工具往返都有网络延迟：一轮尽量把能做的都做完（pvz_act 最多 6 个动作，铺同一种卡用 cells），不要每轮只种一株。
 - 每次动作前先看 pvz_state（至少看阳光、卡槽冷却、格子占用、僵尸位置）。失败后读 code，不要对同一个格子/同一张卡反复撞同一个错误。
 - 阳光、能量豆、金币会自动收；需要时也可以 pvz_collect。
 - 关卡任务失败可能直接判负：把 tasks 的 tip/hint/timeLeft/urgent 当作硬约束。
@@ -3874,7 +3882,7 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
   }
 
   function trimMessages() {
-    const MAX = 60;
+    const MAX = 40;
     if (messages.length > MAX) {
       const system = messages[0];
       let rest = messages.slice(1);
@@ -3888,12 +3896,21 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
 
   function compactOldToolResults() {
     const toolMsgs = messages.filter((m) => m.role === 'tool');
-    // 最近 8 条工具结果保留原文；更早的大结果压成一句，避免整局 prompt 越滚越大。
-    for (let i = 0; i < toolMsgs.length - 8; i++) {
+    // 最近 4 条工具结果保留原文；更早的大结果压成一句状态摘要。
+    // 每份 pvz_state 约 9KB，留 8 份会让单轮 prompt 冲到 30k+ token，模型响应直接慢到 20-30 秒。
+    for (let i = 0; i < toolMsgs.length - 4; i++) {
       const m = toolMsgs[i];
-      if (m.content && m.content.length > 1500) {
-        m.content = JSON.stringify({ ok: true, omitted: true, note: '旧工具结果已省略；需要时重新调用 pvz_state / pvz_knowledge' });
-      }
+      if (!m.content || m.content.length <= 800) continue;
+      let note = '旧工具结果已省略；需要时重新调用 pvz_state / pvz_knowledge';
+      try {
+        const o = JSON.parse(m.content);
+        if (o && o.phase) {
+          note = `旧状态已省略：phase=${o.phase} 阳光=${o.sun} 第${(o.level && o.level.wave) || '?'}波 植物${(o.plants || []).length} 僵尸${(o.zombies || []).length}`;
+        } else if (o && o.ok === false && o.code) {
+          note = `旧失败结果：${o.code} ${String(o.reason || '').slice(0, 60)}`;
+        }
+      } catch { /* 非 JSON 结果就只留一句 */ }
+      m.content = JSON.stringify({ ok: true, omitted: true, note });
     }
   }
 

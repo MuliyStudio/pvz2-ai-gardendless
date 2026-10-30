@@ -1,4 +1,4 @@
-# 工具契约（v0.1.12）
+# 工具契约（v0.1.13）
 
 > 运行时权威定义在 `tools/definitions.js`；错误码在 `tools/errors.js`。
 > 本文是给接入方（MCP 客户端 / 游戏内客户端开发）看的字段与语义说明。
@@ -35,7 +35,7 @@ won / lost  → 停止
 ```json
 {
   "ok": true,
-  "version": "0.1.12",
+  "version": "0.1.13",
   "phase": "preparing",
   "scene": "inGameScene",
   "objective": { "screenName": "...", "missions": ["..."], "active": false, "canContinue": true },
@@ -133,14 +133,14 @@ won / lost  → 停止
 ```json
 {
   "ok": true,
-  "version": "0.1.12",
+  "version": "0.1.13",
   "scene": "inGameScene",
   "phase": "running",
   "paused": false,
   "sun": 175,
   "plantFood": 1,
   "level": { "name": "...", "wave": 3, "waves": 8, "nextWaveIn": 12, "gameStarted": true, "source": {...}, "world": {...} },
-  "cards": [{ "index": 0, "type": "sunflower", "name": "向日葵", "cost": 50, "cd": 0, "cdReady": true, "affordable": true, "sunShort": 0, "ready": true, "cooling": false, "stats": {...} }],
+  "cards": [{ "index": 0, "type": "sunflower", "name": "向日葵", "cost": 50, "cd": 0, "cdReady": true, "affordable": true, "sunShort": 0, "ready": true, "cooling": false }],
   "deck": ["sunflower", "..."],
   "seedSelection": { "slots": 8, "current": ["..."], "gameStartable": false, "availableCount": 42, "available": [{ "type": "...", "name": "...", "cost": 50, "chosen": true }] },
   "plants": [{ "lane": 0, "column": 0, "type": "sunflower", "name": "向日葵", "hp": 300, "maxHp": 300, "atk": null, "shot": {...} }],
@@ -149,7 +149,7 @@ won / lost  → 停止
   "lanes": [{ "lane": 0, "zombies": 0, "nearestZombie": null, "shooters": 0, "walls": 0, "plants": 1, "dps": 0, "wallHp": 0, "ehp": 0, "ehpExact": true, "mower": true }],
   "terrain": { "lanes": 5, "columns": 9, "map": ["..."], "legend": {...} },
   "blockedCells": [], "plantable": [], "obstacles": [], "mechanicFacts": [], "mechanics": [],
-  "levelScript": { "waveCount": 8, "flagInterval": 4, "waves": [...], "lanePolicy": {...}, "lawn": {...}, "modules": [] },
+  "levelScript": { "waveCount": 8, "flagInterval": 4, "isAtNight": false },
   "zombieStats": { "tutorial": { "hp": 190, "ehp": 190, "speed": 0.185, "eatDps": 100, "tags": [] } },
   "carts": [{ "id": 0, "lane": 2, "column": 0, "railLanes": [1, 2, 3], "plants": [], "canUp": true, "canDown": true }],
   "tasks": [{ "key": "...", "tip": "...", "count": "3/10", "mode": 5, "modeName": "kill_count_request", "value": 3, "total": 10, "completed": false, "failed": false, "urgent": false, "hint": "..." }],
@@ -166,6 +166,7 @@ won / lost  → 停止
 
 说明：
 
+- `pvz_state` 是**精简版**：`cards[]` 不带每张卡的完整数值（在图鉴和 `pvz_briefing.cards` 里），`levelScript` 只给 `waveCount / flagInterval / isAtNight`；完整波次表只在 `pvz_briefing` 返回。这样每回合 prompt 小 40%–60%，直接决定模型响应速度。
 - `cards[].cdReady` 是冷却好了，`affordable` 是买得起，`sunShort` 还差多少阳光（买得起是 0）；`ready` 只有两者都满足才是 true。
 - `zombies[].armorHp` 是护甲当前血量（引擎读不到时是 `null`）；`ehp = hp + armorHp`，`ehpMax = hp + armorMax` 是上界。别只看 `hp`。
 - `lanes[].ehp` 是本行在场上僵尸的剩余 EHP 合计；`ehpExact=false` 表示其中有读不到护甲的血量，只是上界。
@@ -422,8 +423,8 @@ won / lost  → 停止
 ```json
 {
   "ok": true,
-  "version": "0.1.12",
-  "serverVersion": "0.1.12",
+  "version": "0.1.13",
+  "serverVersion": "0.1.13",
   "namespace": "pvz-llm-agent",
   "scene": "inGameScene",
   "phase": "preparing",

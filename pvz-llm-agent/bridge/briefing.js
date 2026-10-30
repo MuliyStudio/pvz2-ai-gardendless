@@ -91,7 +91,7 @@ export function createBriefing({ stats, reader, planStore, version, featureList,
   }
 
   function briefing() {
-    const state = reader.snapshot();
+    const state = reader.snapshot({ full: true });
     if (!state.ok) return { ok: false, code: state.code || 'NO_SCENE', reason: state.reason || '不在关卡内' };
     const seed = state.seedSelection;
     const pool = (seed && seed.available) || state.cards || [];
@@ -239,7 +239,7 @@ export function createBriefing({ stats, reader, planStore, version, featureList,
       return { ok: false, code: 'BAD_QUERY', reason: 'kind 只能是 plant / zombie / level' };
     }
     if (kind === 'level') {
-      const state = reader.snapshot();
+      const state = reader.snapshot({ full: true });
       if (!state.ok) return { ok: false, code: state.code || 'NO_SCENE', reason: state.reason };
       return {
         ok: true,
@@ -290,7 +290,7 @@ export function createBriefing({ stats, reader, planStore, version, featureList,
       if (entry) return { ok: true, kind: 'zombie', entry };
     }
     if ((!kind || kind === 'level') && (t === 'level' || t === '本关')) {
-      const state = reader.snapshot();
+      const state = reader.snapshot({ full: true });
       if (!state.ok) return { ok: false, code: state.code || 'NO_SCENE', reason: state.reason };
       return {
         ok: true,
