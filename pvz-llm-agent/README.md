@@ -43,7 +43,7 @@ pvz-llm-agent/
     plan.js           setPlan/getPlan（只存）
     api.js            window.PvzLlm
   tools/
-    definitions.js    15 个工具的 JSON Schema（MCP 与游戏内共用）
+    definitions.js    16 个工具的 JSON Schema（MCP 与游戏内共用）
     errors.js         结构化错误码
     router.js         工具名 → handler
     wait.js           wait_until 条件解析
@@ -85,7 +85,7 @@ pvz-llm-agent.zip     模组本体，也可以手动导入
 配置MCP.bat           一键写 MCP 客户端配置（需要 Node.js 22+）
 mcp/ + tools/         MCP Server 与它依赖的工具模块
 安装说明.txt           玩家向的中文步骤说明
-MCP工具契约.md         15 个 pvz_* 工具的参数/返回值/错误码
+MCP工具契约.md         16 个 pvz_* 工具的参数/返回值/错误码
 ```
 
 双击 `PvZAI_Launcher.exe` 即可，细节见 `安装说明.txt`。
@@ -192,6 +192,7 @@ MCP 与游戏内客户端共用同一套工具定义和 handler，行为一致�
 | `pvz_move_cart` | 矿车 |
 | `pvz_resume` | 暂停恢复 |
 | `pvz_dismiss_objective` | 关闭任务说明 |
+| `pvz_restart` | 重开本关（回到选卡阶段） |
 | `pvz_health` | 版本/能力检查 |
 
 完整字段、返回结构和错误码见 [`docs/tool-contract.md`](docs/tool-contract.md)。

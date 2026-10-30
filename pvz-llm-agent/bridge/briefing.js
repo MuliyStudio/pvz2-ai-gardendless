@@ -6,6 +6,20 @@
 import { worldFactOf } from '../knowledge/worlds.js';
 
 export function createBriefing({ stats, reader, planStore, version, featureList, nameOf }) {
+  // 卡牌归类只用图鉴事实（家族 / 弹道 / 是否有攻击 / 是否一次性），不判断强弱。
+  function roleOf(st) {
+    if (!st) return 'unknown';
+    const fam = String(st.family || '');
+    const special = (st.special || []).join(' ') + ' ' + ((st.usage && st.usage.activation) || '');
+    if (fam === 'Sun' || (st.sun && st.sun.stages)) return 'economy';
+    if (/(一次性|立刻|instant)/.test(special)) return 'instant';
+    if (/Defence/i.test(fam)) return 'wall';
+    if (/Cold|Slow/i.test(fam)) return 'control';
+    if (st.shot && st.shot.kind === 'lob') return 'lobber';
+    if (st.attack && st.attack.dps) return 'shooter';
+    return 'support';
+  }
+
   function plantEntry(type) {
     const st = stats.plantStatsOf(type);
     if (!st) return null;
@@ -112,6 +126,13 @@ export function createBriefing({ stats, reader, planStore, version, featureList,
     if (world) constraints.push({ id: 'world', text: `世界：${world.name}`, source: 'world' });
 
     const plan = planStore.getPlan();
+    // 卡组结构事实：只数「有几张能干什么」，不写该不该带。
+    const deckTypes = (seed && seed.current) || state.deck || [];
+    const coverage = { economy: 0, shooter: 0, lobber: 0, wall: 0, instant: 0, control: 0, support: 0 };
+    for (const t of deckTypes) {
+      const st = stats.plantStatsOf(t);
+      coverage[roleOf(st)] += 1;
+    }
     return {
       ok: true,
       version,
@@ -145,6 +166,7 @@ export function createBriefing({ stats, reader, planStore, version, featureList,
         slots: seed ? seed.slots : (state.cards || []).length,
         current: seed ? seed.current : (state.deck || []),
         gameStartable: seed ? seed.gameStartable : null,
+        coverage,
       },
       startingSun: state.startingSun,
       plantLimit: state.plantLimit,

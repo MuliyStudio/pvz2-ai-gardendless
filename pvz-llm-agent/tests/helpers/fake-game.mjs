@@ -31,7 +31,7 @@ function cell(lane, column) {
   };
 }
 
-export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, noBoard = false, task = null } = {}) {
+export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, noBoard = false, task = null, zombies = null } = {}) {
   const grid = [];
   for (let r = 0; r < 5; r++) {
     const row = [];
@@ -40,6 +40,19 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
   }
   SquareClass._grid = grid;
   SquareClass._lanes = Array.from({ length: 5 }, () => ({ zombiePool: () => [], hypnoZombiePool: () => [], mower: {} }));
+  if (Array.isArray(zombies)) {
+    for (const z of zombies) {
+      const obj = {
+        Zombie_Type: `RTID(${z.type}@ZombieProps)`,
+        health: z.health,
+        totalHealth: () => (z.total != null ? z.total : z.health),
+        worldPositionX: (z.column || 0) * SquareClass.SquareWidth,
+        isAlive: () => true,
+      };
+      if (z.armorHp != null) obj.armorHp = z.armorHp;
+      SquareClass._lanes[z.lane].zombiePool = () => [obj];
+    }
+  }
 
   const available = ['sunflower', 'peashooter', 'wallnut', 'cherry_bomb'];
   const cards = {
@@ -90,6 +103,24 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
     _components: (noBoard ? [] : [new SquareClass()]).concat([cards, levelController, ui, sun, food]),
     children: [],
   };
+
+  // 暂停菜单组件：模组用它的 restart() 重开本关。
+  const pauseScreen = {
+    __classname__: 'PauseScreen',
+    restarts: 0,
+    restart() {
+      this.restarts += 1;
+      levelController.gameStarted = false;
+      levelController.gameWon = false;
+      levelController.gameLost = false;
+      levelController.currentWave = 0;
+      cards.gameStarted = false;
+      cards.CFs.length = 0;
+      sun.CurrentValue = 100;
+      for (const row of grid) for (const c of row) c.plantInSquare.length = 0;
+    },
+  };
+  scene._components.push(pauseScreen);
   if (objective) {
     scene._components.push({
       __classname__: 'LevelObjectiveScreen',
@@ -128,7 +159,12 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
     },
     {
       name: 'ZombieFeatures',
-      json: { ZOMBIES: [{ CODENAME: 'tutorial', NAME: { zh: '普通僵尸', en: 'Basic Zombie' } }] },
+      json: {
+        ZOMBIES: [
+          { CODENAME: 'tutorial', NAME: { zh: '普通僵尸', en: 'Basic Zombie' } },
+          { CODENAME: 'dark_armor2', NAME: { zh: '铁桶农夫', en: 'Buckethead' } },
+        ],
+      },
     },
     {
       name: 'PlantProps',
@@ -154,13 +190,18 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
     },
     {
       name: 'ZombieProps',
-      json: { objects: [{ aliases: ['tutorial'], objdata: { Toughness: 190, WalkSPS: 0.185, EatDPS: 100 } }] },
+      json: {
+        objects: [
+          { aliases: ['tutorial'], objdata: { Toughness: 190, WalkSPS: 0.185, EatDPS: 100 } },
+          { aliases: ['dark_armor2'], objdata: { Toughness: 190, StartingArmors: ['dark_bucket'], WalkSPS: 0.2, EatDPS: 100 } },
+        ],
+      },
     },
     {
       name: 'ZombieAlmanac',
       json: { objects: [{ aliases: ['tutorial'], objdata: { BriefIntroduction: { zh: '普通僵尸' }, Introduction: { zh: '普通僵尸' }, Special: [] } }] },
     },
-    { name: 'ArmorProps', json: { objects: [] } },
+    { name: 'ArmorProps', json: { objects: [{ aliases: ['dark_bucket'], objdata: { Toughness: 460, isMetal: true } }] } },
     { name: 'LawnProps', json: { objects: [{ aliases: ['FrontLawnStage'], objdata: { IsAtNight: false } }] } },
     { name: 'TombstoneProps', json: { objects: [] } },
   ];
@@ -168,5 +209,5 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
   const cc = { director: { getScene: () => scene }, assetManager };
   const ctx = { unsafe: { engine: { getCc: () => cc } } };
 
-  return { ctx, scene, cards, levelController, ui, sun, grid, available, SquareClass };
+  return { ctx, scene, cards, levelController, ui, sun, grid, available, SquareClass, pauseScreen };
 }

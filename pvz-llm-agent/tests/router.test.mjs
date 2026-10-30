@@ -10,7 +10,7 @@ function setup(opts) {
   resetAssetCache();
   const game = createFakeGame(opts);
   const bridge = createBridge(game.ctx);
-  const router = createToolRouter({ bridge, version: '0.1.10' });
+  const router = createToolRouter({ bridge, version: '0.1.12' });
   return { game, bridge, router };
 }
 
@@ -20,7 +20,7 @@ function teardown(bridge) {
 }
 
 test('工具契约：名字唯一、每个工具都有 inputSchema', () => {
-  assert.equal(TOOLS.length, 15);
+  assert.equal(TOOLS.length, 16);
   assert.equal(new Set(TOOL_NAMES).size, TOOLS.length);
   for (const t of TOOLS) {
     assert.ok(t.name.startsWith('pvz_'), t.name);
@@ -98,9 +98,9 @@ test('router: health 带工具清单和版本', async () => {
   try {
     const h = await router.call('pvz_health', {});
     assert.equal(h.ok, true);
-    assert.equal(h.tools.length, 15);
+    assert.equal(h.tools.length, 16);
     assert.equal(h.namespace, 'pvz-llm-agent');
-    assert.equal(h.serverVersion, '0.1.10');
+    assert.equal(h.serverVersion, '0.1.12');
   } finally { teardown(bridge); }
 });
 
@@ -149,5 +149,66 @@ test('router: pvz_state.changesSinceLast 报出植物新增与损失', async () 
       JSON.stringify(s4.changesSinceLast),
     );
     assert.equal(s4.changesSinceLast.plantsAdded.length, 0);
+  } finally { teardown(bridge); }
+});
+
+test('router: plant 传 cells 批量落点，遇冷却自动等 retryAfter', async () => {
+  const { bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    const realAct = bridge.act;
+    let calls = 0;
+    bridge.act = async (a) => {
+      calls += 1;
+      // 第一枪故意回冷却，验证工具会等待重试而不是把 COOLDOWN 甩给模型
+      if (calls === 1) return { ok: false, code: 'COOLDOWN', retryAfter: 0.2, type: a.plant, card: a.card };
+      return realAct(a);
+    };
+    const r = await router.call('pvz_act', {
+      actions: [{ type: 'plant', plant: 'sunflower', cells: [{ lane: 0, column: 0 }, { lane: 1, column: 0 }] }],
+    });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.results[0].okCount, 2, JSON.stringify(r.results[0]));
+    assert.equal(r.results[0].cells[0].retries, 1);
+    assert.equal(bridge.snapshot().plants.length, 2);
+  } finally { teardown(bridge); }
+});
+
+test('router: plant cells 遇到阳光不足就停手，不空转', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    // 假游戏不会自己扣阳光，这里手动扣，模拟真实“种完就没钱”
+    for (const row of game.grid) {
+      for (const c of row) {
+        const orig = c.PlaceUIPlant.bind(c);
+        c.PlaceUIPlant = () => { game.sun.CurrentValue -= 100; orig(); };
+      }
+    }
+    game.sun.CurrentValue = 150;
+    const r = await router.call('pvz_act', {
+      actions: [{ type: 'plant', plant: 'sunflower', cells: [{ lane: 0, column: 0 }, { lane: 1, column: 0 }, { lane: 2, column: 0 }] }],
+    });
+    assert.equal(r.ok, false);
+    assert.ok(r.results[0].cells.some((c) => c.code === 'SUN'), JSON.stringify(r.results[0]));
+    assert.equal(bridge.snapshot().plants.length, 1, '只种下买得起的那一株');
+  } finally { teardown(bridge); }
+});
+
+test('router: pvz_restart 重开本关回到选卡阶段', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    const start = await router.call('pvz_start_level', {});
+    assert.equal(start.ok, true, JSON.stringify(start));
+    assert.equal(bridge.snapshot().phase, 'running');
+
+    const r = await router.call('pvz_restart', {});
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.restarted, true);
+    assert.equal(game.pauseScreen.restarts, 1);
+    const s = bridge.snapshot();
+    assert.equal(s.phase, 'preparing');
+    assert.equal(s.plants.length, 0);
   } finally { teardown(bridge); }
 });

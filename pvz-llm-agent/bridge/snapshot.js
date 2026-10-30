@@ -90,6 +90,44 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
   // 模板的 screenName 是占位符（<LEVEL OBJECTIVE NAME>），mission0 是引擎默认文案
   // （典型："Never have more than 18 plants"）——那不是本关任务，必须整块丢掉，
   // 否则模型会把它当成本关规则（曾被误读成"18 株上限"）。
+  // 僵尸护甲当前血量：引擎没有统一字段，这里按几种常见挂法读，读不到就返回 null（不猜）。
+  function liveArmorHp(z) {
+    if (!z) return null;
+    try {
+      for (const v of [z.armorHp, z.armorHealth, z.armorHpNum]) {
+        if (typeof v === 'number' && Number.isFinite(v)) return Math.max(0, v);
+      }
+      for (const list of [z.armors, z.armorList, z.armorComponents]) {
+        if (!Array.isArray(list)) continue;
+        let sum = 0, any = false;
+        for (const a of list) {
+          const hp = a && (typeof a.hp === 'number' ? a.hp : (typeof a.health === 'number' ? a.health : (typeof a.toughness === 'number' ? a.toughness : null)));
+          if (hp != null) { sum += hp; any = true; }
+        }
+        if (any) return Math.max(0, sum);
+      }
+      for (const one of [z.armor, z.helmet]) {
+        if (!one || typeof one !== 'object') continue;
+        const hp = typeof one.hp === 'number' ? one.hp : (typeof one.health === 'number' ? one.health : null);
+        if (hp != null) return Math.max(0, hp);
+      }
+      const kids = z.node && z.node.children;
+      if (Array.isArray(kids)) {
+        let sum = 0, any = false;
+        for (const k of kids) {
+          for (const c of (k && k._components) || []) {
+            const cls = String(c && (c.__classname__ || (c.constructor && c.constructor.name)) || '');
+            if (!/armor/i.test(cls)) continue;
+            const hp = typeof c.health === 'number' ? c.health : (typeof c.hp === 'number' ? c.hp : null);
+            if (hp != null) { sum += hp; any = true; }
+          }
+        }
+        if (any) return Math.max(0, sum);
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
   function readObjective(scene) {
     const found = [];
     const walk = (n) => {
@@ -458,15 +496,20 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
       if (cards && Array.isArray(cards.CFs)) {
         out.cards = cards.CFs.map((cf, i) => {
           const upper = cards.cardsUIUpper && cards.cardsUIUpper[i];
-          const cd = upper ? Math.max(0, +upper.CD || 0) : 0;
+          const cdRaw = upper ? Math.max(0, +upper.CD || 0) : 0;
+          const cd = Math.round(cdRaw * 10) / 10;
           const cost = Number.isFinite(cf.SUNCOST) ? cf.SUNCOST : 0;
           const st = stats.plantStatsOf(cleanCodename(cf.Type));
+          const cdReady = cd <= 0;
+          const affordable = sunNow == null ? true : sunNow >= cost;
           return {
             index: i, type: cleanCodename(cf.Type), name: (st && st.name) || cleanCodename(cf.Type), cost,
-            cd: Math.round(cd * 10) / 10,
-            cooling: !!cd,
-            ready: cd <= 0 && (sunNow == null ? true : sunNow >= cost),
-            affordable: sunNow == null ? true : sunNow >= cost,
+            cd, cdReady, affordable,
+            // 还差多少阳光；买得起时是 0
+            sunShort: affordable ? 0 : Math.max(0, cost - (sunNow || 0)),
+            // ready = 冷却好了 且 买得起（旧字段，语义保持）
+            ready: cdReady && affordable,
+            cooling: !cdReady,
             stats: st,
           };
         });
@@ -479,6 +522,8 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
           slots: cards.maxSlotCount || 0,
           current: (cards.CFs || []).map((c) => cleanCodename(c.Type)),
           gameStartable: typeof cards.GameStartable === 'function' ? !!cards.GameStartable() : null,
+          availableCount: cards.seedChooser.CFs.filter((cf) => cf && cf.Type && !(cf.ca && (cf.ca.locked || cf.ca.disallowed))).length,
+          // 只留选卡需要的轻量字段：完整数值在 pvz_briefing.cards 里，别每个回合都塞一遍。
           available: cards.seedChooser.CFs
             .filter((cf) => cf && cf.Type && !(cf.ca && (cf.ca.locked || cf.ca.disallowed)))
             .map((cf) => {
@@ -489,7 +534,6 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
                 name: (st && st.name) || type,
                 cost: Number.isFinite(cf.SUNCOST) ? cf.SUNCOST : 0,
                 chosen: !!(cf.ca && cf.ca.chosen),
-                stats: st,
               };
             }),
         };
@@ -691,9 +735,17 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
         const type = cleanCodename(z.Zombie_Type);
         const zst = out.zombieStats[type] || stats.zombieStatsOf(type);
         out.zombieStats[type] = zst;
+        const hp = Math.round(z.health || 0);
+        const armorNow = liveArmorHp(z);
+        const armorMax = zst && zst.armorHp != null ? zst.armorHp : 0;
         out.zombies.push({
           lane: r, column: Math.round(col * 10) / 10, type, name: (zst && zst.name) || type,
-          hp: Math.round(z.health || 0), maxHp: Math.round((z.totalHealth ? z.totalHealth() : z.health) || 0),
+          hp, maxHp: Math.round((z.totalHealth ? z.totalHealth() : z.health) || 0),
+          // 护甲：armorHp 读不到时为 null；ehp 是「本体 + 当前护甲」，读不到护甲时只给 ehpMax 上界
+          armorHp: armorNow,
+          armorMax: armorMax || null,
+          ehp: armorNow != null ? hp + armorNow : null,
+          ehpMax: hp + armorMax,
           tags: (zst && zst.tags) || [],
         });
       }
@@ -719,6 +771,9 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
         plants: ps.length,
         dps: Math.round(ps.reduce((s, p) => s + ((p.atk && p.atk.dps) || 0), 0) * 10) / 10,
         wallHp: ps.reduce((s, p) => s + (/peanut|tallnut|wallnut|holonut|endurian/i.test(p.type) ? (p.hp || 0) : 0), 0),
+        // 本行在场上僵尸的剩余 EHP 合计（读不到护甲时用 ehpMax 上界），以及是否全是精确值
+        ehp: Math.round(zs.reduce((s, z) => s + (z.ehp != null ? z.ehp : z.ehpMax || 0), 0)),
+        ehpExact: zs.every((z) => z.ehp != null),
         mower,
       });
     }

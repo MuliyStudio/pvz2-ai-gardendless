@@ -168,7 +168,7 @@ test('health 报告能力，且明确没有本地策略/自动卡组/队列', ()
   try {
     const h = bridge.health();
     assert.equal(h.ok, true);
-    assert.equal(h.version, '0.1.10');
+    assert.equal(h.version, '0.1.12');
     assert.equal(h.features.localStrategy, false);
     assert.equal(h.features.autoDeck, false);
     assert.equal(h.features.queue, false);
@@ -238,6 +238,69 @@ test('plantLimit：结构化任务字段优先于任务文案', () => {
     const s = bridge.snapshot();
     assert.equal(s.plantLimit, 12, 'LevelTaskCount.plantCountLimit 才是事实');
     assert.equal(s.limits.plantLimitSource, 'task');
+  } finally { teardown(bridge); }
+});
+
+test('cards：cdReady / affordable / sunShort / ready 分开给', async () => {
+  const { game, bridge } = setup({ slots: 3 });
+  try {
+    await bridge.chooseDeck(['sunflower', 'peashooter', 'wallnut'], true);
+    game.sun.CurrentValue = 30;
+    const s = bridge.snapshot();
+    const sun = s.cards.find((c) => c.type === 'sunflower');
+    assert.ok(sun, JSON.stringify(s.cards.map((c) => c.type)));
+    assert.equal(sun.cost, 100, '假游戏的卡固定 100 阳光');
+    assert.equal(sun.cdReady, true, '刚种下去才有冷却，这里应为 true');
+    assert.equal(sun.affordable, false);
+    assert.equal(sun.sunShort, 70);
+    assert.equal(sun.ready, false);
+
+    game.sun.CurrentValue = 200;
+    const s2 = bridge.snapshot();
+    const sun2 = s2.cards.find((c) => c.type === 'sunflower');
+    assert.equal(sun2.affordable, true);
+    assert.equal(sun2.sunShort, 0);
+    assert.equal(sun2.ready, true);
+  } finally { teardown(bridge); }
+});
+
+test('zombies：护甲给出 armorHp / ehp / ehpMax，不再只有本体血量', () => {
+  const { bridge } = setup({ slots: 3, zombies: [{ lane: 0, column: 5, type: 'dark_armor2', health: 190, total: 650 }] });
+  try {
+    const s = bridge.snapshot();
+    const z = s.zombies[0];
+    assert.equal(z.type, 'dark_armor2');
+    assert.equal(z.hp, 190);
+    assert.equal(z.armorHp, null, '读不到护甲当前血量时给 null，不瞎猜');
+    assert.equal(z.armorMax, 460);
+    assert.equal(z.ehp, null);
+    assert.equal(z.ehpMax, 650);
+    assert.ok(s.lanes[0].ehp >= 650, JSON.stringify(s.lanes[0]));
+    assert.equal(s.lanes[0].ehpExact, false);
+  } finally { teardown(bridge); }
+});
+
+test('zombies：读得到护甲血量时 ehp = 本体 + 当前护甲', () => {
+  const { bridge } = setup({ slots: 3, zombies: [{ lane: 0, column: 5, type: 'dark_armor2', health: 190, total: 650, armorHp: 300 }] });
+  try {
+    const s = bridge.snapshot();
+    const z = s.zombies[0];
+    assert.equal(z.armorHp, 300);
+    assert.equal(z.ehp, 490);
+    assert.equal(z.ehpMax, 650);
+    assert.equal(s.lanes[0].ehpExact, true);
+  } finally { teardown(bridge); }
+});
+
+test('seedSelection：选卡阶段不再带每张卡的完整数值', () => {
+  const { bridge } = setup({ slots: 3 });
+  try {
+    const s = bridge.snapshot();
+    assert.ok(s.seedSelection, '选卡阶段应有 seedSelection');
+    assert.equal(typeof s.seedSelection.availableCount, 'number');
+    const first = s.seedSelection.available[0];
+    assert.ok(first.type && first.cost != null);
+    assert.ok(!('stats' in first), 'available 条目不应再带 stats（完整数值在 briefing.cards）');
   } finally { teardown(bridge); }
 });
 

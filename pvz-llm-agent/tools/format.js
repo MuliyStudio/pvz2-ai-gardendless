@@ -50,12 +50,18 @@ export function stateLine(s) {
 
 const ACTION_CN = {
   plant: '种植', replace: '换植', shovel: '铲除', plant_food: '能量豆',
-  move_cart: '移动矿车', resume: '继续', wait: '等待', dismiss_objective: '关闭任务说明', collect: '收掉落物',
+  move_cart: '移动矿车', resume: '继续', wait: '等待', restart: '重开本关',
+  dismiss_objective: '关闭任务说明', collect: '收掉落物',
 };
 
 export function formatAction(a) {
   if (!a || typeof a !== 'object') return '?';
   const type = ACTION_CN[a.type] || a.type || '?';
+  if (Array.isArray(a.cells) && a.cells.length) {
+    const who = a.plant ? ` ${a.plant}` : (a.card != null ? ` #${a.card}` : '');
+    const cells = a.cells.map((c) => `第${Number(c.lane) + 1}行第${Number(c.column) + 1}列`).join('、');
+    return `${type}${who} ×${a.cells.length}：${cells}`;
+  }
   const pos = Number.isFinite(Number(a.lane)) && Number.isFinite(Number(a.column))
     ? ` 第${Number(a.lane) + 1}行 第${Number(a.column) + 1}列` : '';
   const who = a.plant ? ` ${a.plant}` : (a.card != null ? ` #${a.card}` : '');
@@ -80,6 +86,7 @@ export function formatToolCall(name, args) {
     case 'pvz_plant_food': return `能量豆 第${Number(a.lane) + 1}行 第${Number(a.column) + 1}列`;
     case 'pvz_move_cart': return `矿车 #${a.cart} ${a.direction || ''}`;
     case 'pvz_resume': return '继续游戏';
+    case 'pvz_restart': return '重开本关';
     case 'pvz_dismiss_objective': return '关闭任务说明';
     case 'pvz_health': return '健康检查';
     default: return name;

@@ -45,7 +45,7 @@
 | 模型 | 游戏内浮窗填 OpenAI 兼容接口 | MCP 客户端自带的模型 |
 | 需要 API Key | 需要 | 不需要（客户端负责） |
 | 需要启动器 | **需要**（解除 CSP + 开调试端口） | 需要启动器开调试端口，但不需要解 CSP |
-| 操作入口 | 游戏内浮窗 / F8 | MCP 工具（15 个 `pvz_*`） |
+| 操作入口 | 游戏内浮窗 / F8 | MCP 工具（16 个 `pvz_*`） |
 
 > 两种模式不要同时“开始 AI”，否则会抢操作。
 
@@ -189,6 +189,7 @@ pvz_health
 | `pvz_act` | `plant / replace / shovel / plant_food / move_cart / resume / wait / dismiss_objective / collect` |
 | `pvz_wait_until` | 等阳光/冷却/僵尸进某行/任务完成等条件 |
 | `pvz_collect` / `pvz_plant_food` / `pvz_move_cart` / `pvz_resume` / `pvz_dismiss_objective` | 收掉落物 / 能量豆 / 矿车 / 暂停恢复 / 关任务说明 |
+| `pvz_restart` | 重开本关（不用先进暂停菜单），回到选卡阶段 |
 | `pvz_health` | 检查模组和 Server 版本、能力、缺失工具 |
 
 完整参数、返回值和错误码见 **[pvz-llm-agent/docs/tool-contract.md](pvz-llm-agent/docs/tool-contract.md)**；发布包里是 `MCP工具契约.md`。
@@ -242,7 +243,7 @@ Key 错误、Base URL 少了 `/v1`、模型名不对，或中转不兼容。先�
 ```text
 pvz-llm-agent/          GP-Next 模组 + MCP Server + 游戏内浮窗（唯一入口）
   bridge/               只读状态 / 执行动作 / 发事件 / 存计划
-  tools/                15 个工具的 Schema、router、错误码、wait、格式化
+  tools/                16 个工具的 Schema、router、错误码、wait、格式化
   mcp/                  stdio MCP Server（CDP 传输）
   in-game/              提示词、tool calling 循环、浮窗 UI
   knowledge/            世界机制 + 从游戏数据生成的静态图鉴

@@ -568,6 +568,44 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
   // 模板的 screenName 是占位符（<LEVEL OBJECTIVE NAME>），mission0 是引擎默认文案
   // （典型："Never have more than 18 plants"）——那不是本关任务，必须整块丢掉，
   // 否则模型会把它当成本关规则（曾被误读成"18 株上限"）。
+  // 僵尸护甲当前血量：引擎没有统一字段，这里按几种常见挂法读，读不到就返回 null（不猜）。
+  function liveArmorHp(z) {
+    if (!z) return null;
+    try {
+      for (const v of [z.armorHp, z.armorHealth, z.armorHpNum]) {
+        if (typeof v === 'number' && Number.isFinite(v)) return Math.max(0, v);
+      }
+      for (const list of [z.armors, z.armorList, z.armorComponents]) {
+        if (!Array.isArray(list)) continue;
+        let sum = 0, any = false;
+        for (const a of list) {
+          const hp = a && (typeof a.hp === 'number' ? a.hp : (typeof a.health === 'number' ? a.health : (typeof a.toughness === 'number' ? a.toughness : null)));
+          if (hp != null) { sum += hp; any = true; }
+        }
+        if (any) return Math.max(0, sum);
+      }
+      for (const one of [z.armor, z.helmet]) {
+        if (!one || typeof one !== 'object') continue;
+        const hp = typeof one.hp === 'number' ? one.hp : (typeof one.health === 'number' ? one.health : null);
+        if (hp != null) return Math.max(0, hp);
+      }
+      const kids = z.node && z.node.children;
+      if (Array.isArray(kids)) {
+        let sum = 0, any = false;
+        for (const k of kids) {
+          for (const c of (k && k._components) || []) {
+            const cls = String(c && (c.__classname__ || (c.constructor && c.constructor.name)) || '');
+            if (!/armor/i.test(cls)) continue;
+            const hp = typeof c.health === 'number' ? c.health : (typeof c.hp === 'number' ? c.hp : null);
+            if (hp != null) { sum += hp; any = true; }
+          }
+        }
+        if (any) return Math.max(0, sum);
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
   function readObjective(scene) {
     const found = [];
     const walk = (n) => {
@@ -936,15 +974,20 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
       if (cards && Array.isArray(cards.CFs)) {
         out.cards = cards.CFs.map((cf, i) => {
           const upper = cards.cardsUIUpper && cards.cardsUIUpper[i];
-          const cd = upper ? Math.max(0, +upper.CD || 0) : 0;
+          const cdRaw = upper ? Math.max(0, +upper.CD || 0) : 0;
+          const cd = Math.round(cdRaw * 10) / 10;
           const cost = Number.isFinite(cf.SUNCOST) ? cf.SUNCOST : 0;
           const st = stats.plantStatsOf(cleanCodename(cf.Type));
+          const cdReady = cd <= 0;
+          const affordable = sunNow == null ? true : sunNow >= cost;
           return {
             index: i, type: cleanCodename(cf.Type), name: (st && st.name) || cleanCodename(cf.Type), cost,
-            cd: Math.round(cd * 10) / 10,
-            cooling: !!cd,
-            ready: cd <= 0 && (sunNow == null ? true : sunNow >= cost),
-            affordable: sunNow == null ? true : sunNow >= cost,
+            cd, cdReady, affordable,
+            // 还差多少阳光；买得起时是 0
+            sunShort: affordable ? 0 : Math.max(0, cost - (sunNow || 0)),
+            // ready = 冷却好了 且 买得起（旧字段，语义保持）
+            ready: cdReady && affordable,
+            cooling: !cdReady,
             stats: st,
           };
         });
@@ -957,6 +1000,8 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
           slots: cards.maxSlotCount || 0,
           current: (cards.CFs || []).map((c) => cleanCodename(c.Type)),
           gameStartable: typeof cards.GameStartable === 'function' ? !!cards.GameStartable() : null,
+          availableCount: cards.seedChooser.CFs.filter((cf) => cf && cf.Type && !(cf.ca && (cf.ca.locked || cf.ca.disallowed))).length,
+          // 只留选卡需要的轻量字段：完整数值在 pvz_briefing.cards 里，别每个回合都塞一遍。
           available: cards.seedChooser.CFs
             .filter((cf) => cf && cf.Type && !(cf.ca && (cf.ca.locked || cf.ca.disallowed)))
             .map((cf) => {
@@ -967,7 +1012,6 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
                 name: (st && st.name) || type,
                 cost: Number.isFinite(cf.SUNCOST) ? cf.SUNCOST : 0,
                 chosen: !!(cf.ca && cf.ca.chosen),
-                stats: st,
               };
             }),
         };
@@ -1169,9 +1213,17 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
         const type = cleanCodename(z.Zombie_Type);
         const zst = out.zombieStats[type] || stats.zombieStatsOf(type);
         out.zombieStats[type] = zst;
+        const hp = Math.round(z.health || 0);
+        const armorNow = liveArmorHp(z);
+        const armorMax = zst && zst.armorHp != null ? zst.armorHp : 0;
         out.zombies.push({
           lane: r, column: Math.round(col * 10) / 10, type, name: (zst && zst.name) || type,
-          hp: Math.round(z.health || 0), maxHp: Math.round((z.totalHealth ? z.totalHealth() : z.health) || 0),
+          hp, maxHp: Math.round((z.totalHealth ? z.totalHealth() : z.health) || 0),
+          // 护甲：armorHp 读不到时为 null；ehp 是「本体 + 当前护甲」，读不到护甲时只给 ehpMax 上界
+          armorHp: armorNow,
+          armorMax: armorMax || null,
+          ehp: armorNow != null ? hp + armorNow : null,
+          ehpMax: hp + armorMax,
           tags: (zst && zst.tags) || [],
         });
       }
@@ -1197,6 +1249,9 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
         plants: ps.length,
         dps: Math.round(ps.reduce((s, p) => s + ((p.atk && p.atk.dps) || 0), 0) * 10) / 10,
         wallHp: ps.reduce((s, p) => s + (/peanut|tallnut|wallnut|holonut|endurian/i.test(p.type) ? (p.hp || 0) : 0), 0),
+        // 本行在场上僵尸的剩余 EHP 合计（读不到护甲时用 ehpMax 上界），以及是否全是精确值
+        ehp: Math.round(zs.reduce((s, z) => s + (z.ehp != null ? z.ehp : z.ehpMax || 0), 0)),
+        ehpExact: zs.every((z) => z.ehp != null),
         mower,
       });
     }
@@ -1581,6 +1636,36 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     };
   }
 
+  // 重开本关：走游戏自己的暂停菜单组件（PauseScreen.restart），比点 UI 稳。
+  async function restartLevel() {
+    const ctxg = findComps();
+    if (!ctxg) return fail('NO_SCENE');
+    let before = null;
+    try { before = reader.snapshot().phase; } catch { before = null; }
+    const ps = findCompByClass(ctxg.scene, 'PauseScreen');
+    if (!ps || typeof ps.restart !== 'function') {
+      return fail('RESTART_UNSUPPORTED', { phase: before }, '这一关不支持重开（找不到 PauseScreen.restart）');
+    }
+    try {
+      ps.restart();
+    } catch (e) {
+      return fail('RESTART_FAILED', { phase: before }, '重开失败：' + String(e && e.message || e));
+    }
+    const ok = await waitFor(() => {
+      try {
+        const s = reader.snapshot();
+        return !!(s && s.ok && (s.phase === 'preparing' || s.phase === 'objective'));
+      } catch { return false; }
+    }, 8000);
+    if (!ok) {
+      return {
+        ok: false, code: 'RESTART_TIMEOUT', restarted: false, phase: before, retryable: true,
+        reason: '重开没有在 8 秒内回到选卡/任务阶段，用 pvz_state 看当前 phase',
+      };
+    }
+    return { ok: true, restarted: true, from: before, phase: 'preparing', detail: '本关已重开（回到选卡阶段）' };
+  }
+
   async function act(a) {
     const ctxg = findComps();
     if (!ctxg) return fail('NO_SCENE');
@@ -1595,6 +1680,7 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     if (a.type === 'dismiss_objective') return dismissObjective();
     if (a.type === 'choose_deck') return chooseDeck(a.cards || a.plants, a.replace);
     if (a.type === 'start_level') return startLevel();
+    if (a.type === 'restart') return restartLevel();
     if (a.type === 'collect') return collect();
     if (a.type === 'move_cart') return moveCart(a.cart, a.direction);
 
@@ -1622,7 +1708,11 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
       const cell = C.getLnC(lane, column);
       if (!cell) return fail('NO_CELL', { lane, column });
       if (a.type !== 'replace' && reader.cellPlants(cell).length > 0) {
-        return fail('OCCUPIED', { lane, column, plants: reader.cellPlants(cell).map((p) => cleanType(p.Plant_Type)) });
+        const occupants = reader.cellPlants(cell).map((p) => cleanType(p.Plant_Type));
+        return fail('OCCUPIED', {
+          lane, column, plants: occupants,
+          hint: '同格已有植物；要换植用 replace（先铲后种），只腾位用 shovel',
+        }, `${lane} 行 ${column} 列已被 ${occupants.join('/') || '植物'} 占用，可用 replace 先铲后种`);
       }
       if (a.type === 'replace') {
         try { cell.removePlant(); } catch { /* ignore */ }
@@ -1711,7 +1801,7 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     };
   }
 
-  return { act, actAll, chooseDeck, startLevel, dismissObjective, resume, collect, moveCart, deckStatus, fail };
+  return { act, actAll, chooseDeck, startLevel, restartLevel, dismissObjective, resume, collect, moveCart, deckStatus, fail };
 }
 
 
@@ -1723,6 +1813,20 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
  */
 
 function createBriefing({ stats, reader, planStore, version, featureList, nameOf }) {
+  // 卡牌归类只用图鉴事实（家族 / 弹道 / 是否有攻击 / 是否一次性），不判断强弱。
+  function roleOf(st) {
+    if (!st) return 'unknown';
+    const fam = String(st.family || '');
+    const special = (st.special || []).join(' ') + ' ' + ((st.usage && st.usage.activation) || '');
+    if (fam === 'Sun' || (st.sun && st.sun.stages)) return 'economy';
+    if (/(一次性|立刻|instant)/.test(special)) return 'instant';
+    if (/Defence/i.test(fam)) return 'wall';
+    if (/Cold|Slow/i.test(fam)) return 'control';
+    if (st.shot && st.shot.kind === 'lob') return 'lobber';
+    if (st.attack && st.attack.dps) return 'shooter';
+    return 'support';
+  }
+
   function plantEntry(type) {
     const st = stats.plantStatsOf(type);
     if (!st) return null;
@@ -1829,6 +1933,13 @@ function createBriefing({ stats, reader, planStore, version, featureList, nameOf
     if (world) constraints.push({ id: 'world', text: `世界：${world.name}`, source: 'world' });
 
     const plan = planStore.getPlan();
+    // 卡组结构事实：只数「有几张能干什么」，不写该不该带。
+    const deckTypes = (seed && seed.current) || state.deck || [];
+    const coverage = { economy: 0, shooter: 0, lobber: 0, wall: 0, instant: 0, control: 0, support: 0 };
+    for (const t of deckTypes) {
+      const st = stats.plantStatsOf(t);
+      coverage[roleOf(st)] += 1;
+    }
     return {
       ok: true,
       version,
@@ -1862,6 +1973,7 @@ function createBriefing({ stats, reader, planStore, version, featureList, nameOf
         slots: seed ? seed.slots : (state.cards || []).length,
         current: seed ? seed.current : (state.deck || []),
         gameStartable: seed ? seed.gameStartable : null,
+        coverage,
       },
       startingSun: state.startingSun,
       plantLimit: state.plantLimit,
@@ -2212,7 +2324,7 @@ function createEventStreamApi({ snapshot }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.1.11';
+const BRIDGE_VERSION = '0.1.12';
 
 function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -2260,7 +2372,7 @@ function createBridge(ctx) {
     const api = [
       'snapshot', 'briefing', 'knowledge', 'act', 'actAll', 'events', 'pollEvents',
       'setPlan', 'getPlan', 'chooseDeck', 'deckStatus', 'startLevel',
-      'dismissObjective', 'collect', 'moveCart', 'resume', 'health',
+      'restartLevel', 'dismissObjective', 'collect', 'moveCart', 'resume', 'health',
     ];
     const missing = api.filter((k) => typeof apiObj[k] !== 'function');
     return {
@@ -2310,6 +2422,7 @@ function createBridge(ctx) {
     chooseDeck: (cards, replace) => actions.chooseDeck(cards, replace),
     deckStatus: () => actions.deckStatus(),
     startLevel: () => actions.startLevel(),
+    restartLevel: () => actions.restartLevel(),
     dismissObjective: () => actions.dismissObjective(),
     collect: () => actions.collect(),
     moveCart: (cart, direction) => actions.moveCart(cart, direction),
@@ -2339,7 +2452,7 @@ function createBridge(ctx) {
  *  - 参数名、错误码与 docs/tool-contract.md 保持一致。
  */
 
-const ACTION_TYPES = ['plant', 'replace', 'shovel', 'plant_food', 'move_cart', 'resume', 'wait', 'dismiss_objective', 'collect'];
+const ACTION_TYPES = ['plant', 'replace', 'shovel', 'plant_food', 'move_cart', 'resume', 'wait', 'restart', 'dismiss_objective', 'collect'];
 
 const actionSchema = {
   type: 'object',
@@ -2352,6 +2465,14 @@ const actionSchema = {
     plant: { type: 'string', description: '植物 codename（如 sunflower）。与 card 二选一，适合不想记下标时。' },
     lane: { type: 'integer', minimum: 0, description: '行号，0 在最上面。' },
     column: { type: 'integer', minimum: 0, description: '列号，0 在最左边（房子一侧）。' },
+    cells: {
+      type: 'array', minItems: 1, maxItems: 8,
+      description: '批量落点（只对 plant/replace 有效）：一次把同一张卡种到多个格子。工具会按卡的冷却自动等 retryAfter 再重试，最多阻塞 25 秒。给了 cells 就不要再给 lane/column。',
+      items: {
+        type: 'object', additionalProperties: false, required: ['lane', 'column'],
+        properties: { lane: { type: 'integer', minimum: 0 }, column: { type: 'integer', minimum: 0 } },
+      },
+    },
     cart: { type: 'integer', minimum: 0, description: '矿车 id（pvz_state.carts[].id）。' },
     direction: { type: 'string', enum: ['up', 'down'], description: '矿车移动方向。' },
     seconds: { type: 'number', minimum: 0, maximum: 15, description: 'wait 动作的秒数。' },
@@ -2387,7 +2508,7 @@ const TOOLS = [
     name: 'pvz_state',
     title: '实时状态',
     description:
-      '读取当前实时状态：phase、暂停、阳光/能量豆、波次与倒计时、任务、卡槽/冷却/是否买得起、植物、僵尸、5×9 棋盘、每行事实（僵尸数/最近列/推车/输出株数/墙血/dps 合计）、地形图、可种格、障碍、机制清单、矿车、当前计划。' +
+      '读取当前实时状态：phase、暂停、阳光/能量豆、波次与倒计时、任务、卡槽（cd/cdReady/affordable/sunShort/ready）、植物、僵尸（hp/maxHp/armorHp/ehp/ehpMax）、5×9 棋盘、每行事实（僵尸数/最近列/推车/输出株数/墙血/dps 合计/剩余 ehp）、地形图、可种格、障碍、机制清单、矿车、当前计划。' +
       'changesSinceLast 是工具算好的「自上次调用 pvz_state 以来的变化」：plantsLost（哪格哪株消失）、plantsAdded、mowerLost（哪行丢车）、waveDelta、sunDelta、zombieDelta、plantsLeft；没有变化时 none=true。' +
       '坐标：lane 0-4 从上到下；column 0-8 从左（房子）到右（僵尸出生点）。',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },
@@ -2453,7 +2574,8 @@ const TOOLS = [
     name: 'pvz_act',
     title: '执行精确动作',
     description:
-      '执行 1–6 个精确动作：plant（种植）、replace（同格换植）、shovel（铲除）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、dismiss_objective、collect。' +
+      '执行 1–6 个精确动作：plant（种植）、replace（同格换植）、shovel（铲除）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、restart（重开本关）、dismiss_objective、collect。' +
+      'plant/replace 传 cells 可以把同一张卡一次种到多个格子（工具按冷却自动等待重试）。' +
       '每个动作返回真实 ok/code/reason/retryAfter（如 COOLDOWN/SUN/OCCUPIED/CELL_BLOCKED）。部分失败不会抛异常；按每个 result 自己决定下一步。',
     inputSchema: {
       type: 'object',
@@ -2518,6 +2640,14 @@ const TOOLS = [
     name: 'pvz_resume',
     title: '继续游戏',
     description: '如果游戏处于暂停状态则继续；未暂停时无副作用。',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'pvz_restart',
+    title: '重开本关',
+    description:
+      '重开当前关卡（回到选卡/任务阶段，阳光、植物、推车、波次全部重置）。不需要先进暂停菜单，工具直接走游戏自己的重开流程。' +
+      '返回 restarted/from/phase；8 秒内没回到 preparing 会返回 RESTART_TIMEOUT（不是崩溃，用 pvz_state 看 phase）。',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },
   },
   {
@@ -2798,12 +2928,18 @@ function stateLine(s) {
 
 const ACTION_CN = {
   plant: '种植', replace: '换植', shovel: '铲除', plant_food: '能量豆',
-  move_cart: '移动矿车', resume: '继续', wait: '等待', dismiss_objective: '关闭任务说明', collect: '收掉落物',
+  move_cart: '移动矿车', resume: '继续', wait: '等待', restart: '重开本关',
+  dismiss_objective: '关闭任务说明', collect: '收掉落物',
 };
 
 function formatAction(a) {
   if (!a || typeof a !== 'object') return '?';
   const type = ACTION_CN[a.type] || a.type || '?';
+  if (Array.isArray(a.cells) && a.cells.length) {
+    const who = a.plant ? ` ${a.plant}` : (a.card != null ? ` #${a.card}` : '');
+    const cells = a.cells.map((c) => `第${Number(c.lane) + 1}行第${Number(c.column) + 1}列`).join('、');
+    return `${type}${who} ×${a.cells.length}：${cells}`;
+  }
   const pos = Number.isFinite(Number(a.lane)) && Number.isFinite(Number(a.column))
     ? ` 第${Number(a.lane) + 1}行 第${Number(a.column) + 1}列` : '';
   const who = a.plant ? ` ${a.plant}` : (a.card != null ? ` #${a.card}` : '');
@@ -2828,6 +2964,7 @@ function formatToolCall(name, args) {
     case 'pvz_plant_food': return `能量豆 第${Number(a.lane) + 1}行 第${Number(a.column) + 1}列`;
     case 'pvz_move_cart': return `矿车 #${a.cart} ${a.direction || ''}`;
     case 'pvz_resume': return '继续游戏';
+    case 'pvz_restart': return '重开本关';
     case 'pvz_dismiss_objective': return '关闭任务说明';
     case 'pvz_health': return '健康检查';
     default: return name;
@@ -2995,7 +3132,7 @@ function formatPlan(plan) {
  */
 
 const routerSleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const ACTION_TYPE_SET = new Set(['plant', 'replace', 'shovel', 'plant_food', 'move_cart', 'resume', 'wait', 'dismiss_objective', 'collect']);
+const ACTION_TYPE_SET = new Set(['plant', 'replace', 'shovel', 'plant_food', 'move_cart', 'resume', 'wait', 'restart', 'dismiss_objective', 'collect']);
 
 /**
  * 对比两次 pvz_state，算出"自上次读取以来"的变化。
@@ -3046,7 +3183,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.1.11', sleep = routerSleep }) {
+function createToolRouter({ bridge, version = '0.1.12', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -3096,6 +3233,10 @@ function createToolRouter({ bridge, version = '0.1.11', sleep = routerSleep }) {
           return await bridge.moveCart(Number(args.cart), dir);
         }
         case 'pvz_resume': return await bridge.resume();
+        case 'pvz_restart': {
+          if (typeof bridge.restartLevel !== 'function') return normalizeError('RESTART_UNSUPPORTED', {}, '当前 bridge 不支持重开');
+          return await bridge.restartLevel();
+        }
         case 'pvz_dismiss_objective': {
           const r = await bridge.dismissObjective();
           return r;
@@ -3121,6 +3262,49 @@ function createToolRouter({ bridge, version = '0.1.11', sleep = routerSleep }) {
 
   function isPos(a) {
     return a && Number.isFinite(Number(a.lane)) && Number.isFinite(Number(a.column));
+  }
+
+  // 同一张卡批量落点：按真实冷却 retryAfter 自动等，单次最多阻塞 25 秒，
+  // 不把 COOLDOWN 直接甩给模型（同一张卡连种 5 行本来就该等冷却）。
+  async function plantCells(action, cards) {
+    const cells = action.cells.slice(0, 8);
+    const deadline = Date.now() + 25000;
+    const perCell = [];
+    for (const cell of cells) {
+      const lane = Number(cell && cell.lane);
+      const column = Number(cell && cell.column);
+      if (!Number.isFinite(lane) || !Number.isFinite(column)) {
+        perCell.push({ cell, ...normalizeError('BAD_POSITION') });
+        continue;
+      }
+      const one = { ...action, lane, column };
+      delete one.cells;
+      let r = await bridge.act(one);
+      let retries = 0;
+      while (r && r.ok === false && r.code === 'COOLDOWN' && retries < 3 && Date.now() < deadline) {
+        const waitMs = Math.min(8000, Math.max(200, (Number(r.retryAfter) || 1) * 1000));
+        await sleep(waitMs);
+        retries += 1;
+        r = await bridge.act(one);
+      }
+      perCell.push({ lane, column, retries, ...(r || normalizeError('ACT_THREW', {}, '没有返回')) });
+      if (r && r.ok === false && (r.code === 'SUN' || r.code === 'CARD_NOT_IN_DECK' || r.code === 'NO_CARD' || r.code === 'OCCUPIED')) {
+        perCell.push({ ok: false, code: r.code, reason: `后面的格子没再尝试（${r.code}）`, retryable: r.retryable });
+        break;
+      }
+      if (Date.now() >= deadline) {
+        perCell.push({ ok: false, code: 'TIMEOUT', reason: '批量种植超过 25 秒，剩下的格子没种', retryable: true });
+        break;
+      }
+    }
+    const okCount = perCell.filter((c) => c.ok).length;
+    return {
+      ok: perCell.length > 0 && perCell.every((c) => c.ok),
+      cells: perCell,
+      okCount,
+      failCount: perCell.length - okCount,
+      planted: perCell.filter((c) => c.ok).map((c) => ({ lane: c.lane, column: c.column })),
+    };
   }
 
   async function chooseDeck(args) {
@@ -3193,10 +3377,6 @@ function createToolRouter({ bridge, version = '0.1.11', sleep = routerSleep }) {
           results.push({ index: i, action: type, type, ...normalizeError('BAD_ACTION', {}, '需要 card（下标）或 plant（codename）') });
           continue;
         }
-        if (!isPos(a)) {
-          results.push({ index: i, action: type, type, ...normalizeError('BAD_POSITION') });
-          continue;
-        }
         if (!Number.isFinite(Number(a.card)) && a.plant) {
           const hit = cards.find((c) => String(c.type) === String(a.plant));
           if (!hit) {
@@ -3204,6 +3384,15 @@ function createToolRouter({ bridge, version = '0.1.11', sleep = routerSleep }) {
             continue;
           }
           a.card = hit.index;
+        }
+        // cells：同一张卡按冷却排队种到多个格子。冷却期用 retryAfter 等，不把 COOLDOWN 直接甩给模型。
+        if (Array.isArray(a.cells) && a.cells.length) {
+          results.push({ index: i, action: type, type, ...(await plantCells(a, cards)) });
+          continue;
+        }
+        if (!isPos(a)) {
+          results.push({ index: i, action: type, type, ...normalizeError('BAD_POSITION') });
+          continue;
         }
         a.lane = Number(a.lane);
         a.column = Number(a.column);
@@ -3299,6 +3488,10 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2 花园无尽》的唯一决�
 - 思考过程尽量用中文；工具调用参数和 codename 除外。推理原文只显示在顶部滚动框，决策日志只记录你的动作、真实结果和计划。
 - 没有任何"推荐卡组"或本地打法。不要等系统给你建议；先 pvz_briefing / pvz_knowledge 查事实，再自己决定。
 - 选卡用 pvz_choose_deck。工具不会自动补卡，也不会替换你指定的卡。数量不足会返回 DECK_NOT_FULL；补满后重新调用。
+- 卡槽状态看 cards：cdReady（冷却好了）/ affordable（买得起）/ sunShort（还差多少阳光）；ready 只有两者都满足才是 true。
+- 僵尸厚度看 zombies 的 hp / armorHp / ehp / ehpMax：ehp 可读时是「本体 + 当前护甲」，为 null 时用 ehpMax 当上界；不要只看 hp。
+- 铺同一种卡到多格时用 pvz_act 的 cells，工具会按冷却自动等待重试；不要为了同一张卡连续调用 5 次。
+- 想重开本关用 pvz_restart（不用先进暂停菜单）。
 - 每次动作前先看 pvz_state（至少看阳光、卡槽冷却、格子占用、僵尸位置）。失败后读 code，不要对同一个格子/同一张卡反复撞同一个错误。
 - 阳光、能量豆、金币会自动收；需要时也可以 pvz_collect。
 - 关卡任务失败可能直接判负：把 tasks 的 tip/hint/timeLeft/urgent 当作硬约束。

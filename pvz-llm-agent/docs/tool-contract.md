@@ -1,4 +1,4 @@
-# 工具契约（v0.1.11）
+# 工具契约（v0.1.12）
 
 > 运行时权威定义在 `tools/definitions.js`；错误码在 `tools/errors.js`。
 > 本文是给接入方（MCP 客户端 / 游戏内客户端开发）看的字段与语义说明。
@@ -35,7 +35,7 @@ won / lost  → 停止
 ```json
 {
   "ok": true,
-  "version": "0.1.11",
+  "version": "0.1.12",
   "phase": "preparing",
   "scene": "inGameScene",
   "objective": { "screenName": "...", "missions": ["..."], "active": false, "canContinue": true },
@@ -133,20 +133,20 @@ won / lost  → 停止
 ```json
 {
   "ok": true,
-  "version": "0.1.11",
+  "version": "0.1.12",
   "scene": "inGameScene",
   "phase": "running",
   "paused": false,
   "sun": 175,
   "plantFood": 1,
   "level": { "name": "...", "wave": 3, "waves": 8, "nextWaveIn": 12, "gameStarted": true, "source": {...}, "world": {...} },
-  "cards": [{ "index": 0, "type": "sunflower", "name": "向日葵", "cost": 50, "cd": 0, "cooling": false, "ready": true, "affordable": true, "stats": {...} }],
+  "cards": [{ "index": 0, "type": "sunflower", "name": "向日葵", "cost": 50, "cd": 0, "cdReady": true, "affordable": true, "sunShort": 0, "ready": true, "cooling": false, "stats": {...} }],
   "deck": ["sunflower", "..."],
-  "seedSelection": { "slots": 8, "current": ["..."], "gameStartable": false, "available": [{ "type": "...", "name": "...", "cost": 50, "chosen": true, "stats": {...} }] },
+  "seedSelection": { "slots": 8, "current": ["..."], "gameStartable": false, "availableCount": 42, "available": [{ "type": "...", "name": "...", "cost": 50, "chosen": true }] },
   "plants": [{ "lane": 0, "column": 0, "type": "sunflower", "name": "向日葵", "hp": 300, "maxHp": 300, "atk": null, "shot": {...} }],
-  "zombies": [{ "lane": 2, "column": 6.4, "type": "tutorial", "name": "普通僵尸", "hp": 190, "maxHp": 190, "tags": [] }],
+  "zombies": [{ "lane": 2, "column": 6.4, "type": "dark_armor2", "name": "铁桶农夫", "hp": 190, "maxHp": 650, "armorHp": null, "armorMax": 460, "ehp": null, "ehpMax": 650, "tags": ["armored"] }],
   "board": [{ "lane": 0, "cells": ["sunflower", null], "terrain": ["L", "L"], "zombies": [] }],
-  "lanes": [{ "lane": 0, "zombies": 0, "nearestZombie": null, "shooters": 0, "walls": 0, "plants": 1, "dps": 0, "wallHp": 0, "mower": true }],
+  "lanes": [{ "lane": 0, "zombies": 0, "nearestZombie": null, "shooters": 0, "walls": 0, "plants": 1, "dps": 0, "wallHp": 0, "ehp": 0, "ehpExact": true, "mower": true }],
   "terrain": { "lanes": 5, "columns": 9, "map": ["..."], "legend": {...} },
   "blockedCells": [], "plantable": [], "obstacles": [], "mechanicFacts": [], "mechanics": [],
   "levelScript": { "waveCount": 8, "flagInterval": 4, "waves": [...], "lanePolicy": {...}, "lawn": {...}, "modules": [] },
@@ -166,6 +166,9 @@ won / lost  → 停止
 
 说明：
 
+- `cards[].cdReady` 是冷却好了，`affordable` 是买得起，`sunShort` 还差多少阳光（买得起是 0）；`ready` 只有两者都满足才是 true。
+- `zombies[].armorHp` 是护甲当前血量（引擎读不到时是 `null`）；`ehp = hp + armorHp`，`ehpMax = hp + armorMax` 是上界。别只看 `hp`。
+- `lanes[].ehp` 是本行在场上僵尸的剩余 EHP 合计；`ehpExact=false` 表示其中有读不到护甲的血量，只是上界。
 - `lanes[].dps` 是本行植物 `attack.dps` 之和；`wallHp` 是坚果类当前血量之和。都是可验算的事实，不是“够不够”的结论。
 - `plantable` 已排除：已有植物、障碍格、水面 `W`、天空 `S`；特殊卡（睡莲等）仍需按图鉴判断。
 
@@ -284,11 +287,13 @@ won / lost  → 停止
   "actions": [
     { "type": "plant", "card": 0, "lane": 0, "column": 1 },
     { "type": "plant", "plant": "sunflower", "lane": 1, "column": 0 },
+    { "type": "plant", "plant": "sunflower", "cells": [{ "lane": 0, "column": 0 }, { "lane": 1, "column": 0 }, { "lane": 2, "column": 0 }] },
     { "type": "replace", "plant": "wallnut", "lane": 2, "column": 4 },
     { "type": "shovel", "lane": 0, "column": 2 },
     { "type": "plant_food", "lane": 1, "column": 0 },
     { "type": "move_cart", "cart": 0, "direction": "up" },
     { "type": "resume" },
+    { "type": "restart" },
     { "type": "wait", "seconds": 1.5 },
     { "type": "dismiss_objective" },
     { "type": "collect" }
@@ -298,8 +303,24 @@ won / lost  → 停止
 
 - 1–6 个，按顺序执行；`wait` 在客户端实际等待（0–15s）。
 - `card` 是 `pvz_state.cards[].index`；`plant` 是 codename。两者二选一。
+- `cells`（只对 plant/replace）：同一张卡一次种到多格（最多 8 格）。工具按真实冷却自动等 `retryAfter` 重试（最多 3 次/格，整批最多阻塞 25 秒）；遇到 `SUN`/`OCCUPIED`/`CARD_NOT_IN_DECK` 就停手，后面的格子不再硬试。
 - 部分失败不抛异常。
 - 种植/换植返回 `pending:true, settled:false` 表示“已发起但还没落地”；下一拍用 `pvz_state` 确认，不要立刻重种。
+
+`cells` 的部分返回：
+
+```json
+{
+  "index": 0, "action": "plant", "type": "plant", "ok": false,
+  "cells": [
+    { "lane": 0, "column": 0, "retries": 0, "ok": true, "settled": true, "type": "sunflower" },
+    { "lane": 1, "column": 0, "retries": 1, "ok": true, "settled": true, "type": "sunflower" },
+    { "lane": 2, "column": 0, "ok": false, "code": "SUN", "reason": "阳光不足：需要 25，现有 10", "need": 25, "have": 10 }
+  ],
+  "okCount": 2, "failCount": 1,
+  "planted": [{ "lane": 0, "column": 0 }, { "lane": 1, "column": 0 }]
+}
+```
 
 返回：
 
@@ -375,6 +396,21 @@ won / lost  → 停止
 
 返回：`{ "ok": true, "paused": false, "detail": "继续游戏" }`
 
+### `pvz_restart`
+
+重开本关：直接走游戏自己的重开流程（`PauseScreen.restart`），不需要先进暂停菜单，也不会去点 UI。
+
+参数：无。
+
+返回：
+
+```json
+{ "ok": true, "restarted": true, "from": "lost", "phase": "preparing", "detail": "本关已重开（回到选卡阶段）" }
+```
+
+- 8 秒内没回到 `preparing` 返回 `RESTART_TIMEOUT`（不是崩溃，用 `pvz_state` 看 phase）。
+- 找不到重开入口返回 `RESTART_UNSUPPORTED`。
+
 ### `pvz_dismiss_objective`
 
 返回：`{ "ok": true, "detail": "已关闭任务说明" }`；没有弹窗时也返回 ok；失败 `DISMISS_FAILED / CONTINUE_NOT_FOUND`。
@@ -386,8 +422,8 @@ won / lost  → 停止
 ```json
 {
   "ok": true,
-  "version": "0.1.11",
-  "serverVersion": "0.1.11",
+  "version": "0.1.12",
+  "serverVersion": "0.1.12",
   "namespace": "pvz-llm-agent",
   "scene": "inGameScene",
   "phase": "preparing",
@@ -438,6 +474,7 @@ won / lost  → 停止
 | `NO_CART` / `CART_BLOCKED` | 矿车不存在/不能移动 | 否 |
 | `NO_OBJECTIVE` / `CONTINUE_NOT_FOUND` / `DISMISS_FAILED` | 任务弹窗问题 | 是 |
 | `START_FAILED` | 开局失败/超时 | 是 |
+| `RESTART_UNSUPPORTED` / `RESTART_FAILED` / `RESTART_TIMEOUT` | 重开不可用 / 重开失败 / 8 秒内没回到选卡 | 是 |
 | `BAD_CONDITION` | 等待条件非法 | 否 |
 | `TIMEOUT` | 等待超时 | 是 |
 | `BAD_QUERY` / `KNOWLEDGE_NOT_FOUND` | 图鉴查询问题 | 否 |

@@ -10,7 +10,7 @@ import { createBriefing } from './briefing.js';
 import { createPlanStore } from './plan.js';
 import { createEventStreamApi } from './events.js';
 
-export const BRIDGE_VERSION = '0.1.11';
+export const BRIDGE_VERSION = '0.1.12';
 
 export function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -58,7 +58,7 @@ export function createBridge(ctx) {
     const api = [
       'snapshot', 'briefing', 'knowledge', 'act', 'actAll', 'events', 'pollEvents',
       'setPlan', 'getPlan', 'chooseDeck', 'deckStatus', 'startLevel',
-      'dismissObjective', 'collect', 'moveCart', 'resume', 'health',
+      'restartLevel', 'dismissObjective', 'collect', 'moveCart', 'resume', 'health',
     ];
     const missing = api.filter((k) => typeof apiObj[k] !== 'function');
     return {
@@ -108,6 +108,7 @@ export function createBridge(ctx) {
     chooseDeck: (cards, replace) => actions.chooseDeck(cards, replace),
     deckStatus: () => actions.deckStatus(),
     startLevel: () => actions.startLevel(),
+    restartLevel: () => actions.restartLevel(),
     dismissObjective: () => actions.dismissObjective(),
     collect: () => actions.collect(),
     moveCart: (cart, direction) => actions.moveCart(cart, direction),

@@ -283,6 +283,36 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     };
   }
 
+  // 重开本关：走游戏自己的暂停菜单组件（PauseScreen.restart），比点 UI 稳。
+  async function restartLevel() {
+    const ctxg = findComps();
+    if (!ctxg) return fail('NO_SCENE');
+    let before = null;
+    try { before = reader.snapshot().phase; } catch { before = null; }
+    const ps = findCompByClass(ctxg.scene, 'PauseScreen');
+    if (!ps || typeof ps.restart !== 'function') {
+      return fail('RESTART_UNSUPPORTED', { phase: before }, '这一关不支持重开（找不到 PauseScreen.restart）');
+    }
+    try {
+      ps.restart();
+    } catch (e) {
+      return fail('RESTART_FAILED', { phase: before }, '重开失败：' + String(e && e.message || e));
+    }
+    const ok = await waitFor(() => {
+      try {
+        const s = reader.snapshot();
+        return !!(s && s.ok && (s.phase === 'preparing' || s.phase === 'objective'));
+      } catch { return false; }
+    }, 8000);
+    if (!ok) {
+      return {
+        ok: false, code: 'RESTART_TIMEOUT', restarted: false, phase: before, retryable: true,
+        reason: '重开没有在 8 秒内回到选卡/任务阶段，用 pvz_state 看当前 phase',
+      };
+    }
+    return { ok: true, restarted: true, from: before, phase: 'preparing', detail: '本关已重开（回到选卡阶段）' };
+  }
+
   async function act(a) {
     const ctxg = findComps();
     if (!ctxg) return fail('NO_SCENE');
@@ -297,6 +327,7 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     if (a.type === 'dismiss_objective') return dismissObjective();
     if (a.type === 'choose_deck') return chooseDeck(a.cards || a.plants, a.replace);
     if (a.type === 'start_level') return startLevel();
+    if (a.type === 'restart') return restartLevel();
     if (a.type === 'collect') return collect();
     if (a.type === 'move_cart') return moveCart(a.cart, a.direction);
 
@@ -324,7 +355,11 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
       const cell = C.getLnC(lane, column);
       if (!cell) return fail('NO_CELL', { lane, column });
       if (a.type !== 'replace' && reader.cellPlants(cell).length > 0) {
-        return fail('OCCUPIED', { lane, column, plants: reader.cellPlants(cell).map((p) => cleanType(p.Plant_Type)) });
+        const occupants = reader.cellPlants(cell).map((p) => cleanType(p.Plant_Type));
+        return fail('OCCUPIED', {
+          lane, column, plants: occupants,
+          hint: '同格已有植物；要换植用 replace（先铲后种），只腾位用 shovel',
+        }, `${lane} 行 ${column} 列已被 ${occupants.join('/') || '植物'} 占用，可用 replace 先铲后种`);
       }
       if (a.type === 'replace') {
         try { cell.removePlant(); } catch { /* ignore */ }
@@ -413,5 +448,5 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     };
   }
 
-  return { act, actAll, chooseDeck, startLevel, dismissObjective, resume, collect, moveCart, deckStatus, fail };
+  return { act, actAll, chooseDeck, startLevel, restartLevel, dismissObjective, resume, collect, moveCart, deckStatus, fail };
 }

@@ -23,7 +23,7 @@ test('agent 执行 tool_calls、回填结果、显示推理，并在收到停止
   const router = {
     call: async (name, args) => {
       calls.push({ name, args });
-      if (name === 'pvz_health') return { ok: true, version: '0.1.10', phase: 'running' };
+      if (name === 'pvz_health') return { ok: true, version: '0.1.12', phase: 'running' };
       if (name === 'pvz_state') return { ok: true, phase: 'running', sun: 100, plantFood: 1, level: { wave: 1, waves: 2 }, cards: [], plants: [], zombies: [], tasks: [], lanes: [] };
       return { ok: true };
     },
@@ -59,7 +59,7 @@ test('agent 执行 tool_calls、回填结果、显示推理，并在收到停止
   assert.ok(events.some((e) => e.type === 'tool_call' && e.name === 'pvz_health'));
   assert.ok(events.some((e) => e.type === 'tool_result' && e.name === 'pvz_state' && e.ok));
   assert.ok(events.some((e) => e.type === 'run_end'));
-  assert.ok(bodies[0].tools.length === 15);
+  assert.ok(bodies[0].tools.length === 16);
   assert.equal(bodies[0].tool_choice, 'auto');
 
   const msgs = agent.getMessages();

@@ -4,6 +4,16 @@
 
 ---
 
+## v0.4.2
+
+**按实战暴露的问题重做事实层（模组 0.1.12）**
+
+- 我用 CDP 远程操控模组打完一局（输在第 13 波），按实际踩到的坑改了 7 处：卡片状态三态、僵尸护甲 EHP、`OCCUPIED` 说人话、选卡数据瘦身、`pvz_restart`、`plant.cells` 批量种植、`briefing.deck.coverage` 结构计数。
+- 具体细节见 [`pvz-llm-agent/CHANGELOG.md`](pvz-llm-agent/CHANGELOG.md) 的 0.1.12；工具数从 15 变 16，发布包重建为 `PvZAI-LLM-Agent-Bundle-v0.1.12.zip`。
+- 离线测试 52 项全通过。
+
+---
+
 ## v0.4.1
 
 **修「本关最多 18 株」幽灵上限（模组 0.1.11）**

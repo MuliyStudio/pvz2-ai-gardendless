@@ -10,7 +10,7 @@ import { checkCondition, CONDITION_HELP } from './wait.js';
 import { compactState } from './format.js';
 
 const routerSleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const ACTION_TYPE_SET = new Set(['plant', 'replace', 'shovel', 'plant_food', 'move_cart', 'resume', 'wait', 'dismiss_objective', 'collect']);
+const ACTION_TYPE_SET = new Set(['plant', 'replace', 'shovel', 'plant_food', 'move_cart', 'resume', 'wait', 'restart', 'dismiss_objective', 'collect']);
 
 /**
  * 对比两次 pvz_state，算出"自上次读取以来"的变化。
@@ -61,7 +61,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-export function createToolRouter({ bridge, version = '0.1.11', sleep = routerSleep }) {
+export function createToolRouter({ bridge, version = '0.1.12', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -111,6 +111,10 @@ export function createToolRouter({ bridge, version = '0.1.11', sleep = routerSle
           return await bridge.moveCart(Number(args.cart), dir);
         }
         case 'pvz_resume': return await bridge.resume();
+        case 'pvz_restart': {
+          if (typeof bridge.restartLevel !== 'function') return normalizeError('RESTART_UNSUPPORTED', {}, '当前 bridge 不支持重开');
+          return await bridge.restartLevel();
+        }
         case 'pvz_dismiss_objective': {
           const r = await bridge.dismissObjective();
           return r;
@@ -136,6 +140,49 @@ export function createToolRouter({ bridge, version = '0.1.11', sleep = routerSle
 
   function isPos(a) {
     return a && Number.isFinite(Number(a.lane)) && Number.isFinite(Number(a.column));
+  }
+
+  // 同一张卡批量落点：按真实冷却 retryAfter 自动等，单次最多阻塞 25 秒，
+  // 不把 COOLDOWN 直接甩给模型（同一张卡连种 5 行本来就该等冷却）。
+  async function plantCells(action, cards) {
+    const cells = action.cells.slice(0, 8);
+    const deadline = Date.now() + 25000;
+    const perCell = [];
+    for (const cell of cells) {
+      const lane = Number(cell && cell.lane);
+      const column = Number(cell && cell.column);
+      if (!Number.isFinite(lane) || !Number.isFinite(column)) {
+        perCell.push({ cell, ...normalizeError('BAD_POSITION') });
+        continue;
+      }
+      const one = { ...action, lane, column };
+      delete one.cells;
+      let r = await bridge.act(one);
+      let retries = 0;
+      while (r && r.ok === false && r.code === 'COOLDOWN' && retries < 3 && Date.now() < deadline) {
+        const waitMs = Math.min(8000, Math.max(200, (Number(r.retryAfter) || 1) * 1000));
+        await sleep(waitMs);
+        retries += 1;
+        r = await bridge.act(one);
+      }
+      perCell.push({ lane, column, retries, ...(r || normalizeError('ACT_THREW', {}, '没有返回')) });
+      if (r && r.ok === false && (r.code === 'SUN' || r.code === 'CARD_NOT_IN_DECK' || r.code === 'NO_CARD' || r.code === 'OCCUPIED')) {
+        perCell.push({ ok: false, code: r.code, reason: `后面的格子没再尝试（${r.code}）`, retryable: r.retryable });
+        break;
+      }
+      if (Date.now() >= deadline) {
+        perCell.push({ ok: false, code: 'TIMEOUT', reason: '批量种植超过 25 秒，剩下的格子没种', retryable: true });
+        break;
+      }
+    }
+    const okCount = perCell.filter((c) => c.ok).length;
+    return {
+      ok: perCell.length > 0 && perCell.every((c) => c.ok),
+      cells: perCell,
+      okCount,
+      failCount: perCell.length - okCount,
+      planted: perCell.filter((c) => c.ok).map((c) => ({ lane: c.lane, column: c.column })),
+    };
   }
 
   async function chooseDeck(args) {
@@ -208,10 +255,6 @@ export function createToolRouter({ bridge, version = '0.1.11', sleep = routerSle
           results.push({ index: i, action: type, type, ...normalizeError('BAD_ACTION', {}, '需要 card（下标）或 plant（codename）') });
           continue;
         }
-        if (!isPos(a)) {
-          results.push({ index: i, action: type, type, ...normalizeError('BAD_POSITION') });
-          continue;
-        }
         if (!Number.isFinite(Number(a.card)) && a.plant) {
           const hit = cards.find((c) => String(c.type) === String(a.plant));
           if (!hit) {
@@ -219,6 +262,15 @@ export function createToolRouter({ bridge, version = '0.1.11', sleep = routerSle
             continue;
           }
           a.card = hit.index;
+        }
+        // cells：同一张卡按冷却排队种到多个格子。冷却期用 retryAfter 等，不把 COOLDOWN 直接甩给模型。
+        if (Array.isArray(a.cells) && a.cells.length) {
+          results.push({ index: i, action: type, type, ...(await plantCells(a, cards)) });
+          continue;
+        }
+        if (!isPos(a)) {
+          results.push({ index: i, action: type, type, ...normalizeError('BAD_POSITION') });
+          continue;
         }
         a.lane = Number(a.lane);
         a.column = Number(a.column);

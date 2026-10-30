@@ -1,5 +1,19 @@
 ﻿# Changelog
 
+## 0.1.12 — 2026-10-30
+
+**按实战暴露的问题重做事实层（远程驱动打了一整局后修的 7 条）**
+
+- `cards[]` 拆开语义：新增 `cdReady`（冷却好了）/ `sunShort`（还差多少阳光）；`affordable` 保持；`ready` 仍表示两者都满足。之前 `ready=false` 时模型分不清是冷却没好还是没钱（实测西瓜 cd=0 但 ready=false，因为阳光只有 250）。
+- 僵尸补护甲：新增 `armorHp`（当前护甲，读不到为 null）/ `armorMax` / `ehp = hp + armorHp` / `ehpMax = hp + armorMax`；`lanes[]` 新增 `ehp`（本行在场上僵尸剩余 EHP 合计）与 `ehpExact`。之前 state 只有本体血量，铁桶农夫看起来只有 190 血。
+- `OCCUPIED` 的 `reason` 现在写清「哪格被什么占住，可用 replace」；仍带 `plants` 数组和 `hint`。
+- `state.seedSelection.available` 去掉每张卡的完整 `stats`（选卡阶段单次 state 从数万字符降到原来的几分之一），完整数值只在 `pvz_briefing.cards`；新增 `availableCount`。
+- 新增 `pvz_restart`：走 `PauseScreen.restart` 重开本关，回到选卡阶段；失败返回 `RESTART_UNSUPPORTED` / `RESTART_FAILED` / `RESTART_TIMEOUT`。
+- `pvz_act` 的 `plant` / `replace` 支持 `cells`：同一张卡一次种到多格（≤8），工具按真实冷却自动等 `retryAfter` 重试，遇 `SUN` / `OCCUPIED` / `CARD_NOT_IN_DECK` 就停手，整批最多阻塞 25 秒。
+- `pvz_briefing.deck` 新增 `coverage`（economy / shooter / lobber / wall / instant / control / support 的**张数**），只数结构，不给建议。
+- system prompt 增加三条硬规则：卡槽看 `cdReady/affordable/sunShort`；僵尸看 `ehp/ehpMax`；铺同卡用 `cells`、重开用 `pvz_restart`。
+- 新增 8 条离线测试（卡片三态、护甲 EHP、seedSelection 瘦身、cells 冷却重试/停手、restart），共 52 项全通过。
+
 ## 0.1.11 — 2026-10-30
 
 **修掉「本关最多 18 株」这类幽灵上限**

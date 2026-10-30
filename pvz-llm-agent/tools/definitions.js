@@ -7,7 +7,7 @@
  *  - 参数名、错误码与 docs/tool-contract.md 保持一致。
  */
 
-const ACTION_TYPES = ['plant', 'replace', 'shovel', 'plant_food', 'move_cart', 'resume', 'wait', 'dismiss_objective', 'collect'];
+const ACTION_TYPES = ['plant', 'replace', 'shovel', 'plant_food', 'move_cart', 'resume', 'wait', 'restart', 'dismiss_objective', 'collect'];
 
 const actionSchema = {
   type: 'object',
@@ -20,6 +20,14 @@ const actionSchema = {
     plant: { type: 'string', description: '植物 codename（如 sunflower）。与 card 二选一，适合不想记下标时。' },
     lane: { type: 'integer', minimum: 0, description: '行号，0 在最上面。' },
     column: { type: 'integer', minimum: 0, description: '列号，0 在最左边（房子一侧）。' },
+    cells: {
+      type: 'array', minItems: 1, maxItems: 8,
+      description: '批量落点（只对 plant/replace 有效）：一次把同一张卡种到多个格子。工具会按卡的冷却自动等 retryAfter 再重试，最多阻塞 25 秒。给了 cells 就不要再给 lane/column。',
+      items: {
+        type: 'object', additionalProperties: false, required: ['lane', 'column'],
+        properties: { lane: { type: 'integer', minimum: 0 }, column: { type: 'integer', minimum: 0 } },
+      },
+    },
     cart: { type: 'integer', minimum: 0, description: '矿车 id（pvz_state.carts[].id）。' },
     direction: { type: 'string', enum: ['up', 'down'], description: '矿车移动方向。' },
     seconds: { type: 'number', minimum: 0, maximum: 15, description: 'wait 动作的秒数。' },
@@ -55,7 +63,7 @@ export const TOOLS = [
     name: 'pvz_state',
     title: '实时状态',
     description:
-      '读取当前实时状态：phase、暂停、阳光/能量豆、波次与倒计时、任务、卡槽/冷却/是否买得起、植物、僵尸、5×9 棋盘、每行事实（僵尸数/最近列/推车/输出株数/墙血/dps 合计）、地形图、可种格、障碍、机制清单、矿车、当前计划。' +
+      '读取当前实时状态：phase、暂停、阳光/能量豆、波次与倒计时、任务、卡槽（cd/cdReady/affordable/sunShort/ready）、植物、僵尸（hp/maxHp/armorHp/ehp/ehpMax）、5×9 棋盘、每行事实（僵尸数/最近列/推车/输出株数/墙血/dps 合计/剩余 ehp）、地形图、可种格、障碍、机制清单、矿车、当前计划。' +
       'changesSinceLast 是工具算好的「自上次调用 pvz_state 以来的变化」：plantsLost（哪格哪株消失）、plantsAdded、mowerLost（哪行丢车）、waveDelta、sunDelta、zombieDelta、plantsLeft；没有变化时 none=true。' +
       '坐标：lane 0-4 从上到下；column 0-8 从左（房子）到右（僵尸出生点）。',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },
@@ -121,7 +129,8 @@ export const TOOLS = [
     name: 'pvz_act',
     title: '执行精确动作',
     description:
-      '执行 1–6 个精确动作：plant（种植）、replace（同格换植）、shovel（铲除）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、dismiss_objective、collect。' +
+      '执行 1–6 个精确动作：plant（种植）、replace（同格换植）、shovel（铲除）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、restart（重开本关）、dismiss_objective、collect。' +
+      'plant/replace 传 cells 可以把同一张卡一次种到多个格子（工具按冷却自动等待重试）。' +
       '每个动作返回真实 ok/code/reason/retryAfter（如 COOLDOWN/SUN/OCCUPIED/CELL_BLOCKED）。部分失败不会抛异常；按每个 result 自己决定下一步。',
     inputSchema: {
       type: 'object',
@@ -186,6 +195,14 @@ export const TOOLS = [
     name: 'pvz_resume',
     title: '继续游戏',
     description: '如果游戏处于暂停状态则继续；未暂停时无副作用。',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'pvz_restart',
+    title: '重开本关',
+    description:
+      '重开当前关卡（回到选卡/任务阶段，阳光、植物、推车、波次全部重置）。不需要先进暂停菜单，工具直接走游戏自己的重开流程。' +
+      '返回 restarted/from/phase；8 秒内没回到 preparing 会返回 RESTART_TIMEOUT（不是崩溃，用 pvz_state 看 phase）。',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },
   },
   {
