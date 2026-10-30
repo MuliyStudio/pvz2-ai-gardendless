@@ -2331,7 +2331,7 @@ function createEventStreamApi({ snapshot }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.1.13';
+const BRIDGE_VERSION = '0.1.14';
 
 function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -2583,6 +2583,7 @@ const TOOLS = [
     description:
       '执行 1–6 个精确动作：plant（种植）、replace（同格换植）、shovel（铲除）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、restart（重开本关）、dismiss_objective、collect。' +
       'plant/replace 传 cells 可以把同一张卡一次种到多个格子（工具按冷却自动等待重试）。' +
+      '同一张卡在一批动作里出现两次时，工具也会自动等它的冷却（单次≤6 秒、最多重试 2 次）再执行。' +
       '每个动作返回真实 ok/code/reason/retryAfter（如 COOLDOWN/SUN/OCCUPIED/CELL_BLOCKED）。部分失败不会抛异常；按每个 result 自己决定下一步。',
     inputSchema: {
       type: 'object',
@@ -3190,7 +3191,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.1.13', sleep = routerSleep }) {
+function createToolRouter({ bridge, version = '0.1.14', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -3424,6 +3425,16 @@ function createToolRouter({ bridge, version = '0.1.13', sleep = routerSleep }) {
         r = await bridge.act(a);
       } catch (e) {
         r = normalizeError('ACT_THREW', {}, String(e && e.message || e));
+      }
+      // 同一张卡在一批动作里会出现两次：等它自己的冷却，而不是把 COOLDOWN 甩给模型。
+      // 单次最多等 6 秒、重试 2 次；整批最多再花 20 秒，避免一次调用把人晾住。
+      if (r && r.ok === false && r.code === 'COOLDOWN') {
+        const budget = Date.now() + 20000;
+        for (let retry = 0; retry < 2 && r && r.code === 'COOLDOWN' && Date.now() < budget; retry++) {
+          const waitMs = Math.min(6000, Math.max(200, (Number(r.retryAfter) || 1) * 1000));
+          await sleep(waitMs);
+          try { r = await bridge.act(a); } catch (e) { r = normalizeError('ACT_THREW', {}, String(e && e.message || e)); }
+        }
       }
       results.push({ index: i, action: type, ...(r || normalizeError('ACT_THREW', {}, '没有返回')) });
     }

@@ -10,7 +10,7 @@ function setup(opts) {
   resetAssetCache();
   const game = createFakeGame(opts);
   const bridge = createBridge(game.ctx);
-  const router = createToolRouter({ bridge, version: '0.1.13' });
+  const router = createToolRouter({ bridge, version: '0.1.14' });
   return { game, bridge, router };
 }
 
@@ -100,7 +100,7 @@ test('router: health 带工具清单和版本', async () => {
     assert.equal(h.ok, true);
     assert.equal(h.tools.length, 16);
     assert.equal(h.namespace, 'pvz-llm-agent');
-    assert.equal(h.serverVersion, '0.1.13');
+    assert.equal(h.serverVersion, '0.1.14');
   } finally { teardown(bridge); }
 });
 
@@ -210,5 +210,32 @@ test('router: pvz_restart 重开本关回到选卡阶段', async () => {
     const s = bridge.snapshot();
     assert.equal(s.phase, 'preparing');
     assert.equal(s.plants.length, 0);
+  } finally { teardown(bridge); }
+});
+
+test('router: 一批动作里同一张卡出现两次，自动等冷却后仍能种下', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 300;
+    const realAct = bridge.act;
+    let cooling = 0;
+    bridge.act = async (a) => {
+      // 第二次种同一张卡时先回一次 COOLDOWN，模拟真实冷却
+      if (a.plant === 'sunflower' && cooling === 0) {
+        cooling += 1;
+        return { ok: false, code: 'COOLDOWN', retryAfter: 0.2, type: a.plant, card: a.card };
+      }
+      return realAct(a);
+    };
+    const r = await router.call('pvz_act', {
+      actions: [
+        { type: 'plant', plant: 'sunflower', lane: 0, column: 0 },
+        { type: 'plant', plant: 'sunflower', lane: 1, column: 0 },
+      ],
+    });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.results[1].ok, true, '第二次撞冷却后自动等待重试成功');
+    assert.equal(bridge.snapshot().plants.length, 2);
   } finally { teardown(bridge); }
 });

@@ -61,7 +61,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-export function createToolRouter({ bridge, version = '0.1.13', sleep = routerSleep }) {
+export function createToolRouter({ bridge, version = '0.1.14', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -295,6 +295,16 @@ export function createToolRouter({ bridge, version = '0.1.13', sleep = routerSle
         r = await bridge.act(a);
       } catch (e) {
         r = normalizeError('ACT_THREW', {}, String(e && e.message || e));
+      }
+      // 同一张卡在一批动作里会出现两次：等它自己的冷却，而不是把 COOLDOWN 甩给模型。
+      // 单次最多等 6 秒、重试 2 次；整批最多再花 20 秒，避免一次调用把人晾住。
+      if (r && r.ok === false && r.code === 'COOLDOWN') {
+        const budget = Date.now() + 20000;
+        for (let retry = 0; retry < 2 && r && r.code === 'COOLDOWN' && Date.now() < budget; retry++) {
+          const waitMs = Math.min(6000, Math.max(200, (Number(r.retryAfter) || 1) * 1000));
+          await sleep(waitMs);
+          try { r = await bridge.act(a); } catch (e) { r = normalizeError('ACT_THREW', {}, String(e && e.message || e)); }
+        }
       }
       results.push({ index: i, action: type, ...(r || normalizeError('ACT_THREW', {}, '没有返回')) });
     }

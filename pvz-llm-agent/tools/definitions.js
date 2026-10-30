@@ -131,6 +131,7 @@ export const TOOLS = [
     description:
       '执行 1–6 个精确动作：plant（种植）、replace（同格换植）、shovel（铲除）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、restart（重开本关）、dismiss_objective、collect。' +
       'plant/replace 传 cells 可以把同一张卡一次种到多个格子（工具按冷却自动等待重试）。' +
+      '同一张卡在一批动作里出现两次时，工具也会自动等它的冷却（单次≤6 秒、最多重试 2 次）再执行。' +
       '每个动作返回真实 ok/code/reason/retryAfter（如 COOLDOWN/SUN/OCCUPIED/CELL_BLOCKED）。部分失败不会抛异常；按每个 result 自己决定下一步。',
     inputSchema: {
       type: 'object',
