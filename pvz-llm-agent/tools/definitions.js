@@ -129,7 +129,8 @@ export const TOOLS = [
     name: 'pvz_act',
     title: '执行精确动作',
     description:
-      '执行 1–6 个精确动作：plant（种植）、replace（同格换植）、shovel（铲除）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、restart（重开本关）、dismiss_objective、collect。' +
+      '执行 1–6 个精确动作：plant（种植）、replace（同格换植 = 先铲后种，换强卡/换定位/救急都行）、shovel（只铲不种，种错了、要腾格、要牺牲后排经济都行）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、restart（重开本关）、dismiss_objective、collect。' +
+      '同一批动作按数组顺序执行，所以「先 shovel 第 N 格、再 plant 同一格」是合法连招。' +
       'plant/replace 传 cells 可以把同一张卡一次种到多个格子（工具按冷却自动等待重试）。' +
       '同一张卡在一批动作里出现两次时：冷却 ≤3.5 秒工具会自动等它再试（最多 2 次）；更长的冷却直接返回 COOLDOWN，让你换一张卡，不把这一轮晾住。' +
       '每个动作返回真实 ok/code/reason/retryAfter（如 COOLDOWN/SUN/OCCUPIED/CELL_BLOCKED）。部分失败不会抛异常；按每个 result 自己决定下一步。',

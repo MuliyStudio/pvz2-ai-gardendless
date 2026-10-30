@@ -10,7 +10,7 @@ function setup(opts) {
   resetAssetCache();
   const game = createFakeGame(opts);
   const bridge = createBridge(game.ctx);
-  const router = createToolRouter({ bridge, version: '0.1.18' });
+  const router = createToolRouter({ bridge, version: '0.1.19' });
   return { game, bridge, router };
 }
 
@@ -100,7 +100,7 @@ test('router: health 带工具清单和版本', async () => {
     assert.equal(h.ok, true);
     assert.equal(h.tools.length, 16);
     assert.equal(h.namespace, 'pvz-llm-agent');
-    assert.equal(h.serverVersion, '0.1.18');
+    assert.equal(h.serverVersion, '0.1.19');
   } finally { teardown(bridge); }
 });
 
@@ -300,5 +300,26 @@ test('router: replace 后新卡种不上时，明确告诉模型格子已经空�
     assert.equal(res.code, 'CELL_BLOCKED');
     assert.equal(res.emptyAfterRemoval, true, JSON.stringify(res));
     assert.equal(bridge.snapshot().plants.filter((p) => p.lane === 4 && p.column === 1).length, 0);
+  } finally { teardown(bridge); }
+});
+
+test('router: 同一批里先铲后种同一格（贴脸救急的连招）', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 400;
+    const cell = game.grid[0][1];
+    cell.addPlant('sunflower');
+    cell.PlaceUIPlant = () => cell.addPlant('peashooter');
+    const r = await router.call('pvz_act', {
+      actions: [
+        { type: 'shovel', lane: 0, column: 1 },
+        { type: 'plant', plant: 'peashooter', lane: 0, column: 1 },
+      ],
+    });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const own = bridge.snapshot().plants.filter((p) => p.lane === 0 && p.column === 1);
+    assert.equal(own.length, 1);
+    assert.equal(own[0].type, 'peashooter');
   } finally { teardown(bridge); }
 });

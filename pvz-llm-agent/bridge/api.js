@@ -10,7 +10,7 @@ import { createBriefing } from './briefing.js';
 import { createPlanStore } from './plan.js';
 import { createEventStreamApi } from './events.js';
 
-export const BRIDGE_VERSION = '0.1.18';
+export const BRIDGE_VERSION = '0.1.19';
 
 export function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();

@@ -2377,7 +2377,7 @@ function createEventStreamApi({ snapshot }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.1.18';
+const BRIDGE_VERSION = '0.1.19';
 
 function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -2627,7 +2627,8 @@ const TOOLS = [
     name: 'pvz_act',
     title: '执行精确动作',
     description:
-      '执行 1–6 个精确动作：plant（种植）、replace（同格换植）、shovel（铲除）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、restart（重开本关）、dismiss_objective、collect。' +
+      '执行 1–6 个精确动作：plant（种植）、replace（同格换植 = 先铲后种，换强卡/换定位/救急都行）、shovel（只铲不种，种错了、要腾格、要牺牲后排经济都行）、plant_food（能量豆）、move_cart（矿车）、resume（继续）、wait（等待）、restart（重开本关）、dismiss_objective、collect。' +
+      '同一批动作按数组顺序执行，所以「先 shovel 第 N 格、再 plant 同一格」是合法连招。' +
       'plant/replace 传 cells 可以把同一张卡一次种到多个格子（工具按冷却自动等待重试）。' +
       '同一张卡在一批动作里出现两次时：冷却 ≤3.5 秒工具会自动等它再试（最多 2 次）；更长的冷却直接返回 COOLDOWN，让你换一张卡，不把这一轮晾住。' +
       '每个动作返回真实 ok/code/reason/retryAfter（如 COOLDOWN/SUN/OCCUPIED/CELL_BLOCKED）。部分失败不会抛异常；按每个 result 自己决定下一步。',
@@ -3237,7 +3238,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.1.18', sleep = routerSleep }) {
+function createToolRouter({ bridge, version = '0.1.19', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -3563,7 +3564,9 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2 花园无尽》的唯一决�
 - 每次工具往返都有网络延迟：一轮尽量把能做的都做完（pvz_act 最多 6 个动作，铺同一种卡用 cells），不要每轮只种一株。
 - 能量豆只给已经落地的植物：同一批动作里刚种下的植物还没落地，给豆会 NO_PLANT；下一轮再给。留着不用等于浪费，血多的输出/尖刀/墙优先。
 - OCCUPIED / CELL_BLOCKED 会带 alternatives（同行空位）：直接换 alternatives 里的格子重种，不要原地重试，也不要因为一次被占就放弃这张卡。
-- 升级弱卡是允许且鼓励的：阳光富余（例如 >300、且卡槽都买得起）时，把低级输出/经济 replace 成更强的同定位卡（向日葵→双胞向日葵、豌豆→双发/西瓜、坚果→高坚果），一步完成先铲后种；不要因为怕损失就把整局停在低级卡上。
+- 铲除是正常战术，不是"失败"：种错位置、格子不够要腾位、僵尸贴到后排需要把阳光生产者换成一株输出，都可以直接 shovel；腾出来的格子下一轮再补回经济。不要因为"舍不得"就卡着不动。
+- 升级弱卡也是铲除的正当理由之一（不是唯一理由）：阳光富余（例如 >300、且卡槽都买得起）时，把低级输出/经济 replace 成更强的同定位卡（向日葵→双胞向日葵、豌豆→双发/西瓜、坚果→高坚果），一步完成先铲后种；不要因为怕损失就把整局停在低级卡上。
+- 同一批动作里可以「先 shovel 这一格、再 plant 同一格」，工具按顺序执行；贴脸救急就用这种连招，别分两轮。
 - pvz_choose_deck 返回 warning / actualDeck 时以 actualDeck 为准：计划里没带上的卡不要当自己有（例如计划写噬碑藤但卡组没带）。
 - 樱桃炸弹、倭瓜、冰冻生菜这类一次性/控制卡是拿来救场的，不是存着看的：某行有僵尸贴到 c2 以内就该用。
 - 每次动作前先看 pvz_state（至少看阳光、卡槽冷却、格子占用、僵尸位置）。失败后读 code，不要对同一个格子/同一张卡反复撞同一个错误。
