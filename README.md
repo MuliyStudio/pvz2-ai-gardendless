@@ -57,7 +57,7 @@
 
 | 文件 | 内容 | 适合 |
 | --- | --- | --- |
-| `PvZAI-LLM-Agent-Bundle-v0.1.11.zip` | 模组 ZIP + 启动器 + MCP Server + 配置脚本 + 安装说明 | 第一次用，推荐 |
+| `PvZAI-LLM-Agent-Bundle-v0.1.19.zip` | 模组 ZIP + 启动器 + MCP Server + 配置脚本 + 安装说明 | 第一次用，推荐 |
 | `pvz-llm-agent.zip` | 只有 GP-Next 模组（`pack.json` + `scripts/main.js`） | 已经会装 GP-Next 模组 |
 
 ---
@@ -67,7 +67,7 @@
 ### 方式 A：发布包（推荐）
 
 1. **完全退出游戏**（不是最小化）。
-2. 解压 `PvZAI-LLM-Agent-Bundle-v0.1.11.zip`（整个文件夹，别只拿一个 exe）。
+2. 解压 `PvZAI-LLM-Agent-Bundle-v0.1.19.zip`（整个文件夹，别只拿一个 exe）。
 3. 双击 `PvZAI_Launcher.exe`。
    - 自动把 `pvz-llm-agent.zip` 装进 GP-Next 并启用（写 `installed/<digest>` + `configuration-state.json`）；
    - 带 9222 调试端口启动游戏；
