@@ -57,7 +57,7 @@
 
 | 文件 | 内容 | 适合 |
 | --- | --- | --- |
-| `PvZAI-LLM-Agent-Bundle-v0.1.10.zip` | 模组 ZIP + 启动器 + MCP Server + 配置脚本 + 安装说明 | 第一次用，推荐 |
+| `PvZAI-LLM-Agent-Bundle-v0.1.11.zip` | 模组 ZIP + 启动器 + MCP Server + 配置脚本 + 安装说明 | 第一次用，推荐 |
 | `pvz-llm-agent.zip` | 只有 GP-Next 模组（`pack.json` + `scripts/main.js`） | 已经会装 GP-Next 模组 |
 
 ---
@@ -67,7 +67,7 @@
 ### 方式 A：发布包（推荐）
 
 1. **完全退出游戏**（不是最小化）。
-2. 解压 `PvZAI-LLM-Agent-Bundle-v0.1.10.zip`（整个文件夹，别只拿一个 exe）。
+2. 解压 `PvZAI-LLM-Agent-Bundle-v0.1.11.zip`（整个文件夹，别只拿一个 exe）。
 3. 双击 `PvZAI_Launcher.exe`。
    - 自动把 `pvz-llm-agent.zip` 装进 GP-Next 并启用（写 `installed/<digest>` + `configuration-state.json`）；
    - 带 9222 调试端口启动游戏；
@@ -223,6 +223,10 @@ Key 错误、Base URL 少了 `/v1`、模型名不对，或中转不兼容。先�
 
 看思考窗和 `code`：可能阳光不够、所有卡在冷却、任务限制植物数量，或当前关卡类型不支持（`mechanics.supported=false`）。MCP 模式可以 `pvz_state` 看 `limits` 和 `shovelCandidates`。
 
+### AI 说「本关最多 18 株」，但这关根本没有这个限制？
+
+引擎会在场景里常驻一个**未初始化**的任务模板，它的默认文案就是 `Never have more than 18 plants`。0.1.11 之前这段模板文本会漏进 `pvz_state.objective.missions`，模型读到就当成本关规则。现在模板的 `missions` 一律清空，判断有没有上限只看 `plantLimit`（`null` = 无上限）。升级模组并重启游戏即可。
+
 ### 内置模式和 MCP 模式能一起用吗？
 
 不要同时“开始”。会抢种植/铲除操作。收阳光和能量豆是共享的。
@@ -292,7 +296,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:an
 
 ## 更新日志
 
-当前版本：**模组 0.1.10 + 启动器 1.0.0**（OpenCode Go 本地代理 + 一键发布包）。
+当前版本：**模组 0.1.11 + 启动器 1.0.0**（OpenCode Go 本地代理 + 一键发布包）。
 
 完整版本记录见 **[CHANGELOG.md](CHANGELOG.md)**；逐版本实现细节另见 **[pvz-llm-agent/CHANGELOG.md](pvz-llm-agent/CHANGELOG.md)**。
 

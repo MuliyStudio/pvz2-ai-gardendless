@@ -86,25 +86,53 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
     learnedCells.set(`${lane}:${column}`, { until: Date.now() + 15000, code: code || 'CELL_BLOCKED' });
   }
 
+  // 场景里可能同时存在「未激活的模板」和「本关真实的」LevelObjectiveScreen。
+  // 模板的 screenName 是占位符（<LEVEL OBJECTIVE NAME>），mission0 是引擎默认文案
+  // （典型："Never have more than 18 plants"）——那不是本关任务，必须整块丢掉，
+  // 否则模型会把它当成本关规则（曾被误读成"18 株上限"）。
   function readObjective(scene) {
-    const obj = findCompByClass(scene, 'LevelObjectiveScreen');
-    if (!obj) return null;
-    const node = obj.node || null;
-    const screenName = obj.screenName && typeof obj.screenName.string === 'string' ? obj.screenName.string : '';
-    // 占位符 / 空名称 = 未初始化的模板对象，它的 mission0 是引擎默认英文文案，不是本关任务。
-    // 真实关卡会把 screenName 本地化成诸如「海盗港湾 - 第 13 天目标」。
-    const trusted = !!screenName.trim() && !/^[<【].*[>】]$/.test(screenName.trim());
+    const found = [];
+    const walk = (n) => {
+      for (const c of n._components || []) {
+        const k = c && (c.__classname__ || (c.constructor && c.constructor.name));
+        if (k === 'LevelObjectiveScreen') found.push({ comp: c, node: n });
+      }
+      for (const ch of n.children || []) walk(ch);
+    };
+    try { if (scene) walk(scene); } catch { /* ignore */ }
+    if (!found.length) return null;
+
+    const describe = ({ comp, node }) => {
+      const screenName = comp.screenName && typeof comp.screenName.string === 'string' ? comp.screenName.string : '';
+      // 占位符 / 空名称 = 未初始化的模板对象，它的 mission0 是引擎默认英文文案。
+      // 真实关卡会把 screenName 本地化成诸如「海盗港湾 - 第 13 天目标」。
+      const trusted = !!screenName.trim() && !/^[<【].*[>】]$/.test(screenName.trim());
+      const active = !!node && node.activeInHierarchy !== false && node.active !== false && !comp.faded;
+      return { comp, node, screenName, trusted, active, canContinue: typeof comp.continue === 'function' };
+    };
+    const all = found.map(describe);
+    // 优先「正在显示的真实任务」，其次任意已本地化的，最后才是模板。
+    const hit = all.find((x) => x.active && x.trusted)
+      || all.find((x) => x.trusted)
+      || all.find((x) => x.active)
+      || all[0];
+
+    if (!hit.trusted) {
+      // 不信任时连 missions 也不返回：留一个空数组，模型就没东西可误读。
+      return { screenName: hit.screenName, missions: [], active: hit.active, trusted: false, canContinue: hit.canContinue };
+    }
+
     const missions = [];
     const push = (t) => {
       const s = String(t || '').trim();
       if (!s || s.length < 3) return;
-      if (s === screenName) return;
+      if (s === hit.screenName) return;
       if (/^[<【].*[>】]$/.test(s)) return;
       if (/^(继续|开始|开始游戏|确定|下一步|返回|取消|continue|ok|next|back|cancel)$/i.test(s)) return;
       if (/^(关卡任务|任务|任务目标|目标|本关任务|任务说明|任务要点|level objectives?|objectives?)$/i.test(s)) return;
       if (missions.indexOf(s) < 0) missions.push(s);
     };
-    if (obj.mission0 && typeof obj.mission0.string === 'string') push(obj.mission0.string);
+    if (hit.comp.mission0 && typeof hit.comp.mission0.string === 'string') push(hit.comp.mission0.string);
     const walkLabels = (n) => {
       for (const c of n._components || []) {
         const cls = c && (c.__classname__ || (c.constructor && c.constructor.name));
@@ -112,9 +140,18 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
       }
       for (const ch of n.children || []) walkLabels(ch);
     };
-    if (node) walkLabels(node);
-    const active = !!node && node.activeInHierarchy !== false && node.active !== false && !obj.faded;
-    return { screenName, missions, active, trusted, canContinue: typeof obj.continue === 'function' };
+    if (hit.node) walkLabels(hit.node);
+    return { screenName: hit.screenName, missions, active: hit.active, trusted: true, canContinue: hit.canContinue };
+  }
+
+  // 植物上限优先取结构化字段（LevelTaskCount.plantCountLimit），
+  // 文本匹配只作为兜底，而且只用在「已本地化的真实任务」上。
+  function taskPlantLimit(tasks) {
+    for (const t of tasks || []) {
+      const v = t && t.limits ? t.limits.plantCountLimit : null;
+      if (typeof v === 'number' && v > 0) return v;
+    }
+    return null;
   }
 
   function applyTaskSemantics(t) {
@@ -486,8 +523,7 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
     const objective = readObjective(scene);
     if (phase === 'preparing' && objective && objective.active) phase = 'objective';
     const tasks = readTasks(scene);
-    // 只采信「已本地化」的 objective；模板对象的 mission0 是引擎默认英文文案，
-    // 曾把 "Never have more than 18 plants" 误读成本关植物上限。同时与 tasks.tip 去重。
+    // readObjective 已经丢掉模板 missions；这里只与 tasks.tip 去重后作为任务原文。
     const objectiveMissions = objective && objective.trusted ? objective.missions : [];
     const missionHints = [...new Set(
       objectiveMissions.concat(tasks.map((t) => t.tip).filter(Boolean)),
@@ -502,7 +538,8 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
       const cs = cardState(cards, sunNow);
       let ls = null;
       try { ls = lvl ? stats.levelScriptOf(lvl) : null; } catch { ls = null; }
-      const limit = parsePlantLimit(missionHints);
+      const limitFromTask = taskPlantLimit(tasks);
+      const limit = limitFromTask != null ? limitFromTask : parsePlantLimit(missionHints);
       return {
         ok: phase !== 'other', version, scene: sceneName, phase,
         reason: '场景还没有棋盘',
@@ -520,7 +557,7 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
         plants: [], zombies: [], lanes: [], board: [],
         terrain: null, blockedCells: [], plantable: [], obstacles: [], mechanicFacts: [], mechanics: [],
         levelScript: ls, zombieStats: {},
-        limits: { plantLimit: limit, plantsPlanted: 0, plantsLeft: limit, slots: cs.seedSelection ? cs.seedSelection.slots : 0 },
+        limits: { plantLimit: limit, plantsPlanted: 0, plantsLeft: limit, slots: cs.seedSelection ? cs.seedSelection.slots : 0, plantLimitSource: limit == null ? null : (limitFromTask != null ? 'task' : 'objective') },
         plantLimit: limit,
         startingSun: phase === 'preparing' || phase === 'objective' ? sunNow : null,
         carts: [],
@@ -749,10 +786,12 @@ export function createSnapshotReader({ getCc, findCompByClass, stats, version })
     out.mechanics = deDupe(out.mechanicFacts);
     out.carts = readCarts(C, lanes, cols);
 
-    // 关卡限制与图表事实
-    const limit = parsePlantLimit(missionHints) || (out.levelScript && out.levelScript.plantLimit) || null;
+    // 关卡限制与图表事实：结构化字段优先，文本只作兜底（且只来自已本地化的真实任务）
+    const limitFromTask = taskPlantLimit(tasks);
+    const limit = limitFromTask != null ? limitFromTask : (parsePlantLimit(missionHints) || (out.levelScript && out.levelScript.plantLimit) || null);
     out.plantLimit = limit;
     out.limits.plantLimit = limit;
+    out.limits.plantLimitSource = limit == null ? null : (limitFromTask != null ? 'task' : 'objective');
     out.limits.plantsPlanted = out.plants.length;
     out.limits.plantsLeft = limit != null ? Math.max(0, limit - out.plants.length) : null;
 

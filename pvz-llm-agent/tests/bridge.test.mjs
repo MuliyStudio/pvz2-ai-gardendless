@@ -189,11 +189,55 @@ test('objective：占位符 screenName 的模板对象不被当成真实任务',
     const s = bridge.snapshot();
     assert.equal(s.ok, true, JSON.stringify(s));
     assert.equal(s.objective.trusted, false);
+    assert.deepEqual(s.objective.missions, [], '模板 missions 不能出现在 state 里（模型会直接读）');
     assert.equal(s.plantLimit, null, '模板文案不能被解析成植物上限');
     assert.ok(
       !s.missionHints.includes('Never have more than 18 plants'),
       JSON.stringify(s.missionHints),
     );
+    const b = bridge.briefing();
+    assert.deepEqual(b.objective.missions, [], 'briefing 也不能带模板 missions');
+    assert.equal(b.plantLimit, null);
+    assert.equal(b.constraints.find((c) => c.id === 'plant_limit'), undefined);
+  } finally { teardown(bridge); }
+});
+
+test('objective：模板对象未激活时不抢真实任务（同场景两个组件）', () => {
+  const { game, bridge } = setup({ slots: 3, noBoard: true });
+  try {
+    // 引擎里模板和真实任务可能同时挂在场景上：模板未激活、screenName 是占位符。
+    const templateNode = { activeInHierarchy: false, active: false, children: [], _components: [] };
+    const realNode = { activeInHierarchy: true, active: true, children: [], _components: [] };
+    game.scene._components.push({
+      __classname__: 'LevelObjectiveScreen',
+      screenName: { string: '<LEVEL OBJECTIVE NAME>' },
+      mission0: { string: 'Never have more than 18 plants' },
+      node: templateNode,
+      faded: false,
+      continue() {},
+    });
+    game.scene._components.push({
+      __classname__: 'LevelObjectiveScreen',
+      screenName: { string: '海盗港湾 - 第 13 天目标' },
+      mission0: { string: '本关最多只能种 24 株' },
+      node: realNode,
+      faded: false,
+      continue() {},
+    });
+
+    const s = bridge.snapshot();
+    assert.equal(s.objective.trusted, true);
+    assert.equal(s.objective.screenName, '海盗港湾 - 第 13 天目标');
+    assert.equal(s.plantLimit, 24, JSON.stringify(s.objective));
+  } finally { teardown(bridge); }
+});
+
+test('plantLimit：结构化任务字段优先于任务文案', () => {
+  const { bridge } = setup({ slots: 3, objective: true, task: { tip: '本关最多只能种 20 株', mode: 5, extra: { plantCountLimit: 12 } } });
+  try {
+    const s = bridge.snapshot();
+    assert.equal(s.plantLimit, 12, 'LevelTaskCount.plantCountLimit 才是事实');
+    assert.equal(s.limits.plantLimitSource, 'task');
   } finally { teardown(bridge); }
 });
 

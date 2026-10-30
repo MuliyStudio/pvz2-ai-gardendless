@@ -564,25 +564,53 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
     learnedCells.set(`${lane}:${column}`, { until: Date.now() + 15000, code: code || 'CELL_BLOCKED' });
   }
 
+  // 场景里可能同时存在「未激活的模板」和「本关真实的」LevelObjectiveScreen。
+  // 模板的 screenName 是占位符（<LEVEL OBJECTIVE NAME>），mission0 是引擎默认文案
+  // （典型："Never have more than 18 plants"）——那不是本关任务，必须整块丢掉，
+  // 否则模型会把它当成本关规则（曾被误读成"18 株上限"）。
   function readObjective(scene) {
-    const obj = findCompByClass(scene, 'LevelObjectiveScreen');
-    if (!obj) return null;
-    const node = obj.node || null;
-    const screenName = obj.screenName && typeof obj.screenName.string === 'string' ? obj.screenName.string : '';
-    // 占位符 / 空名称 = 未初始化的模板对象，它的 mission0 是引擎默认英文文案，不是本关任务。
-    // 真实关卡会把 screenName 本地化成诸如「海盗港湾 - 第 13 天目标」。
-    const trusted = !!screenName.trim() && !/^[<【].*[>】]$/.test(screenName.trim());
+    const found = [];
+    const walk = (n) => {
+      for (const c of n._components || []) {
+        const k = c && (c.__classname__ || (c.constructor && c.constructor.name));
+        if (k === 'LevelObjectiveScreen') found.push({ comp: c, node: n });
+      }
+      for (const ch of n.children || []) walk(ch);
+    };
+    try { if (scene) walk(scene); } catch { /* ignore */ }
+    if (!found.length) return null;
+
+    const describe = ({ comp, node }) => {
+      const screenName = comp.screenName && typeof comp.screenName.string === 'string' ? comp.screenName.string : '';
+      // 占位符 / 空名称 = 未初始化的模板对象，它的 mission0 是引擎默认英文文案。
+      // 真实关卡会把 screenName 本地化成诸如「海盗港湾 - 第 13 天目标」。
+      const trusted = !!screenName.trim() && !/^[<【].*[>】]$/.test(screenName.trim());
+      const active = !!node && node.activeInHierarchy !== false && node.active !== false && !comp.faded;
+      return { comp, node, screenName, trusted, active, canContinue: typeof comp.continue === 'function' };
+    };
+    const all = found.map(describe);
+    // 优先「正在显示的真实任务」，其次任意已本地化的，最后才是模板。
+    const hit = all.find((x) => x.active && x.trusted)
+      || all.find((x) => x.trusted)
+      || all.find((x) => x.active)
+      || all[0];
+
+    if (!hit.trusted) {
+      // 不信任时连 missions 也不返回：留一个空数组，模型就没东西可误读。
+      return { screenName: hit.screenName, missions: [], active: hit.active, trusted: false, canContinue: hit.canContinue };
+    }
+
     const missions = [];
     const push = (t) => {
       const s = String(t || '').trim();
       if (!s || s.length < 3) return;
-      if (s === screenName) return;
+      if (s === hit.screenName) return;
       if (/^[<【].*[>】]$/.test(s)) return;
       if (/^(继续|开始|开始游戏|确定|下一步|返回|取消|continue|ok|next|back|cancel)$/i.test(s)) return;
       if (/^(关卡任务|任务|任务目标|目标|本关任务|任务说明|任务要点|level objectives?|objectives?)$/i.test(s)) return;
       if (missions.indexOf(s) < 0) missions.push(s);
     };
-    if (obj.mission0 && typeof obj.mission0.string === 'string') push(obj.mission0.string);
+    if (hit.comp.mission0 && typeof hit.comp.mission0.string === 'string') push(hit.comp.mission0.string);
     const walkLabels = (n) => {
       for (const c of n._components || []) {
         const cls = c && (c.__classname__ || (c.constructor && c.constructor.name));
@@ -590,9 +618,18 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
       }
       for (const ch of n.children || []) walkLabels(ch);
     };
-    if (node) walkLabels(node);
-    const active = !!node && node.activeInHierarchy !== false && node.active !== false && !obj.faded;
-    return { screenName, missions, active, trusted, canContinue: typeof obj.continue === 'function' };
+    if (hit.node) walkLabels(hit.node);
+    return { screenName: hit.screenName, missions, active: hit.active, trusted: true, canContinue: hit.canContinue };
+  }
+
+  // 植物上限优先取结构化字段（LevelTaskCount.plantCountLimit），
+  // 文本匹配只作为兜底，而且只用在「已本地化的真实任务」上。
+  function taskPlantLimit(tasks) {
+    for (const t of tasks || []) {
+      const v = t && t.limits ? t.limits.plantCountLimit : null;
+      if (typeof v === 'number' && v > 0) return v;
+    }
+    return null;
   }
 
   function applyTaskSemantics(t) {
@@ -964,8 +1001,7 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
     const objective = readObjective(scene);
     if (phase === 'preparing' && objective && objective.active) phase = 'objective';
     const tasks = readTasks(scene);
-    // 只采信「已本地化」的 objective；模板对象的 mission0 是引擎默认英文文案，
-    // 曾把 "Never have more than 18 plants" 误读成本关植物上限。同时与 tasks.tip 去重。
+    // readObjective 已经丢掉模板 missions；这里只与 tasks.tip 去重后作为任务原文。
     const objectiveMissions = objective && objective.trusted ? objective.missions : [];
     const missionHints = [...new Set(
       objectiveMissions.concat(tasks.map((t) => t.tip).filter(Boolean)),
@@ -980,7 +1016,8 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
       const cs = cardState(cards, sunNow);
       let ls = null;
       try { ls = lvl ? stats.levelScriptOf(lvl) : null; } catch { ls = null; }
-      const limit = parsePlantLimit(missionHints);
+      const limitFromTask = taskPlantLimit(tasks);
+      const limit = limitFromTask != null ? limitFromTask : parsePlantLimit(missionHints);
       return {
         ok: phase !== 'other', version, scene: sceneName, phase,
         reason: '场景还没有棋盘',
@@ -998,7 +1035,7 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
         plants: [], zombies: [], lanes: [], board: [],
         terrain: null, blockedCells: [], plantable: [], obstacles: [], mechanicFacts: [], mechanics: [],
         levelScript: ls, zombieStats: {},
-        limits: { plantLimit: limit, plantsPlanted: 0, plantsLeft: limit, slots: cs.seedSelection ? cs.seedSelection.slots : 0 },
+        limits: { plantLimit: limit, plantsPlanted: 0, plantsLeft: limit, slots: cs.seedSelection ? cs.seedSelection.slots : 0, plantLimitSource: limit == null ? null : (limitFromTask != null ? 'task' : 'objective') },
         plantLimit: limit,
         startingSun: phase === 'preparing' || phase === 'objective' ? sunNow : null,
         carts: [],
@@ -1227,10 +1264,12 @@ function createSnapshotReader({ getCc, findCompByClass, stats, version }) {
     out.mechanics = deDupe(out.mechanicFacts);
     out.carts = readCarts(C, lanes, cols);
 
-    // 关卡限制与图表事实
-    const limit = parsePlantLimit(missionHints) || (out.levelScript && out.levelScript.plantLimit) || null;
+    // 关卡限制与图表事实：结构化字段优先，文本只作兜底（且只来自已本地化的真实任务）
+    const limitFromTask = taskPlantLimit(tasks);
+    const limit = limitFromTask != null ? limitFromTask : (parsePlantLimit(missionHints) || (out.levelScript && out.levelScript.plantLimit) || null);
     out.plantLimit = limit;
     out.limits.plantLimit = limit;
+    out.limits.plantLimitSource = limit == null ? null : (limitFromTask != null ? 'task' : 'objective');
     out.limits.plantsPlanted = out.plants.length;
     out.limits.plantsLeft = limit != null ? Math.max(0, limit - out.plants.length) : null;
 
@@ -1842,6 +1881,10 @@ function createBriefing({ stats, reader, planStore, version, featureList, nameOf
         '这是事实清单：没有推荐卡组，也没有本地打法。选卡、每行职责、阈值都由你决定。',
         'stats 里的 ehp = 本体血量 + 全部护甲；dps = 伤害 / 攻击间隔。',
         'plantable 只排除已占格、障碍格、水面/天空；特殊卡（睡莲等）的落点仍要按卡牌说明判断。',
+        'plantLimit 为 null 就是本关没有植物数量上限；不要从任务原文、图鉴或以往关卡推断上限。objective.trusted=false 表示只是未初始化的模板，missions 已清空。',
+        ...(state.objective && state.objective.trusted === false
+          ? ['本关没有下发任务文本（objective 是模板），tasks 为空就按普通关卡打。']
+          : []),
       ],
     };
   }
@@ -2169,7 +2212,7 @@ function createEventStreamApi({ snapshot }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.1.10';
+const BRIDGE_VERSION = '0.1.11';
 
 function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -3003,7 +3046,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.1.10', sleep = routerSleep }) {
+function createToolRouter({ bridge, version = '0.1.11', sleep = routerSleep }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -3259,6 +3302,7 @@ const SYSTEM_PROMPT = `你是《植物大战僵尸2 花园无尽》的唯一决�
 - 每次动作前先看 pvz_state（至少看阳光、卡槽冷却、格子占用、僵尸位置）。失败后读 code，不要对同一个格子/同一张卡反复撞同一个错误。
 - 阳光、能量豆、金币会自动收；需要时也可以 pvz_collect。
 - 关卡任务失败可能直接判负：把 tasks 的 tip/hint/timeLeft/urgent 当作硬约束。
+- 关卡规则只看结构化字段：植物数量上限以 plantLimit / limits.plantLimit 为准，为 null 就是没有上限。objective.trusted=false 或 missions 为空时，说明这关没有下发任务文本；不要从任务原文残留、图鉴知识或"以往这类关卡"推断"最多 18 株"之类的限制。tasks 为空就按普通关卡打，不要自己加限制。
 - 不要空转：需要等条件时用 pvz_wait_until（阳光/冷却/僵尸进某行/任务完成），不要连续调用同一个查询。
 - 你可以在 pvz_set_plan 里写风格、卡组、每行职责、阈值、应急方案；之后用 pvz_state.plan 回看。计划只属于你，文字尽量用中文（codename 除外）。
 

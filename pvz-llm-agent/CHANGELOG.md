@@ -1,5 +1,16 @@
 ﻿# Changelog
 
+## 0.1.11 — 2026-10-30
+
+**修掉「本关最多 18 株」这类幽灵上限**
+
+- 根因：引擎在 `inGameScene` 上常驻一个**未激活**的 `LevelObjectiveScreen` 模板，`screenName` 是占位符 `<LEVEL OBJECTIVE NAME>`，`mission0` 是默认英文文案 `Never have more than 18 plants`。0.1.8 只是不再拿它算 `plantLimit`，但 `objective.missions` 原样进了 `pvz_state` / `pvz_briefing`，模型读到就把「全程自控植物数≤17，绝不碰到18上限」写进本关计划。
+- `readObjective` 现在扫场景里所有 `LevelObjectiveScreen`，优先取「正在显示 + 已本地化」的那个；不信任的模板**连 `missions` 都返回空数组**，模型没有可误读的文本。
+- `plantLimit` 改为结构化优先：先看 `LevelTaskCount.plantCountLimit`，再看已本地化任务文案；新增 `limits.plantLimitSource`（`task` / `objective` / `null`）。
+- `pvz_briefing.notes` 明确写「`plantLimit` 为 null 就是本关没有上限，不要从任务原文、图鉴或以往关卡推断」；模板关卡再多一句「tasks 为空就按普通关卡打」。
+- 游戏内 system prompt 增加硬规则：关卡规则只看 `plantLimit` / `limits`，不要自己加「最多 18 株」之类的限制。
+- 新增 3 条回归测试：模板 missions 不进 state/briefing、同场景模板不抢真实任务、结构化任务字段优先于文案；45 项离线测试全通过。
+
 ## 0.1.10 — 2026-10-30
 
 - 修复 OpenCode Go 无法使用：`opencode.ai` 的 `chat/completions` 不返回任何 CORS 头（只有 `/models` 是 `ACAO:*`），WebView2 里带 `Authorization` 会先发预检、预检 404，最终报 `Failed to fetch`。这是浏览器跨域限制，改配置解决不了。

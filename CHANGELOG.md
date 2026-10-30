@@ -4,6 +4,17 @@
 
 ---
 
+## v0.4.1
+
+**修「本关最多 18 株」幽灵上限（模组 0.1.11）**
+
+- 引擎在 `inGameScene` 上常驻一个未激活的 `LevelObjectiveScreen` 模板：`screenName` 是 `<LEVEL OBJECTIVE NAME>`，`mission0` 是默认文案 `Never have more than 18 plants`。之前只是不拿它算 `plantLimit`，`objective.missions` 还是原样进了 `pvz_state` / `pvz_briefing`，模型读到就写进计划（“全程自控植物数≤17，绝不碰到18上限”），导致本关明明没上限却不敢种。
+- 现在 `readObjective` 扫全场景所有 `LevelObjectiveScreen`，优先取「正在显示 + 已本地化」的那个；模板连 `missions` 都返回空数组。
+- `plantLimit` 结构化优先（`LevelTaskCount.plantCountLimit` → 已本地化任务文案），并新增 `limits.plantLimitSource`；`pvz_briefing.notes` 和 system prompt 都写死“`plantLimit` 为 null 就是没有上限，不要自己推断”。
+- 新增 3 条回归测试，离线 45 项全通过；发布包重建为 `PvZAI-LLM-Agent-Bundle-v0.1.11.zip`。
+
+---
+
 ## v0.4.0
 
 **换掉整套实现：LLM 是唯一决策者**

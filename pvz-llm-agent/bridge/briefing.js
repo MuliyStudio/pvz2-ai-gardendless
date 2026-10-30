@@ -164,6 +164,10 @@ export function createBriefing({ stats, reader, planStore, version, featureList,
         '这是事实清单：没有推荐卡组，也没有本地打法。选卡、每行职责、阈值都由你决定。',
         'stats 里的 ehp = 本体血量 + 全部护甲；dps = 伤害 / 攻击间隔。',
         'plantable 只排除已占格、障碍格、水面/天空；特殊卡（睡莲等）的落点仍要按卡牌说明判断。',
+        'plantLimit 为 null 就是本关没有植物数量上限；不要从任务原文、图鉴或以往关卡推断上限。objective.trusted=false 表示只是未初始化的模板，missions 已清空。',
+        ...(state.objective && state.objective.trusted === false
+          ? ['本关没有下发任务文本（objective 是模板），tasks 为空就按普通关卡打。']
+          : []),
       ],
     };
   }
