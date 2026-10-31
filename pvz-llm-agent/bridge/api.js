@@ -14,7 +14,7 @@ import { createEventStreamApi } from './events.js';
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-export const BRIDGE_VERSION = '0.1.29';
+export const BRIDGE_VERSION = '0.4.13';
 
 export function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();

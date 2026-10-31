@@ -6129,7 +6129,7 @@ function createEventStreamApi({ snapshot, onLevelEnd = null, keyOf = null }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.1.29';
+const BRIDGE_VERSION = '0.4.13';
 
 function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -7168,7 +7168,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.1.29', sleep = routerSleep, latency = null }) {
+function createToolRouter({ bridge, version = '0.4.13', sleep = routerSleep, latency = null }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -7902,7 +7902,7 @@ function getOpenCodeSession() {
   return openCodeSession;
 }
 
-function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep = sleepDefault, version = '0.1.29', latency = null }) {
+function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep = sleepDefault, version = '0.4.13', latency = null }) {
   const config = {
     baseUrl: DEFAULT_LLM.baseUrl,
     model: DEFAULT_LLM.model,
@@ -9412,11 +9412,11 @@ function createInGameUI({ agent, bridge }) {
       <div class="p-launch" data-el="launch">
         <button class="p-launch-head" data-act="toggleLaunch" aria-expanded="false">
           <span class="p-launch-dot"></span>
-          <span class="p-launch-title" data-el="launchTitle">未检测到启动器</span>
+          <span class="p-launch-title" data-el="launchTitle">必须用启动器启动游戏</span>
           <span class="chev">${icon('chevronRight')}</span>
         </button>
         <div class="p-launch-body">
-          <p>内置模型模式要用 <b>PvZAI_Launcher.exe</b> 启动才能解除 CSP；MCP 模式也要它打开 9222 调试端口。直接在 GP-Next 里导入 ZIP 不会自动获得这些。</p>
+          <p><b>手动导入 ZIP 用不了：必须用 PvZAI_Launcher.exe 启动游戏。</b>启动器会装模组、开 9222、解 CSP、起本地代理；直接在 GP-Next 里导入 ZIP 拿不到这些，AI 连不上。</p>
           <p>用法：完全退出游戏 → 双击启动器 → 保持窗口打开 → 再进关卡。</p>
           <button class="btn ghost" data-act="ackLaunch" title="知道了" aria-label="知道了">${icon('check')}</button>
         </div>
@@ -9865,13 +9865,13 @@ function createInGameUI({ agent, bridge }) {
       head.setAttribute('aria-expanded', launchEl.classList.contains('open') ? 'true' : 'false');
       head.title = ok
         ? '启动器已连接：CSP 已绕过，9222 调试端口可用'
-        : '内置模型模式需要启动器解除 CSP；MCP 模式需要启动器打开 9222';
+        : '手动导入 ZIP 用不了；必须用 PvZAI_Launcher.exe 启动游戏';
     }
     if (launchTitleEl) {
       const ver = launcher.version && /^[0-9.]+$/.test(launcher.version) ? ` v${launcher.version}` : '';
       launchTitleEl.textContent = ok
         ? `启动器已连接${ver}`
-        : '未检测到启动器 · 点开查看用法';
+        : '必须用启动器启动游戏 · 点开查看';
     }
   }
 

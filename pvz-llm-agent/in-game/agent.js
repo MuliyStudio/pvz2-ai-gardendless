@@ -99,7 +99,7 @@ function getOpenCodeSession() {
   return openCodeSession;
 }
 
-export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep = sleepDefault, version = '0.1.29', latency = null }) {
+export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep = sleepDefault, version = '0.4.13', latency = null }) {
   const config = {
     baseUrl: DEFAULT_LLM.baseUrl,
     model: DEFAULT_LLM.model,

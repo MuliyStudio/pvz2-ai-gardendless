@@ -8,7 +8,7 @@
 
 > **现行实现（2026-10-30）**：新目录 [`pvz-llm-agent/`](pvz-llm-agent/README.md) 是本项目的唯一入口——LLM 是唯一决策者，代码只给事实 / 执行动作 / 返回真实结果 / 记录计划，**没有本地卡组、自动补卡、策略队列**。旧 `pvz-agent/`、`PvZ-MCP/`、`pvz-ai-agent-mod/` 保留但冻结，不再更新。
 
-让大模型（或 Claude / Cursor / OpenCode 这类 Agent）读取《植物大战僵尸2 花园无尽》的战场，自己决定种什么、种哪一格、什么时候铲掉重种，并自动打完一关。
+让大模型deepseek读取《植物大战僵尸2 花园无尽》的战场，自己决定种什么、种哪一格、什么时候铲掉重种，并自动打完一关。
 
 > 非官方社区项目，与 EA / PopCap / PvZ2 Gardendless 作者无关。仅用于单机体验，请勿用于联机或排行榜。
 
@@ -64,17 +64,19 @@
 
 | 文件 | 内容 | 适合 |
 | --- | --- | --- |
-| `PvZAI-LLM-Agent-Bundle-v0.1.29.zip` | 模组 ZIP + 启动器 + MCP Server + 配置脚本 + 安装说明 | 第一次用，推荐 |
+| `PvZAI-LLM-Agent-Bundle-v0.4.13.zip` | 模组 ZIP + 启动器 + MCP Server + 配置脚本 + 安装说明 | 第一次用，推荐 |
 | `pvz-llm-agent.zip` | 只有 GP-Next 模组（`pack.json` + `scripts/main.js`），**不含启动器** | 已经会装 GP-Next 模组 |
 
 ---
 
 ## 安装模组
 
+> **重要：必须用 `PvZAI_Launcher.exe` 启动游戏。** 手动把 ZIP 导入 GP-Next 用不了；启动器负责装模组、解 CSP、开 9222 和本地代理，缺一个 AI 就连不上。
+
 ### 方式 A：发布包（推荐）
 
 1. **完全退出游戏**（不是最小化）。
-2. 解压 `PvZAI-LLM-Agent-Bundle-v0.1.29.zip`（整个文件夹，别只拿一个 exe）。
+2. 解压 `PvZAI-LLM-Agent-Bundle-v0.4.13.zip`（整个文件夹，别只拿一个 exe）。
 3. 双击 `PvZAI_Launcher.exe`。
    - 自动把 `pvz-llm-agent.zip` 装进 GP-Next 并启用（写 `installed/<digest>` + `configuration-state.json`）；
    - 带 9222 调试端口启动游戏；
@@ -84,17 +86,17 @@
 5. 游戏里按 **F9** → **实验室 → JS Modding** 打开；进入 **模组**，确认 **PvZ LLM Agent** 已勾选，按提示 **应用 / 重启**。
 6. 进入任意关卡，右上角出现 **PVZ · AI 指挥** 浮窗，顶部显示「启动器已连接」即安装成功。
 
-### 方式 B：手动导入模组（已有 GP-Next）
+### 方式 B：手动导入模组（不推荐，实际用不了）
+
+> **手动导入 ZIP 不能直接使用。** 必须用发布包里的 `PvZAI_Launcher.exe` 启动游戏；只导入 ZIP 拿不到 CSP 绕过、9222 调试端口和本地代理，内置模型模式会 `Failed to fetch`，MCP 模式也连不上 9222。下面步骤只用于排查/开发参考。
 
 1. 下载 `pvz-llm-agent.zip`（不要解压成散文件）。
 2. 游戏里按 **F9** → **实验室 → JS Modding**，按提示确认风险并打开。
 3. 进入 **模组 → 导入 ZIP**，选择 `pvz-llm-agent.zip`。
 4. 勾选 **PvZ LLM Agent**，保存并 **应用 / 重启**。
 5. 首次导入含脚本的模组会要求**确认信任**；更新版本后脚本内容变化，也可能需要重新确认。
-6. 进关卡，右上角出现浮窗。
+6. 进关卡，右上角出现浮窗，但会提示「必须用启动器启动游戏」。
 
-> 手动导入方式不会解除 CSP。内置模型模式如果报 `Failed to fetch` / `CSP 阻止`，请改用发布包启动器。模组加载后会显示琥珀色「未检测到启动器」提示卡，点开就是启动器用法。
->
 > GP-Next 的模组 ZIP 只认 `pack.json` 和 `scripts/`，不会执行 EXE，所以启动器没法塞进模组包；它必须作为发布包里的独立文件存在。
 
 ### 方式 C：源码 / Node 用户
@@ -330,7 +332,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:an
 
 ## 更新日志
 
-当前版本：**模组 0.1.29 + 启动器 1.0.1**（大肥鱼桌宠 + 图标化配置页 + 数据完整性/能量豆策略）。
+当前版本：**版本 0.4.13 + 启动器 1.0.1**（大肥鱼桌宠 + 图标化配置页 + 数据完整性/能量豆策略）。
 
 > v0.2.x / v0.3.x 的旧发布（`pvz-ai-agent-mod` 时代）已归档为 Pre-release，只作存档，不再更新；下载请用 [v0.4.13+](https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/latest)。
 

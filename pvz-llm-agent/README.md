@@ -84,7 +84,7 @@ pvz-llm-agent/
 
 ```text
 PvZAI_Launcher.exe    启动器：装模组 + 开 9222 + 解 CSP + 本地代理 8787
-pvz-llm-agent.zip     模组本体，也可以手动导入
+pvz-llm-agent.zip     模组本体（不要手动导入，必须由启动器安装/启动）
 配置MCP.bat           一键写 MCP 客户端配置（需要 Node.js 22+）
 mcp/ + tools/         MCP Server 与它依赖的工具模块
 安装说明.txt           玩家向的中文步骤说明
@@ -92,6 +92,8 @@ MCP工具契约.md         16 个 pvz_* 工具的参数/返回值/错误码
 ```
 
 双击 `PvZAI_Launcher.exe` 即可，细节见 `安装说明.txt`。
+
+> **手动导入 ZIP 用不了：必须用 `PvZAI_Launcher.exe` 启动游戏。** 只导入 ZIP 拿不到 CSP 绕过、9222 和本地代理，AI 连不上。
 
 自己打这个包：
 
@@ -116,7 +118,7 @@ npm run pack
 3. 用 **`PvZAI_Launcher.exe`**（或 `启动游戏-AI修复.bat`）启动游戏：
    - 游戏内浮窗模式需要启动器解除 WebView2 CSP，否则模型请求会 `Failed to fetch`；
    - MCP 模式只需要启动器打开 9222 调试端口。
-   - 浮窗顶部会显示「启动器已连接」；手动导入后直接开游戏则显示「未检测到启动器」，点开有用法。
+   - 浮窗顶部会显示「启动器已连接」；手动导入后直接开游戏会显示「必须用启动器启动游戏」，AI 用不了。
 4. 不要在同一个游戏里同时启用旧「AI 草坪指挥官」或旧 `pvz-agent`，会抢操作。
 
 ---
