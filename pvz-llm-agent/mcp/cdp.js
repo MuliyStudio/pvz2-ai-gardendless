@@ -174,5 +174,9 @@ export function createCdpBridge({ port = 9222, globalName = 'PvzLlm', timeoutMs 
     collect: () => call('collect'),
     moveCart: (cart, dir) => call('moveCart', [cart, dir]),
     resume: () => call('resume'),
+    forecast: () => call('forecast'),
+    getLevelMemory: (k) => call('getLevelMemory', [k]),
+    listLevelMemory: (l) => call('listLevelMemory', [l]),
+    setLevelNote: (n) => call('setLevelNote', [n]),
   };
 }

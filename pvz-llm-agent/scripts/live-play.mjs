@@ -32,6 +32,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const bridge = createCdpBridge({ port: PORT });
 const report = { at: new Date().toISOString(), seconds: SECONDS, start: START, samples: [], errors: [], ok: false };
 
+// 从决策日志里抽出每轮的模型/工具耗时（agent 每轮都会写一条“轮 N 耗时：模型 Xms · 工具 Yms”）。
+function parseTimings(text) {
+  const out = [];
+  for (const m of String(text || '').matchAll(/轮\s*(\d+)\s*耗时：模型\s*(\d+)ms\s*·\s*工具\s*(\d+)ms/g)) {
+    out.push({ step: Number(m[1]), modelMs: Number(m[2]), toolMs: Number(m[3]) });
+  }
+  return out;
+}
+
 if (BYPASS_CSP) {
   console.log('[live-play] 先解除 CSP 并重载页面（会回到主菜单）...');
   try {
@@ -123,6 +132,9 @@ try {
       eventsPending: eventStatus && eventStatus.pending,
       running: agent && agent.running,
       toolCalls: agent && agent.stats && agent.stats.toolCalls,
+      plan: agent && agent.plan ? agent.plan : null,
+      timings: parseTimings(agent && agent.logText).slice(-3),
+      guardCodes: agent && agent.codes ? agent.codes : null,
       errors: agent && agent.ui && agent.ui.lastError ? [agent.ui.lastError] : [],
     };
     report.samples.push(sample);

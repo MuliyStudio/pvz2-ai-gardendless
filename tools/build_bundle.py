@@ -41,6 +41,10 @@ CSC_REFS = ["System.dll", "System.Core.dll", "System.Windows.Forms.dll",
 MCP_FILES = ["mcp/server.mjs", "mcp/cdp.js", "mcp/protocol.js"]
 TOOL_FILES = ["tools/definitions.js", "tools/errors.js", "tools/router.js",
               "tools/wait.js", "tools/format.js"]
+# tools/router.js 会 import 这两个 bridge 模块；mechanics 再依赖 knowledge/tags + worlds。
+# 漏掉它们时 MCP 模式会在启动阶段 ERR_MODULE_NOT_FOUND（游戏内 bundle 不受影响）。
+BRIDGE_FILES = ["bridge/plan.js", "bridge/mechanics.js"]
+KNOWLEDGE_FILES = ["knowledge/tags.js", "knowledge/worlds.js"]
 
 args = set(sys.argv[1:])
 
@@ -77,12 +81,12 @@ def build_launcher(target):
     if "--skip-exe" in args:
         if target.exists():
             log("      复用已编译的启动器：%s" % target)
-            return
+            return target
         old = ROOT / "PvZAI-发布包" / "PvZAI_Launcher.exe"
         if old.exists():
             shutil.copy2(old, target)
             log("      复用旧启动器：%s" % old)
-            return
+            return target
         raise SystemExit("--skip-exe 但找不到可复用的 PvZAI_Launcher.exe")
 
     csc = next((p for p in CSC_CANDIDATES if p.exists()), None)
@@ -101,10 +105,19 @@ def build_launcher(target):
                *["/r:" + r for r in CSC_REFS],
                str(src)]
         subprocess.run(cmd, check=True, cwd=str(work))
-        shutil.copy2(out_exe, target)
+        try:
+            shutil.copy2(out_exe, target)
+            staged = target
+        except PermissionError:
+            # 启动器正在运行（或被杀软占用）时不能覆盖 dist 里的 exe；写到旁边的新文件，
+            # assemble 会从这个文件复制到发布包目录，不影响正在运行的游戏。
+            staged = target.with_name(target.stem + "-new" + target.suffix)
+            shutil.copy2(out_exe, staged)
+            log("      ! dist 里的启动器被占用，暂存为 %s" % staged.name)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    log("      -> PvZAI_Launcher.exe (%d 字节)" % target.stat().st_size)
+    log("      -> %s (%d 字节)" % (staged.name, staged.stat().st_size))
+    return staged
 
 
 def to_crlf(path):
@@ -132,20 +145,25 @@ def clean_out():
             log("      ! 跳过被占用的文件：%s" % path.name)
 
 
-def assemble(version, uuid, name):
+def assemble(version, uuid, name, staged_exe):
     log("[3/4] 组装发布包目录 ...")
     clean_out()
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "mcp").mkdir(exist_ok=True)
     (OUT / "tools").mkdir(exist_ok=True)
+    (OUT / "bridge").mkdir(exist_ok=True)
+    (OUT / "knowledge").mkdir(exist_ok=True)
 
     shutil.copy2(AGENT / "pvz-llm-agent.zip", OUT / "pvz-llm-agent.zip")
     for rel in MCP_FILES:
         shutil.copy2(AGENT / rel, OUT / rel)
     for rel in TOOL_FILES:
         shutil.copy2(AGENT / rel, OUT / rel)
+    for rel in BRIDGE_FILES:
+        shutil.copy2(AGENT / rel, OUT / rel)
+    for rel in KNOWLEDGE_FILES:
+        shutil.copy2(AGENT / rel, OUT / rel)
     shutil.copy2(ROOT / "tools" / "install_mcp_config.mjs", OUT / "tools" / "install_mcp_config.mjs")
-    staged_exe = DIST / "PvZAI_Launcher.exe"
     target_exe = OUT / "PvZAI_Launcher.exe"
     if staged_exe.exists():
         try:
@@ -209,8 +227,8 @@ def main():
         raise SystemExit("--skip-mod 但没有 pvz-llm-agent.zip，先跑一次完整构建")
 
     exe = DIST / "PvZAI_Launcher.exe"
-    build_launcher(exe)
-    assemble(version, uuid, name)
+    exe = build_launcher(exe)
+    assemble(version, uuid, name, exe)
     make_zip(version)
 
 

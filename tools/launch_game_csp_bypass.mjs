@@ -20,6 +20,8 @@ import path from 'node:path';
 
 const CDP_PORT = 9222;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// 让游戏内浮窗知道这次是"带 CSP 绕过的启动"，不再提示用启动器。
+const LAUNCHER_MARK = "window.__PVZAI_LAUNCHER__='node-csp';";
 
 function log(...args) {
   console.log('[CSP修复]', ...args);
@@ -124,9 +126,11 @@ async function ensureBypass(stateRef) {
     try { stateRef.current?.ws?.close(); } catch { /* ignore */ }
     stateRef.current = await connect(page);
     await stateRef.current.send('Page.enable');
+    try { await stateRef.current.send('Page.addScriptToEvaluateOnNewDocument', { source: LAUNCHER_MARK }); } catch { /* ignore */ }
     log('已连接游戏页面：' + (page.title || page.url));
   }
   await stateRef.current.send('Page.setBypassCSP', { enabled: true });
+  try { await stateRef.current.send('Runtime.evaluate', { expression: LAUNCHER_MARK }); } catch { /* ignore */ }
   return true;
 }
 

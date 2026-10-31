@@ -24,3 +24,8 @@ dist/
 __pycache__/
 tools/.live_probe.js
 pvz-llm-agent/pvz-llm-agent.zip
+
+# 本地调试脚本 / 采样
+tools/_*
+pvz-llm-agent/tools/_*
+pvz-llm-agent/live-watch-*.json

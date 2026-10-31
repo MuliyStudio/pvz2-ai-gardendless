@@ -1,18 +1,23 @@
-/**
- * 游戏内入口：bridge + 工具 router + LLM 客户端 + 浮窗。
- */
 import { createBridge, BRIDGE_VERSION } from '../bridge/api.js';
 import { createToolRouter } from '../tools/router.js';
 import { createLlmAgent } from './agent.js';
 import { createInGameUI } from './ui.js';
 
-const AGENT_VERSION = '0.1.10';
+/**
+ * 游戏内入口：bridge + 工具 router + LLM 客户端 + 浮窗。
+ *
+ * 版本号只有一个来源：bridge/api.js 的 BRIDGE_VERSION。
+ * （以前 setup/agent/api 各写一份，改版本总会漏一处，浮窗和 health 对不上。）
+ */
+
+const AGENT_VERSION = BRIDGE_VERSION;
 
 export function setupInGame(ctx) {
   const A = typeof window !== 'undefined' ? window : globalThis;
   const bridge = createBridge(ctx);
-  const router = createToolRouter({ bridge, version: AGENT_VERSION });
-  const agent = createLlmAgent({ router, version: AGENT_VERSION, cfg: { stream: true } });
+  const latency = bridge.latency;
+  const router = createToolRouter({ bridge, version: AGENT_VERSION, latency });
+  const agent = createLlmAgent({ router, version: AGENT_VERSION, latency, cfg: { stream: true } });
   let ui = null;
   try { ui = createInGameUI({ agent, bridge }); } catch (e) {
     try { console.error('[pvz-llm-agent] UI 初始化失败', e); } catch { /* ignore */ }
@@ -52,3 +57,5 @@ export function setupInGame(ctx) {
   try { if (ctx && ctx.ui && ctx.ui.toast) ctx.ui.toast('PvZ LLM Agent 已加载 v' + AGENT_VERSION, 'success'); } catch { /* ignore */ }
   return api;
 }
+
+

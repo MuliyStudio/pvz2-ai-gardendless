@@ -4,6 +4,9 @@
  * 这里只有数据：植物数值、僵尸数值、护甲、昼夜、关卡脚本、图鉴文本。
  * 不判断"该不该选/该种哪里"，也不产生任何建议。
  */
+import { zombieTagsFrom } from '../knowledge/tags.js';
+import { zombieBehaviorFacts, zombieBehaviorLine } from '../knowledge/zombie-rules.js';
+import { damageModel, plantFoodFacts, usageFactsOf } from '../knowledge/plant-rules.js';
 
 const numOf = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
 const textOf = (v) => {
@@ -21,6 +24,16 @@ export const SHOT_BY_FAMILY = {
 
 export function shotOf(st) {
   if (!st) return null;
+  // 地刺类：伤害来自“僵尸走过这一格”，不是弹道；不能按直线/近战判断落点。
+  if (st.stepDamage) return { kind: 'ground', overObstacle: true, blockedByStraightBlocker: false };
+  // 光环/吸血/领域型：不发射弹道，也不该被墓碑当成“挡住弹道”。
+  if (st.damageType === 'drain' || (st.attack && st.attack.basis === 'dps' && !st.hasProjectile)) {
+    return { kind: 'aura', overObstacle: true, blockedByStraightBlocker: false };
+  }
+  // 点击瞄准型（冬青骑士/香蕉火箭炮…）：弹道由玩家指定落点，不是自动直线射手
+  if (st.usage && st.usage.manual && st.usage.aim === 'free_cell') {
+    return { kind: 'aimed', overObstacle: true, blockedByStraightBlocker: false };
+  }
   const fam = String(st.family || '');
   const rng = String(st.range || '');
   let kind = SHOT_BY_FAMILY[fam] || null;
@@ -29,6 +42,8 @@ export function shotOf(st) {
   else if (/接近|近战/.test(rng) && fam !== 'Fire') kind = 'melee';
   else if (fam === 'Explosive') kind = 'instant';
   if ((kind === 'none' || !kind) && st.attack && st.attack.dps) kind = 'straight';
+  // 有攻击但没有弹道 = 近身/领域攻击，不是直线弹道（冬青骑士这类）
+  if (kind === 'straight' && st.hasProjectile === false) kind = 'melee';
   if (!kind) return null;
   return {
     kind,
@@ -46,60 +61,12 @@ export const OBSTACLE_FACTS = {
   gold: { name: '金瓷砖', blocksPlanting: false, blocksStraightShot: false },
 };
 
-export function zombieTagsFrom(props, almanacText = '') {
-  const d = props || {};
-  const tags = [];
-  if (d.BarrelType) tags.push('rolling');
-  if (d.ChooseToSpawnOnNonDeckRows) tags.push('flying');
-  if (d.FlyingSpeed) tags.push('flying');
-  if (d.ParrotCooldown) tags.push('steal');
-  if (d.SmashDamage) tags.push('crush');
-  if (d.ZombieSort === 'Gargantuar') tags.push('gargantuar');
-  if (Array.isArray(d.StartingArmors) && d.StartingArmors.length) tags.push('armored');
-  if (d.LivesInDeepWater) tags.push('amphibious');
-  if (d.ImpType) tags.push('carries_imp');
-  if (/跳舞|换行|disco/i.test(almanacText)) tags.push('lane_switch');
-  if (d.SpeedUpWhenEatPlants) tags.push('rush');
-  if (d.StealPlant) tags.push('steal');
-  if (d.HypnotizeByPlantFood) tags.push('hypnotizable');
-  return [...new Set(tags)];
-}
 
-/** 把图鉴文本里的"用法"抽成结构化事实（activation / area / needs）。 */
-const ACTIVATION_RULES = [
-  [/点击消耗阳光|消耗阳光发射|花费阳光/, 'click_sun'],
-  [/点击后|点击发射|点击向前|点击冻结|点击选择一格|需要点击/, 'click'],
-  [/必须种植在墓碑|种植在墓碑上/, 'on_tomb'],
-  [/种植在冰块上|融化这?块?冰块/, 'on_ice'],
-  [/被啃食|吃掉后|被吃掉后|吃下后/, 'contact'],
-];
-const AREA_RULES = [
-  [/3x3|3×3|周围|范围(内|中)/, 'aoe3x3'],
-  [/一整行|整行|本行所有/, 'row'],
-  [/三行|向三行|三行僵尸/, 'multi_lane'],
-  [/本行|身前|走过的僵尸/, 'lane'],
-];
-const NEED_RULES = [
-  [/墓碑/, 'tomb'],
-  [/冰块/, 'ice'],
-  [/水面|水中|两栖/, 'water'],
-  [/空中|飞天花盆/, 'pot'],
-];
-
-export function usageFacts(stats) {
-  const text = [stats && stats.brief, ...((stats && stats.special) || [])].filter(Boolean).join(' ');
-  const activation = (ACTIVATION_RULES.find(([re]) => re.test(text)) || [null, 'auto'])[1];
-  const area = (AREA_RULES.find(([re]) => re.test(text)) || [null, 'single'])[1];
-  const needs = NEED_RULES.filter(([re]) => re.test(text)).map(([, n]) => n);
-  return {
-    activation,
-    area,
-    needs,
-    manual: activation === 'click' || activation === 'click_sun',
-    onlyTomb: activation === 'on_tomb',
-    onlyIce: activation === 'on_ice',
-    contact: activation === 'contact',
-  };
+/** 把图鉴文本里的"用法"抽成结构化事实（规则表在 knowledge/plant-rules.js）。 */
+export function usageFacts(st) {
+  if (!st) return usageFactsOf({});
+  const text = [st.brief, st.introduction, ...((st.special) || [])].filter(Boolean).join(' ');
+  return usageFactsOf({ text, family: st.family, range: st.range, props: st.props });
 }
 
 let assetBag = null;
@@ -117,6 +84,8 @@ function readAssets(getCc) {
       'PlantProps', 'PlantAlmanac', 'PlantTypes', 'PlantFeatures',
       'ZombieProps', 'ZombieAlmanac', 'ZombieTypes', 'ZombieFeatures',
       'ArmorProps', 'LawnProps', 'TombstoneProps',
+      // 弹道数据：毒伤/真伤（SupressArmorProtection）只在这里，植物属性里没有。
+      'ProjectileProps', 'ProjectileTypes',
     ];
     assets.forEach((a) => {
       if (!a || !a.json) return;
@@ -184,6 +153,113 @@ function almanacFacts(bag, kind, type) {
   };
 }
 
+/**
+ * 弹道数据：ProjectileProps/ProjectileTypes → alias→objdata。
+ * 植物的 PeaType/SporeType/CabbageType 等直接引用这些 alias；毒伤与真伤只在这里。
+ */
+let projCacheBag = null;
+let projCacheMap = null;
+function projectileMap(bag) {
+  if (!bag) return new Map();
+  if (projCacheBag === bag && projCacheMap) return projCacheMap;
+  const map = new Map();
+  for (const o of (bag.ProjectileProps && bag.ProjectileProps.objects) || []) {
+    const alias = (o.aliases || [])[0];
+    if (alias) map.set(alias, o.objdata || {});
+  }
+  for (const o of (bag.ProjectileTypes && bag.ProjectileTypes.objects) || []) {
+    const alias = (o.aliases || [])[0];
+    if (!alias || map.has(alias)) continue;
+    const props = o.objdata && o.objdata.Props;
+    const m = typeof props === 'string' ? /RTID\(([^@()]+)@/.exec(props) : null;
+    const data = m ? map.get(m[1]) : null;
+    if (data) map.set(alias, data);
+  }
+  projCacheBag = bag;
+  projCacheMap = map;
+  return map;
+}
+
+function projectilesOf(bag, d) {
+  const map = projectileMap(bag);
+  const out = [];
+  const seen = new Set();
+  const take = (v) => {
+    if (typeof v !== 'string' || seen.has(v)) return;
+    const data = map.get(v);
+    if (!data) return;
+    seen.add(v);
+    out.push(data);
+  };
+  for (const [k, v] of Object.entries(d || {})) {
+    // 植物食用的强化弹道（PeaTypePlantfood 等）不是普通攻击，别把它的毒伤/伤害算进 dps。
+    if (/plantfood/i.test(k)) continue;
+    if (Array.isArray(v)) for (const x of v) take(x);
+    else take(v);
+  }
+  return out;
+}
+
+/**
+ * 毒伤事实：PoisonStacked / Poison / PoisonDPS 三种写法都存在。
+ * 返回每层 dps、持续时间、层数、总伤害；不做“该不该带”的判断。
+ */
+function poisonFacts(d, projectiles) {
+  const cands = [];
+  const take = (src) => {
+    if (!src || typeof src !== 'object') return;
+    const stacked = src.PoisonStacked;
+    if (stacked) cands.push({ dps: numOf(stacked.DPS), duration: numOf(stacked.Duration), stacks: numOf(stacked.Stacks) || 1 });
+    const poison = src.Poison;
+    if (poison) cands.push({ dps: numOf(poison.DPS), duration: numOf(poison.Duration), stacks: numOf(poison.Stacks) || 1 });
+    if (numOf(src.PoisonDPS) > 0) {
+      cands.push({ dps: numOf(src.PoisonDPS), duration: numOf(src.PoisonDuration), stacks: numOf(src.PoisonStacks) || 1 });
+    }
+  };
+  take(d);
+  for (const p of projectiles || []) take(p);
+  const valid = cands.filter((c) => Number(c.dps) > 0);
+  if (!valid.length) return null;
+  const dps = Math.max(...valid.map((c) => Number(c.dps)));
+  const duration = Math.max(...valid.map((c) => Number(c.duration) || 0));
+  const stacks = Math.max(...valid.map((c) => Number(c.stacks) || 1));
+  const slowSrc = [d, ...(projectiles || [])]
+    .map((s) => s && s.ZombieSpeedStacked)
+    .find((s) => s && numOf(s.SpeedMult) != null) || null;
+  return {
+    dps: Math.round(dps * 10) / 10,
+    duration,
+    stacks,
+    total: Math.round(dps * duration * stacks * 10) / 10,
+    slow: slowSrc ? { speedMult: numOf(slowSrc.SpeedMult), duration: numOf(slowSrc.Duration) } : null,
+  };
+}
+
+// 把图鉴里的“接触/接近/前后/N 格”转成可算的列差（格）。远程/整行返回 null。
+function reachOf(family, range) {
+  const rng = String(range || '');
+  if (/接触/.test(rng)) return 0;
+  if (/接近|前后|3x3/.test(rng)) return 1;
+  const m = /(\d+)\s*格/.exec(rng);
+  if (m) return Math.max(0, Math.min(6, Number(m[1])));
+  if (String(family) === 'Melee') return 1;
+  return null;
+}
+
+// 自动收集图鉴/属性里所有标量字段：新植物/新僵尸不用改代码就能把原始数值带给模型。
+function scalarProps(d) {
+  const out = {};
+  if (!d || typeof d !== 'object') return out;
+  let n = 0;
+  for (const [k, v] of Object.entries(d)) {
+    if (v == null) continue;
+    if (typeof v === 'number' || typeof v === 'boolean') { out[k] = v; n++; }
+    else if (typeof v === 'string') { out[k] = v.slice(0, 160); n++; }
+    if (n >= 48) break;
+  }
+  return out;
+}
+
 export function createStatsReader(getCc) {
   const plantCache = new Map();
   const zombieCache = new Map();
@@ -209,15 +285,38 @@ export function createStatsReader(getCc) {
     const rec = firstObj(b, 'PlantProps', base) || firstObj(b, 'PlantProps', type);
     if (!rec) return null;
     const d = rec.objdata || {};
+    // 弹道里的毒伤/真伤：植物属性本身不写，只在 PeaType/SporeType 指向的 ProjectileProps 里。
+    const projectiles = projectilesOf(b, d);
+    const poison = poisonFacts(d, projectiles);
+    // 直接弹道的真伤（SupressArmorProtection）与毒伤是两件事：
+    // 毒伤持续伤害打本体；普通豌豆本身仍先打护甲。
+    const projectileTrue = projectiles.some((p) => p.SupressArmorProtection === true);
     const alm = almanacFacts(b, 'plant', type);
     const el = alm.elements.find((e) => e.type === 'RANGE');
     const range = (el && el.sort) || null;
+    const areaEl = alm.elements.find((e) => e.type === 'AREA');
+    const area = (areaEl && areaEl.sort) || null;
     const dmgAlm = (() => {
       const de = alm.elements.find((e) => e.type === 'DAMAGE');
       return de && Number.isFinite(Number(de.value)) ? Number(de.value) : null;
     })();
-    const dmg = numOf(d.Damage) != null ? numOf(d.Damage) : dmgAlm;
-    const interval = numOf(d.AttackInterval) || numOf(d.ThrowInterval) || numOf(d.ShootInterval) || null;
+    const pfAlm = (() => {
+      const pf = alm.elements.find((e) => e.type === 'PLANTFOOD');
+      return (pf && pf.sort) ? String(pf.sort) : null;
+    })();
+    const fullText = [alm.brief, alm.introduction, ...(alm.special || []).map((x) => x.text || '')]
+      .filter(Boolean).join(' ');
+
+    // 伤害模型：字段族规则表（knowledge/plant-rules.js）。
+    // 没有间隔的伤害归到 burst，不再让「樱桃炸弹没有伤害值」发生。
+    const dm = damageModel(d, {
+      family: d.Family, text: fullText, poison, projectileTrue,
+      hasProjectile: projectiles.length > 0, almanacDmg: dmgAlm,
+    });
+
+    // 土豆雷/地雷类：出土/启动时间。不是瞬爆，必须提前埋。
+    const armTimeSec = numOf(d.ChargeTime) != null ? numOf(d.ChargeTime)
+      : (numOf(d.ArmTime) != null ? numOf(d.ArmTime) : (numOf(d.ExplodeDelay) || 0));
     const sunValue = numOf(d.SunValue);
     const list = Array.isArray(d.SunValueList) ? d.SunValueList.map(numOf).filter((v) => v > 0) : null;
     const prodDay = numOf(d.ProduceInterval);
@@ -225,7 +324,35 @@ export function createStatsReader(getCc) {
     const stages = list && list.length ? list : (sunValue ? [sunValue] : []);
     const rate = (vals, iv) => (iv > 0 && vals.length ? vals.map((v) => Math.round((v / iv) * 1000) / 1000) : null);
     const cost = numOf(d.SunCost);
+    const atkText = [alm.brief, ...(alm.special || []).map((x) => x.text || '')].join(' ');
+    // 地刺类：伤害只作用于“走过这一格”的僵尸（图鉴 AREA=本格 / 不会被啃食）。
+    const notEaten = /不会被僵尸啃|can't be eaten/i.test(atkText);
+    const stepDamage = !!((dm.attack || dm.burst) && (notEaten || (area && /本格|Tile/i.test(String(area)))));
+    const pierceCount = numOf(d.PierceCount);
+    const targets = pierceCount != null
+      ? Math.max(1, pierceCount)
+      : (/多重打击|三个目标|3\s*个目标/.test(`${range || ''} ${atkText}`) ? 3 : 1);
+    const hitsPerTarget = targets > 1 && /各两次|两次|twice/i.test(atkText) ? 2 : 1;
+    const unitDps = dm.attack ? Number(dm.attack.dps) || 0 : 0;
+    const attack = dm.attack ? {
+      ...dm.attack,
+      pierceCount: pierceCount != null ? pierceCount : null,
+      targets,
+      hitsPerTarget,
+      multiDps: Math.round(unitDps * targets * hitsPerTarget * 10) / 10,
+      // 攻击本身是否吃护甲：drain/true 才算；毒伤是“弹道打护甲 + 毒打本体”。
+      ignoresArmor: dm.damageType === 'drain' || dm.damageType === 'true',
+      trueDamage: dm.damageType === 'drain' || dm.damageType === 'true',
+      damageType: ['drain', 'true'].includes(dm.damageType) ? dm.damageType : 'normal',
+    } : null;
+    const burst = dm.burst ? {
+      ...dm.burst,
+      area: area || null,
+      targets,
+    } : null;
     const names = featureName(b, 'plant', type);
+    const poisonDps = poison ? Number(poison.dps) || 0 : 0;
+    const effectiveDps = Math.round((unitDps + poisonDps) * 10) / 10;
     const st = {
       type,
       name: (names && names.zh) || type,
@@ -233,23 +360,43 @@ export function createStatsReader(getCc) {
       cost,
       cd: numOf(d.Cooldown),
       hp: numOf(d.Toughness),
+      hpMax: numOf(d.MaxToughness) || numOf(d.Toughness),
       family: d.Family || null,
       range,
+      reach: reachOf(d.Family || null, range),
       brief: alm.brief,
       introduction: alm.introduction,
       special: alm.special.map((x) => `${x.name || '特点'}：${x.text}`),
       weaknesses: alm.weaknesses,
-      attack: (dmg != null && interval) ? { dmg, interval, dps: Math.round((dmg / interval) * 10) / 10 } : null,
+      attack,
+      burst,
+      effectiveDps: effectiveDps > 0 ? effectiveDps : null,
+      area,
+      stepDamage,
+      poison,
+      hasProjectile: projectiles.length > 0,
+      // 伤害与护甲：type 给模型看语义，armorState=unknown 表示“没证据，别当成 false”
+      damageType: dm.damageType,
+      ignoresArmor: dm.ignoresArmor,
+      trueDamage: dm.ignoresArmor,
+      armorState: dm.armorState,
+      armorNote: dm.armorState === 'unknown' ? '没有字段能证明它是否无视护甲，按普通伤害处理' : undefined,
+      damageFields: dm.fields,
+      armTimeSec: armTimeSec || 0,
       splash: numOf(d.SplashDamage) || null,
-      plantFood: numOf(d.PlantfoodDamage) || numOf(d.PlantfoodDamageNear) || null,
+      // 能量豆：结构化（kind/area/radius/total…）。没有专属效果才是 null。
+      plantFood: plantFoodFacts(d, {
+        family: d.Family, almanacArea: area, almanacRange: range, almanacPlantFood: pfAlm,
+      }),
       sun: stages.length ? {
         stages, interval: prodDay, intervalNight: prodNight,
         perSecDay: rate(stages, prodDay), perSecNight: rate(stages, prodNight),
         paybackSec: cost && rate(stages, prodNight) ? Math.round(cost / rate(stages, prodNight)[stages.length - 1]) : null,
       } : null,
     };
+    st.usage = usageFactsOf({ text: fullText, family: d.Family, range, props: d });
     st.shot = shotOf(st);
-    st.usage = usageFacts(st);
+    st.props = scalarProps(d);
     return st;
   }
 
@@ -274,10 +421,14 @@ export function createStatsReader(getCc) {
     const ids = Array.isArray(d.StartingArmors) ? d.StartingArmors : [];
     const armorDetail = ids.map((id) => ({ id, hp: (armorOf.get(id) || {}).hp || null, metal: !!(armorOf.get(id) || {}).metal, ice: !!(armorOf.get(id) || {}).ice }));
     const armorHp = armorDetail.reduce((s, a) => s + (a.hp || 0), 0);
+    const newspaperHp = numOf(d.NewspaperHealth) || 0;
+    const shieldHp = armorHp + newspaperHp;
     const hp = numOf(d.Toughness);
     const alm = almanacFacts(b, 'zombie', type);
     const almText = [alm.introduction, ...alm.special.map((x) => x.text)].filter(Boolean).join(' ');
     const names = featureName(b, 'zombie', type);
+    // 免疫/召唤/Boss 这类“怕什么、会放什么”的事实：按字段名归类，新僵尸自动带上
+    const behavior = zombieBehaviorFacts(d, { type });
     return {
       type,
       name: (names && names.zh) || type,
@@ -285,20 +436,35 @@ export function createStatsReader(getCc) {
       hp,
       armorDetail: armorDetail.length ? armorDetail : null,
       armorHp: armorHp || null,
-      ehp: hp != null ? hp + armorHp : null,
+      newspaperHp: newspaperHp || null,
+      ehp: hp != null ? hp + shieldHp : null,
       speed: numOf(d.WalkSPS),
       eatDps: numOf(d.EatDPS),
+      // 动态波用：WavePointCost = 这只占多少点数；Weight = 被抽中的权重
+      wavePointCost: numOf(d.WavePointCost),
+      weight: numOf(d.Weight),
       tags: zombieTagsFrom(d, almText),
       brief: alm.brief,
       introduction: alm.introduction,
       special: alm.special.map((x) => `${x.name || '特点'}：${x.text}`),
       weaknesses: alm.weaknesses,
+      props: scalarProps(d),
+      // 「怕什么 / 会放什么 / 是不是 Boss」——按字段族自动提取，新僵尸不用改代码
+      immunities: behavior.immunities,
+      spawns: behavior.spawns,
+      flags: behavior.flags,
+      boss: behavior.boss,
+      behaviorText: zombieBehaviorLine(behavior),
+      behaviorUnknown: behavior.unknownImmuneKeys,
       behaviors: {
         gazes: d.GazeDPS != null ? numOf(d.GazeDPS) : null,
         smashDamage: d.SmashDamage != null ? numOf(d.SmashDamage) : null,
         flyingSpeed: d.FlyingSpeed != null ? numOf(d.FlyingSpeed) : null,
         barrelType: d.BarrelType || null,
         impType: d.ImpType || null,
+        newspaperHp: newspaperHp || null,
+        enragedSpeedScale: numOf(d.EnragedSpeedScale),
+        enragedDamageScale: numOf(d.EnragedDamageScale),
         livesInDeepWater: d.LivesInDeepWater === true,
         speedUpWhenEatPlants: d.SpeedUpWhenEatPlants === true,
       },
@@ -328,51 +494,172 @@ export function createStatsReader(getCc) {
     return out;
   }
 
+  // RTID(foo@ZombieTypes) → foo
+  const codenameOfRTID = (v) => String(v == null ? '' : v).replace(/^RTID\(([^@()]+)@.*\)$/, '$1').trim() || null;
+
+  /**
+   * 把一个 wave 对象的 Zombies 数组折成 { counts, rowsHint }。
+   * Row 有值 = 这一只固定在某行（Row 1-5 → lane 0-4）；没有 Row = 生成时随机行。
+   */
+  function foldWaveZombies(list) {
+    const counts = {};
+    const rowsHint = [];
+    const detail = [];
+    for (const z of Array.isArray(list) ? list : []) {
+      const t = codenameOfRTID(z && z.Type);
+      if (!t) continue;
+      counts[t] = (counts[t] || 0) + 1;
+      const row = numOf(z && z.Row);
+      const lane = row == null ? null : row - 1;
+      if (lane != null) rowsHint.push({ type: t, lane });
+      detail.push({ type: t, lane, col: numOf(z && z.Column) });
+    }
+    return { counts, rowsHint, detail };
+  }
+
+  function seedBankPresets(objs) {
+    const out = [];
+    for (const o of objs) {
+      const cls = String((o && o.objclass) || '');
+      if (cls !== 'SeedBankProperties' && cls !== 'ConveyorSeedBankProperties') continue;
+      const decks = (o.objdata && o.objdata.CardDecks) || null;
+      if (!decks || typeof decks !== 'object') continue;
+      for (const [tier, list] of Object.entries(decks)) {
+        if (!Array.isArray(list)) continue;
+        for (const d of list) {
+          if (!d || !Array.isArray(d.Plants)) continue;
+          out.push({
+            tier, leader: numOf(d.Leader),
+            name: textOf(d.Name) || null,
+            plants: d.Plants.map((p) => String(p)),
+          });
+        }
+      }
+    }
+    return out;
+  }
+
   function levelScriptOf(lvl) {
     const objs = lvl && Array.isArray(lvl.currentLevelObjects) ? lvl.currentLevelObjects : [];
     if (!objs.length) return null;
     if (levelCache.has(objs)) return levelCache.get(objs);
-    const waves = [];
+    const waves = new Map();
     const modules = [];
     let waveCount = null;
     let flagInterval = null;
+    const manager = {
+      firstWaveSecs: null, hugeWaveDelay: null,
+      minNextHealth: null, maxNextHealth: null,
+      spendingPoints: null, spendingIncrement: null,
+    };
+    let dynamicRules = null;
     for (const o of objs) {
       const cls = String((o && o.objclass) || '');
       const alias = (o && o.aliases && o.aliases[0]) || '';
       const data = (o && o.objdata) || {};
       if (cls && !/^Wave/.test(cls)) modules.push({ cls, alias });
-      if (cls === 'WaveManagerProperties') { waveCount = numOf(data.WaveCount); flagInterval = numOf(data.FlagWaveInterval); continue; }
-      const m = /^Wave(\d+)$/.exec(alias);
-      if (!m || !Array.isArray(data.Zombies)) continue;
-      const counts = {};
-      const rowsHint = [];
-      for (const z of data.Zombies) {
-        const t = String((z && z.Type) || '').replace(/^RTID\(([^@()]+)@.*\)$/, '$1').trim();
-        if (!t) continue;
-        counts[t] = (counts[t] || 0) + 1;
-        const row = numOf(z && z.Row);
-        if (row != null) rowsHint.push({ type: t, lane: row - 1 });
+      if (cls === 'WaveManagerProperties') {
+        waveCount = numOf(data.WaveCount);
+        flagInterval = numOf(data.FlagWaveInterval);
+        manager.firstWaveSecs = numOf(data.ZombieCountdownFirstWaveSecs);
+        manager.hugeWaveDelay = numOf(data.ZombieCountdownHugeWaveDelay);
+        manager.minNextHealth = numOf(data.MinNextWaveHealthPercentage);
+        manager.maxNextHealth = numOf(data.MaxNextWaveHealthPercentage);
+        manager.spendingPoints = numOf(data.WaveSpendingPoints);
+        manager.spendingIncrement = numOf(data.WaveSpendingPointIncrement);
+        continue;
       }
-      waves.push({
-        n: Number(m[1]), zombies: counts,
-        total: Object.values(counts).reduce((a, b) => a + b, 0),
-        rowsHint, rowsAreHint: true,
-        extraFood: numOf(data.ExtraPlantFood) || null,
-      });
+      if (cls === 'WaveManagerModuleProperties') {
+        if (Array.isArray(data.DynamicZombies)) dynamicRules = data.DynamicZombies;
+        continue;
+      }
+      // 静态波 "Wave7"；动态生成出来的整波是 "Wave7DynamicZombies"
+      const m = /^Wave(\d+)(DynamicZombies)?$/.exec(alias);
+      if (!m || !Array.isArray(data.Zombies)) continue;
+      const n = Number(m[1]);
+      const cur = waves.get(n) || {
+        n, zombies: {}, total: 0, rowsHint: [], rowsAreHint: true,
+        extraFood: null, dynamicExtra: {}, dynamicZombies: {},
+      };
+      const folded = foldWaveZombies(data.Zombies);
+      for (const [t, c] of Object.entries(folded.counts)) {
+        cur.zombies[t] = (cur.zombies[t] || 0) + c;
+        cur.total += c;
+      }
+      cur.rowsHint.push(...folded.rowsHint);
+      if (m[2]) {
+        // 这一整波都是动态生成出来的
+        for (const [t, c] of Object.entries(folded.counts)) cur.dynamicZombies[t] = (cur.dynamicZombies[t] || 0) + c;
+      }
+      cur.extraFood = numOf(data.AdditionalPlantfood) || numOf(data.ExtraPlantFood) || cur.extraFood;
+      waves.set(n, cur);
     }
-    waves.sort((a, b) => a.n - b.n);
+    const waveList = [...waves.values()].sort((a, b) => a.n - b.n);
+
+    // 关卡原始 JSON（动态波是在副本上追加的）：用来分出「本局额外生成」的部分。
+    let staticWaves = null;
+    let assetName = null;
+    try {
+      const src = lvl && lvl.Level && lvl.Level.json;
+      if (src && Array.isArray(src.objects)) {
+        assetName = (lvl.Level.name || lvl.Level._name || null);
+        staticWaves = {};
+        for (const o of src.objects) {
+          const alias = (o && o.aliases && o.aliases[0]) || '';
+          const m = /^Wave(\d+)$/.exec(alias);
+          if (!m || !Array.isArray(o.objdata && o.objdata.Zombies)) continue;
+          const folded = foldWaveZombies(o.objdata.Zombies);
+          staticWaves[Number(m[1])] = folded.counts;
+        }
+      }
+    } catch { /* ignore */ }
+
+    const difficulty = numOf(lvl && lvl.difficulty);
+    const ruleIndex = difficulty == null ? null : difficulty;
+    const dynamicRule = (dynamicRules && ruleIndex != null && dynamicRules[ruleIndex]) || null;
+    const hasDynamicRule = !!(dynamicRule && dynamicRule.ZombiePool);
+
+    // 每波把静态/动态分开：dynamicExtra = 本局实际多出来的那几只（不是概率）
+    if (staticWaves) {
+      for (const w of waveList) {
+        const base = staticWaves[w.n] || {};
+        const extra = {};
+        for (const [t, c] of Object.entries(w.zombies)) {
+          const d = c - (base[t] || 0);
+          if (d > 0) extra[t] = d;
+        }
+        w.dynamicExtra = extra;
+      }
+    }
+
     const lanes = lvl && Array.isArray(lvl.onlyLanesForRandomSpawn) ? lvl.onlyLanesForRandomSpawn.map(Number) : null;
     const def = objs.find((o) => o && o.objclass === 'LevelDefinition');
     const sm = def && def.objdata ? def.objdata.StageModule : null;
     const mm = typeof sm === 'string' ? /RTID\(([^@()]+)@/.exec(sm) : null;
     const lawn = lawnFacts(mm ? mm[1] : null);
     const value = {
-      waveCount: waveCount || waves.length,
+      assetName,
+      waveCount: waveCount || waveList.length,
       flagInterval,
-      waves,
+      waves: waveList,
       lanePolicy: lanes ? { spawnLanes: lanes, random: lanes.length > 1 } : null,
       lawn,
       modules,
+      manager,
+      dynamic: {
+        rules: Array.isArray(dynamicRules) ? dynamicRules.length : 0,
+        difficulty,
+        ruleIndex,
+        active: hasDynamicRule,
+        rule: hasDynamicRule ? {
+          startingWave: numOf(dynamicRule.StartingWave),
+          startingPoints: numOf(dynamicRule.StartingPoints),
+          pointIncrement: numOf(dynamicRule.PointIncrementPerWave),
+          pool: (dynamicRule.ZombiePool || []).map(codenameOfRTID).filter(Boolean),
+        } : null,
+        suppressedWaves: (lvl && Array.isArray(lvl.SuppressedDynamicZombieWaves) ? lvl.SuppressedDynamicZombieWaves.map(Number) : []),
+      },
+      seedBank: { presets: seedBankPresets(objs) },
     };
     levelCache.set(objs, value);
     return value;

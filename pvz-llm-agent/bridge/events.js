@@ -5,7 +5,7 @@
 
 const keyOf = (e) => `${e.t}:${e.lane == null ? '' : e.lane}:${e.detail || ''}`;
 
-export function createEventStreamApi({ snapshot }) {
+export function createEventStreamApi({ snapshot, onLevelEnd = null, keyOf = null }) {
   const debounceMs = 2500;
   const queue = [];
   const lastAt = new Map();
@@ -13,6 +13,8 @@ export function createEventStreamApi({ snapshot }) {
   let dropped = 0;
   let timer = null;
   let interval = 100;
+  // 本次挑战的运行记录（跨快照累积，用于关卡结束后写总结）
+  let run = null;
 
   function emit(list, ev, now) {
     const k = keyOf(ev);
@@ -22,10 +24,130 @@ export function createEventStreamApi({ snapshot }) {
     list.push({ ...ev, at: new Date(now).toISOString() });
   }
 
+  const RUN_PHASES = new Set(['preparing', 'objective', 'running']);
+
+  function startRun(state, now) {
+    // 新一局开始：上一局的事件不该再出现在模型眼前（实测会让模型把旧波次当成本局）
+    queue.length = 0;
+    dropped = 0;
+    lastAt.clear();
+    run = {
+      key: keyOf ? keyOf(state) : null,
+      name: (state.level && state.level.name) || null,
+      startedAt: now,
+      deck: (state.deck || []).slice(),
+      waveCount: (state.level && state.level.waves) || null,
+      maxWave: (state.level && state.level.wave) || 0,
+      plantsLost: 0,
+      mowersLost: 0,
+      sunPeak: state.sun == null ? null : state.sun,
+      everRunning: false,
+    };
+  }
+
+  function trackRun(state, now) {
+    const phase = state.phase;
+    if (!RUN_PHASES.has(phase)) return;
+    const key = keyOf ? keyOf(state) : null;
+    if (!run || (key && run.key && key !== run.key)) startRun(state, now);
+    if (!run) return;
+    const deckNow = (state.deck || []).filter(Boolean);
+    if (deckNow.length > (run.deck || []).length) run.deck = deckNow.slice(0, 12);
+    if (phase === 'running') run.everRunning = true;
+    const w = (state.level && state.level.wave) || 0;
+    if (w > (run.maxWave || 0)) run.maxWave = w;
+    if (state.sun != null && (run.sunPeak == null || state.sun > run.sunPeak)) run.sunPeak = state.sun;
+    if (state.level && state.level.waves) run.waveCount = state.level.waves;
+  }
+
+  function finishRun(result, state, now) {
+    if (!run) return null;
+    // 失败那一波的现场快照：不是只记花，任何关卡都能据此复盘。
+    const recentEvents = queue.slice(-20);
+    // 这一局已经结束：队列里剩下的都是上一局的信号，清掉，避免带到下一局
+    queue.length = 0;
+    dropped = 0;
+    lastAt.clear();
+    // 赛后复盘的事实（不含打法建议）：哪一波、怎么结束、经济/损失/压力行
+    const lanes = (state && state.lanes) || [];
+    const pressure = lanes
+      .filter((l) => typeof l.gap === 'number' && l.gap > 0)
+      .sort((a, b) => b.gap - a.gap)
+      .slice(0, 3)
+      .map((l) => ({ lane: l.lane, gap: l.gap, lossIn: l.lossIn, dps: l.dps }));
+    const protect = (state && state.protectCells) || [];
+    const flowerLineCells = protect.filter((c) => c && c.source !== 'tile');
+    const flowersDead = flowerLineCells.filter((c) => c.dead).length;
+    const deadCells = protect.filter((c) => c && c.dead).map((c) => ({
+      lane: c.lane, column: c.column, source: c.source || null, tip: c.tip || null,
+    }));
+    const lastZombies = ((state && state.zombies) || []).slice(0, 16).map((z) => ({
+      type: z.type, name: z.name || null, lane: z.lane, column: z.column, tags: z.tags || [], ehp: z.ehp,
+    }));
+    const tasks = ((state && state.tasks) || []).map((t) => ({ tip: t.tip, failed: !!t.failed, completed: !!t.completed }));
+    const failureSnapshot = state && state.ok !== false ? {
+      phase: state.phase,
+      level: state.level || null,
+      world: state.world || null,
+      sun: state.sun != null ? state.sun : null,
+      plantFood: state.plantFood != null ? state.plantFood : null,
+      limits: state.limits || null,
+      prep: state.prep || null,
+      tasks,
+      objective: state.objective || null,
+      missionHints: state.missionHints || null,
+      protectCells: protect,
+      plants: (state.plants || []).slice(0, 60),
+      zombies: lastZombies,
+      lanes: state.lanes || null,
+      brief: state.brief || null,
+      changesSinceLast: state.changesSinceLast || null,
+      recentEvents,
+    } : null;
+    const review = {
+      result,
+      wave: (state && state.level && state.level.wave) || run.maxWave || null,
+      waveCount: (state && state.level && state.level.waves) || run.waveCount || null,
+      durationSec: Math.max(0, Math.round((now - run.startedAt) / 1000)),
+      sunPeak: run.sunPeak,
+      sunEnd: state && state.sun != null ? state.sun : null,
+      plantsLost: run.plantsLost,
+      mowersLost: run.mowersLost,
+      flowers: protect.length ? { total: protect.length, dead: flowersDead, deadKnown: flowerLineCells.length > 0, cells: deadCells } : null,
+      lastZombies,
+      pressure,
+      tasks,
+      deck: run.deck,
+      snapshot: failureSnapshot,
+    };
+    const info = {
+      key: run.key,
+      name: run.name,
+      result,
+      wave: review.wave,
+      waveCount: review.waveCount,
+      durationSec: review.durationSec,
+      deck: run.deck,
+      review,
+      facts: {
+        maxWave: run.maxWave || null,
+        plantsLost: run.plantsLost,
+        mowersLost: run.mowersLost,
+        sunPeak: run.sunPeak,
+        everRunning: run.everRunning,
+      },
+    };
+    run = null;
+    try { if (onLevelEnd) onLevelEnd(info); } catch { /* ignore */ }
+    return info;
+  }
+
   function push(state, now = Date.now()) {
     const out = [];
     if (!state || state.ok === false) { prev = state; return out; }
     if (!prev || prev.ok === false) { prev = state; return out; }
+
+    trackRun(state, now);
 
     const w1 = (prev.level && prev.level.wave) || 0;
     const w2 = (state.level && state.level.wave) || 0;
@@ -38,11 +160,13 @@ export function createEventStreamApi({ snapshot }) {
     for (const lane of state.lanes || []) {
       const before = (prev.lanes || []).find((l) => l.lane === lane.lane);
       if (before && before.mower !== false && lane.mower === false) {
+        if (run) run.mowersLost += 1;
         emit(out, { t: 'mower_lost', lane: lane.lane, detail: '该行失去推车（再漏一只就输）' }, now);
       }
     }
     for (const p of prev.plants || []) {
       if (!(state.plants || []).some((q) => q.lane === p.lane && q.column === p.column)) {
+        if (run) run.plantsLost += 1;
         emit(out, { t: 'plant_lost', lane: p.lane, detail: `${p.type} @c${p.column}` }, now);
       }
     }
@@ -82,6 +206,18 @@ export function createEventStreamApi({ snapshot }) {
     if (state.phase === 'won' && prev.phase !== 'won') emit(out, { t: 'level_won', detail: '关卡胜利' }, now);
     if (state.phase === 'lost' && prev.phase !== 'lost') emit(out, { t: 'level_lost', detail: '关卡失败' }, now);
 
+    // 关卡结束 → 写一条本关总结（不管输赢）；中途重开/退出也记，方便下次开局前看到。
+    if (state.phase === 'won' || state.phase === 'lost') {
+      finishRun(state.phase, state, now);
+    } else if (prev.phase === 'running' && state.phase === 'preparing') {
+      finishRun('restart', state, now);
+    } else if (prev.phase === 'running' && (state.phase === 'menu' || state.phase === 'worldmap')) {
+      // 有的关卡失败后直接回地图，来不及采样到 lost；用上一帧的关卡输赢标记补判。
+      const prevLevel = prev.level || {};
+      const result = prevLevel.lost ? 'lost' : (prevLevel.won ? 'won' : 'left');
+      finishRun(result, prev, now);
+    }
+
     prev = state;
     return out;
   }
@@ -118,11 +254,15 @@ export function createEventStreamApi({ snapshot }) {
   }
 
   function status() {
-    return { ok: true, interval, pending: queue.length, dropped, debounceMs };
+    return {
+      ok: true, interval, pending: queue.length, dropped, debounceMs,
+      run: run ? { key: run.key, wave: run.maxWave, plantsLost: run.plantsLost, mowersLost: run.mowersLost, running: run.everRunning } : null,
+    };
   }
 
   function reset() {
     prev = null;
+    run = null;
     lastAt.clear();
     queue.length = 0;
     dropped = 0;

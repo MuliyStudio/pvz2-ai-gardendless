@@ -49,7 +49,7 @@ export function stateLine(s) {
 }
 
 const ACTION_CN = {
-  plant: '种植', replace: '换植', shovel: '铲除', plant_food: '能量豆',
+  plant: '种植', replace: '换植', shovel: '铲除', plant_food: '能量豆', activate: '触发',
   move_cart: '移动矿车', resume: '继续', wait: '等待', restart: '重开本关',
   dismiss_objective: '关闭任务说明', collect: '收掉落物',
 };
@@ -66,6 +66,9 @@ export function formatAction(a) {
     ? ` 第${Number(a.lane) + 1}行 第${Number(a.column) + 1}列` : '';
   const who = a.plant ? ` ${a.plant}` : (a.card != null ? ` #${a.card}` : '');
   if (a.type === 'move_cart') return `${type} #${a.cart} ${a.direction || ''}`;
+  if (a.type === 'activate' && Number.isFinite(Number(a.targetLane)) && Number.isFinite(Number(a.targetColumn))) {
+    return `${type}${who}${pos} → 目标 第${Number(a.targetLane) + 1}行第${Number(a.targetColumn) + 1}列`;
+  }
   if (a.type === 'wait') return `${type} ${a.seconds == null ? '' : a.seconds + 's'}`;
   return `${type}${who}${pos}`.trim();
 }
@@ -80,8 +83,7 @@ export function formatToolCall(name, args) {
     case 'pvz_set_plan': return '记录计划';
     case 'pvz_choose_deck': return `选卡：${(a.cards || []).join('、') || '?'}${a.replace === false ? '（追加）' : '（替换）'}`;
     case 'pvz_start_level': return '开始战斗';
-    case 'pvz_act': return Array.isArray(a.actions) ? a.actions.map(formatAction).join('；') : '?';
-    case 'pvz_wait_until': return `等待：${a.until || '?'}`;
+    case 'pvz_act': return Array.isArray(a.actions) ? a.actions.map(formatAction).join('；') : '?';    case 'pvz_wait_until': return `等待：${a.until || '?'}`;
     case 'pvz_collect': return '收掉落物';
     case 'pvz_plant_food': return `能量豆 第${Number(a.lane) + 1}行 第${Number(a.column) + 1}列`;
     case 'pvz_move_cart': return `矿车 #${a.cart} ${a.direction || ''}`;
@@ -115,11 +117,12 @@ export function formatToolResult(name, r) {
   if (name === 'pvz_briefing') {
     if (r.ok === false) return `❌ ${r.code || ''} ${r.reason || ''}`.trim();
     const z = (r.zombies || []).map((x) => `${x.name}×${(r.waves || []).reduce((s, w) => s + ((w.zombies[x.type] || {}).count || 0), 0) || '?'}`).join('、');
+    const gaps = ((r.coverageGaps && r.coverageGaps.missing) || []).map((m) => m.capability);
     return [
       `${okMark} 简报：${r.level && r.level.name ? r.level.name : '本关'}｜卡槽 ${r.deck && r.deck.slots}｜起始阳光 ${n(r.startingSun)}`,
       `任务：${(r.missionHints || []).join('；') || '无文本'}`,
       `僵尸：${z || '未读到'}`,
-      `可用卡 ${(r.cards || []).length} 张｜波次 ${(r.waves || []).length}`,
+      `可用卡 ${(r.cards || []).length} 张｜波次 ${(r.waves || []).length}${gaps.length ? `｜能力缺口 ${gaps.join('/')}` : ''}`,
     ].join('\n');
   }
 
@@ -163,7 +166,9 @@ export function formatToolResult(name, r) {
   }
 
   if (name === 'pvz_set_plan') {
-    return r.ok ? `✅ 计划已保存${r.savedAt ? `（${r.savedAt}）` : ''}` : `❌ ${r.code || ''} ${r.reason || ''}`.trim();
+    if (!r.ok) return `❌ ${r.code || ''} ${r.reason || ''}`.trim();
+    const warns = Array.isArray(r.warnings) ? r.warnings : [];
+    return `✅ 计划已保存${r.savedAt ? `（${r.savedAt}）` : ''}${warns.length ? `｜${warns.length} 条审计提示，需要重写` : ''}`;
   }
 
   if (name === 'pvz_knowledge') {
@@ -214,6 +219,8 @@ export function formatPlan(plan) {
   if (!plan || typeof plan !== 'object') return '暂无计划';
   const lines = [];
   const asText = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
+  if (plan.text) lines.push(`摘要：${plan.text}`);
+  if (plan.goal) lines.push(`目标：${asText(plan.goal)}`);
   if (plan.style) lines.push(`风格：${asText(plan.style)}`);
   if (Array.isArray(plan.deck) && plan.deck.length) lines.push(`卡组：${plan.deck.join('、')}`);
   else if (plan.deck && typeof plan.deck === 'object') {
@@ -227,8 +234,27 @@ export function formatPlan(plan) {
   if (Array.isArray(plan.lanes)) {
     for (const l of plan.lanes) {
       if (typeof l === 'string') lines.push(`· ${l}`);
-      else if (l && typeof l === 'object') lines.push(`· L${(l.lane != null ? Number(l.lane) + 1 : '?')} ${l.role || ''} ${l.plan || l.notes || ''}`.trim());
+      else if (l && typeof l === 'object') {
+        const bits = [];
+        if (l.wall != null) bits.push(`墙 c${l.wall}`);
+        if (Array.isArray(l.output) && l.output.length) bits.push(`输出 c${l.output.join('/c')}`);
+        if (Array.isArray(l.econ) && l.econ.length) bits.push(`经济 c${l.econ.join('/c')}`);
+        if (l.plan || l.notes) bits.push(l.plan || l.notes);
+        lines.push(`· L${(l.lane != null ? Number(l.lane) + 1 : '?')} ${l.role || ''}${bits.length ? `：${bits.join('，')}` : ''}`.trim());
+      }
     }
+  }
+  if (Array.isArray(plan.counters) && plan.counters.length) {
+    lines.push('克制：' + plan.counters.map((c) => `${c.tag || c.threat || '?'}→${c.card || c.action || '?'}${c.lane != null ? `(L${Number(c.lane) + 1})` : ''}`).join(' / '));
+  }
+  if (Array.isArray(plan.phases) && plan.phases.length) {
+    lines.push('阶段：' + plan.phases.map((p) => `${p.id || '?'}${p.untilWave != null ? `≤${p.untilWave}波` : ''}${Array.isArray(p.actions) ? `：${p.actions.join('；')}` : ''}`).join(' / '));
+  }
+  if (Array.isArray(plan.triggers) && plan.triggers.length) {
+    lines.push('触发：' + plan.triggers.map((t) => `${t.when}→${asText(t.action)}`).join(' / '));
+  }
+  if (Array.isArray(plan.emergency) && plan.emergency.length) {
+    lines.push('应急：' + plan.emergency.map((e) => `${e.when || e.condition || '?'}→${asText(e.action)}`).join(' / '));
   }
   if (plan.thresholds && typeof plan.thresholds === 'object') {
     lines.push('阈值：' + Object.entries(plan.thresholds).map(([k, v]) => `${k}=${asText(v)}`).join(' / '));

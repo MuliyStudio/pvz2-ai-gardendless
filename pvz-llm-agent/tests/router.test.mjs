@@ -20,7 +20,7 @@ function teardown(bridge) {
 }
 
 test('工具契约：名字唯一、每个工具都有 inputSchema', () => {
-  assert.equal(TOOLS.length, 16);
+  assert.equal(TOOLS.length, 18);
   assert.equal(new Set(TOOL_NAMES).size, TOOLS.length);
   for (const t of TOOLS) {
     assert.ok(t.name.startsWith('pvz_'), t.name);
@@ -42,10 +42,57 @@ test('router: 选卡 / 种植（按 codename 解析）/ 状态', async () => {
     const act = await router.call('pvz_act', { actions: [{ type: 'plant', plant: 'sunflower', lane: 0, column: 0 }] });
     assert.equal(act.ok, true, JSON.stringify(act));
     assert.equal(act.results[0].card, 0);
+    assert.ok(act.state && act.state.ok !== false, 'pvz_act 要带回动作后的 state');
+    assert.equal(act.state.plants.length, 1);
+    assert.equal(act.state.board, undefined, '默认状态不带棋盘，省 token');
 
-    const state = await router.call('pvz_state', {});
+    const dup = await router.call('pvz_state', {});
+    assert.equal(dup.ok, true);
+    assert.equal(dup.duplicate, true, '刚 act 过，紧接着的 pvz_state 应去重');
+
+    const state = await router.call('pvz_state', { force: true });
     assert.equal(state.ok, true);
     assert.equal(state.plants.length, 1);
+    assert.equal(state.board, undefined, 'pvz_state 默认精简');
+    const full = await router.call('pvz_state', { full: true });
+    assert.ok(Array.isArray(full.board) && full.board.length === 5, 'full=true 返回完整棋盘');
+  } finally { teardown(bridge); }
+});
+
+test('router: 输出种在本行墙右侧返回 OUTPUT_IN_FRONT_OF_WALL', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    // fake-game 的 PlaceUIPlant 固定种 peashooter，这里直接放一株墙来构造场景
+    game.grid[2][4].addPlant('wallnut');
+    const out = await router.call('pvz_act', { actions: [{ type: 'plant', plant: 'peashooter', lane: 2, column: 5 }] });
+    assert.equal(out.results[0].ok, false, JSON.stringify(out.results[0]));
+    assert.equal(out.results[0].code, 'OUTPUT_IN_FRONT_OF_WALL');
+    assert.equal(out.results[0].wallColumn, 4);
+  } finally { teardown(bridge); }
+});
+
+test('router: 墙种在该行僵尸右侧时返回 WALL_TOO_LATE，并给左侧可种位', async () => {
+  const { bridge, router } = setup({ slots: 3, zombies: [{ type: 'tutorial', lane: 2, column: 5, health: 190 }] });
+  try {
+    const deck = await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    assert.equal(deck.ok, true, JSON.stringify(deck));
+    const r = await router.call('pvz_act', { actions: [{ type: 'plant', plant: 'wallnut', lane: 2, column: 6 }] });
+    assert.equal(r.results[0].ok, false, JSON.stringify(r.results[0]));
+    assert.equal(r.results[0].code, 'WALL_TOO_LATE');
+    assert.ok(r.results[0].suggestedColumns.length > 0);
+  } finally { teardown(bridge); }
+});
+
+test('router: 提前布阵关 start_level 不会被“已在 running”提前挡掉', async () => {
+  const { game, bridge, router } = setup({ slots: 3, preplant: true });
+  try {
+    const before = await router.call('pvz_state', {});
+    assert.equal(before.phase, 'running');
+    assert.equal(before.prep.mode, 'preplant');
+    const r = await router.call('pvz_start_level', {});
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(game.levelController.gameStarted, true);
   } finally { teardown(bridge); }
 });
 
@@ -98,7 +145,7 @@ test('router: health 带工具清单和版本', async () => {
   try {
     const h = await router.call('pvz_health', {});
     assert.equal(h.ok, true);
-    assert.equal(h.tools.length, 16);
+    assert.equal(h.tools.length, 18);
     assert.equal(h.namespace, 'pvz-llm-agent');
     assert.equal(h.serverVersion, '0.1.19');
   } finally { teardown(bridge); }
@@ -111,7 +158,11 @@ test('router: set_plan 保存并从 state 回显', async () => {
     const r = await router.call('pvz_set_plan', { plan });
     assert.equal(r.ok, true);
     const s = await router.call('pvz_state', {});
-    assert.deepEqual(s.plan, plan);
+    assert.equal(s.plan.style, '自定义');
+    assert.equal(s.plan.text, '自定义');
+    assert.equal(s.plan.schema, 'pvz-plan/v1');
+    assert.equal(s.plan.lanes[0].lane, 0);
+    assert.equal(s.plan.lanes[0].role, '输出');
   } finally { teardown(bridge); }
 });
 
@@ -213,15 +264,41 @@ test('router: pvz_restart 重开本关回到选卡阶段', async () => {
   } finally { teardown(bridge); }
 });
 
-test('router: 一批动作里同一张卡出现两次，自动等冷却后仍能种下', async () => {
+test('router: 一批动作里同卡重复且基础冷却 >3.5s 时，提前返回 BATCH_COOLDOWN', async () => {
   const { game, bridge, router } = setup({ slots: 3 });
   try {
     await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
     game.sun.CurrentValue = 300;
+    const r = await router.call('pvz_act', {
+      actions: [
+        { type: 'plant', plant: 'sunflower', lane: 0, column: 0 },
+        { type: 'plant', plant: 'sunflower', lane: 1, column: 0 },
+      ],
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.results[0].ok, true, '第一个照常执行');
+    assert.equal(r.results[1].code, 'BATCH_COOLDOWN');
+    assert.equal(r.results[1].maxSuccess, 1, '告诉模型本轮最多成功几个');
+    assert.ok(r.results[1].retryAfter >= 5);
+    assert.equal(bridge.snapshot().plants.length, 1, '不会在同一轮里硬撞冷却');
+  } finally { teardown(bridge); }
+});
+
+test('router: 同卡重复但基础冷却 ≤3.5s 时自动等冷却后仍能种下', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 300;
+    // 把基础冷却压到 2s：模拟短冷却卡，预检不应拦截
+    const snap = bridge.snapshot.bind(bridge);
+    bridge.snapshot = () => {
+      const s = snap();
+      if (s && Array.isArray(s.cards)) for (const c of s.cards) c.baseCd = 2;
+      return s;
+    };
     const realAct = bridge.act;
     let cooling = 0;
     bridge.act = async (a) => {
-      // 第二次种同一张卡时先回一次 COOLDOWN，模拟真实冷却
       if (a.plant === 'sunflower' && cooling === 0) {
         cooling += 1;
         return { ok: false, code: 'COOLDOWN', retryAfter: 0.2, type: a.plant, card: a.card };
@@ -235,8 +312,93 @@ test('router: 一批动作里同一张卡出现两次，自动等冷却后仍能
       ],
     });
     assert.equal(r.ok, true, JSON.stringify(r));
-    assert.equal(r.results[1].ok, true, '第二次撞冷却后自动等待重试成功');
     assert.equal(bridge.snapshot().plants.length, 2);
+  } finally { teardown(bridge); }
+});
+
+test('router: 同一批里先种后铲同一格返回 BATCH_CONFLICT', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 400;
+    const r = await router.call('pvz_act', {
+      actions: [
+        { type: 'plant', plant: 'sunflower', lane: 0, column: 2 },
+        { type: 'shovel', lane: 0, column: 2 },
+      ],
+    });
+    assert.equal(r.results[1].code, 'BATCH_CONFLICT');
+    assert.equal(r.results[1].conflictWith, 0);
+    assert.equal(bridge.snapshot().plants.filter((p) => p.lane === 0 && p.column === 2).length, 1, '铲除不会执行，植物还在');
+  } finally { teardown(bridge); }
+});
+
+test('router: 同一批里先种墙、再把输出种到墙右侧返回 OUTPUT_IN_FRONT_OF_WALL', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 400;
+    const r = await router.call('pvz_act', {
+      actions: [
+        { type: 'plant', plant: 'wallnut', lane: 3, column: 4 },
+        { type: 'plant', plant: 'peashooter', lane: 3, column: 5 },
+      ],
+    });
+    assert.equal(r.results[1].code, 'OUTPUT_IN_FRONT_OF_WALL');
+    assert.equal(r.results[1].wallColumn, 4);
+    assert.ok(Array.isArray(r.results[1].behindCells));
+  } finally { teardown(bridge); }
+});
+
+test('router: 一轮连发 3 个 20s 冷却的墙，只成功 1 个', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 900;
+    const r = await router.call('pvz_act', {
+      actions: [
+        { type: 'plant', plant: 'wallnut', lane: 0, column: 4 },
+        { type: 'plant', plant: 'wallnut', lane: 1, column: 4 },
+        { type: 'plant', plant: 'wallnut', lane: 2, column: 4 },
+      ],
+    });
+    assert.equal(r.okCount, 1);
+    assert.deepEqual(r.results.slice(1).map((x) => x.code), ['BATCH_COOLDOWN', 'BATCH_COOLDOWN']);
+    assert.equal(r.results[1].maxSuccess, 1);
+  } finally { teardown(bridge); }
+});
+
+test('router: 地刺种在墙后返回 SPIKE_BEHIND_WALL，墙前允许', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 500;
+    game.cards.CFs.push({ Type: 'spikeweed', SUNCOST: 100, ID: 'spikeweed' });
+    game.grid[2][4].addPlant('wallnut');
+
+    const bad = await router.call('pvz_act', { actions: [{ type: 'plant', plant: 'spikeweed', lane: 2, column: 2 }] });
+    assert.equal(bad.results[0].code, 'SPIKE_BEHIND_WALL', JSON.stringify(bad.results[0]));
+    assert.ok(bad.results[0].suggestedColumns.includes(5), JSON.stringify(bad.results[0]));
+
+    const good = await router.call('pvz_act', { actions: [{ type: 'plant', plant: 'spikeweed', lane: 2, column: 5 }] });
+    assert.equal(good.results[0].ok, true, JSON.stringify(good.results[0]));
+  } finally { teardown(bridge); }
+});
+
+test('router: 同一批先种墙、再把地刺种到墙后返回 SPIKE_BEHIND_WALL', async () => {
+  const { game, bridge, router } = setup({ slots: 3 });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.sun.CurrentValue = 900;
+    game.cards.CFs.push({ Type: 'spikeweed', SUNCOST: 100, ID: 'spikeweed' });
+    const r = await router.call('pvz_act', {
+      actions: [
+        { type: 'plant', plant: 'wallnut', lane: 3, column: 4 },
+        { type: 'plant', plant: 'spikeweed', lane: 3, column: 2 },
+      ],
+    });
+    assert.equal(r.results[1].code, 'SPIKE_BEHIND_WALL', JSON.stringify(r.results[1]));
+    assert.equal(r.results[1].wallColumn, 4);
   } finally { teardown(bridge); }
 });
 

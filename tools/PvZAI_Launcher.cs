@@ -17,7 +17,7 @@ namespace PvZAI
     {
         const int CdpPort = 9222;
         internal static readonly JavaScriptSerializer Ser = new JavaScriptSerializer();
-        static readonly string Version = "1.0.0";
+        static readonly string Version = "1.0.1";
 
         [STAThread]
         static void Main(string[] args)
@@ -249,7 +249,16 @@ namespace PvZAI
             pageId = id;
             c.Send("Page.enable", new Dictionary<string, object>());
             c.Send("Page.setBypassCSP", Dict("enabled", true));
+            // 给页面留一个"由启动器启动"的标记：游戏内浮窗靠它判断要不要提示用启动器。
+            // addScript 在下次导航前生效（下面会 Page.reload），Runtime.evaluate 覆盖当前页面。
+            try { c.Send("Page.addScriptToEvaluateOnNewDocument", Dict("source", LauncherMark())); } catch { }
+            try { c.Send("Runtime.evaluate", Dict("expression", LauncherMark())); } catch { }
             return c;
+        }
+
+        static string LauncherMark()
+        {
+            return "window.__PVZAI_LAUNCHER__='" + Version + "';";
         }
 
         static bool GameRunning()

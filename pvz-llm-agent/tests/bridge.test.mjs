@@ -1,6 +1,6 @@
-import test from 'node:test';
+﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createBridge } from '../bridge/api.js';
+import { createBridge, BRIDGE_VERSION } from '../bridge/api.js';
 import { resetAssetCache } from '../bridge/stats.js';
 import { createFakeGame } from './helpers/fake-game.mjs';
 
@@ -131,8 +131,11 @@ test('setPlan 只保存，snapshot 回显，不产生执行动作', () => {
     const plan = { style: 'test', deck: ['sunflower'], thresholds: { sun: 150 } };
     const r = bridge.setPlan(plan);
     assert.equal(r.ok, true);
-    assert.deepEqual(r.plan, plan);
-    assert.deepEqual(bridge.snapshot().plan, plan);
+    assert.equal(r.plan.style, 'test');
+    assert.equal(r.plan.text, 'test');
+    assert.equal(r.plan.schema, 'pvz-plan/v1');
+    assert.deepEqual(r.plan.deck, ['sunflower']);
+    assert.equal(bridge.snapshot().plan.style, 'test');
     assert.equal(game.cards.CFs.length, 0, 'setPlan 不应改游戏');
     assert.equal(bridge.getPlan().plan.style, 'test');
   } finally { teardown(bridge); }
@@ -169,7 +172,10 @@ test('health 报告能力，且明确没有本地策略/自动卡组/队列', ()
   try {
     const h = bridge.health();
     assert.equal(h.ok, true);
-    assert.equal(h.version, '0.1.19');
+    // 版本号只有一个来源（bridge/api.js 的 BRIDGE_VERSION），这里不写死，
+    // 避免每次发版都要改测试。
+    assert.equal(h.version, BRIDGE_VERSION);
+    assert.match(String(h.version), /^\d+\.\d+\.\d+$/);
     assert.equal(h.features.localStrategy, false);
     assert.equal(h.features.autoDeck, false);
     assert.equal(h.features.queue, false);
@@ -314,4 +320,90 @@ test('objective：本地化后的 screenName 仍能正常解析植物上限', ()
     assert.equal(s.objective.trusted, true);
     assert.equal(s.plantLimit, 18, '真实任务文案应被采信');
   } finally { teardown(bridge); }
+});
+
+test('briefing.levelContext：资源名推断世界，一次给全波次/僵尸/卡池能力', () => {
+  const { game, bridge } = setup({ slots: 3 });
+  try {
+    // 关卡名不是中文、source.world 也为空时，仍要用资源名（west1）推断世界。
+    game.levelController.levelName = 'Day 1';
+    game.levelController.Level = { name: 'west1' };
+    const b = bridge.briefing();
+    assert.equal(b.ok, true, JSON.stringify(b));
+    assert.ok(b.levelContext, '必须有 levelContext');
+    assert.equal(b.world.key, 'west', JSON.stringify(b.world));
+    assert.equal(b.levelContext.world.key, 'west');
+    assert.equal(b.levelContext.waves.length, 2);
+    assert.deepEqual(Object.keys(b.levelContext.waves[0].zombies), ['tutorial']);
+    assert.deepEqual(b.levelContext.waves[0].lanes.tutorial, [0], 'Row:1 → lane 0 固定行');
+    assert.equal(b.levelContext.zombies[0].type, 'tutorial');
+    const sun = b.levelContext.cards.find((c) => c.type === 'sunflower');
+    assert.ok(sun, JSON.stringify(b.levelContext.cards));
+    assert.ok(sun.capabilities.includes('economy'), JSON.stringify(sun));
+    const pea = b.levelContext.cards.find((c) => c.type === 'peashooter');
+    assert.equal(pea.dps, 13.3);
+    assert.ok(Array.isArray(b.levelContext.deck.current));
+    assert.ok('history' in b.levelContext);
+    assert.ok(b.levelContext.facts.requiredCapabilities != null);
+  } finally { teardown(bridge); }
+});
+
+test('briefing.coverageGaps：按整关所有波次汇总能力缺口（不只看当前/下一波）', async () => {
+  const { game, bridge } = setup({ slots: 3 });
+  try {
+    // 第 3 波（当前波之后 2 波以上）才出现带护甲的僵尸 → high_dps 缺口
+    game.levelController.waveManagerProps.WaveCount = 3;
+    game.levelController.currentLevelObjects.push({
+      objclass: 'Wave3',
+      aliases: ['Wave3'],
+      objdata: { Zombies: [{ Type: 'RTID(dark_armor2@ZombieProps)', Row: 3 }] },
+    });
+    await bridge.chooseDeck(['sunflower', 'peashooter', 'wallnut'], true);
+    const b = bridge.briefing();
+    const caps = b.deck.coverageGaps.missing.map((m) => m.capability);
+    assert.ok(caps.includes('high_dps'), JSON.stringify(b.deck.coverageGaps));
+    assert.ok(b.coverageGaps.missing.some((m) => m.capability === 'high_dps'));
+    assert.ok(b.constraints.some((c) => c.id === 'capability_gaps'), JSON.stringify(b.constraints));
+    assert.ok(b.levelContext.facts.tags.includes('armored'));
+  } finally { teardown(bridge); }
+});
+
+test('briefing.history：读回上一局的 note/lessons（按关卡隔离）', () => {
+  const store = new Map();
+  const prev = globalThis.window;
+  globalThis.window = {
+    localStorage: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    },
+  };
+  store.set('pvzllm.levelMemory.v1', JSON.stringify({
+    v: 1,
+    levels: {
+      west13: {
+        key: 'west13',
+        runs: [{ at: '2026-01-01T00:00:00.000Z', result: 'lost', wave: 5, waveCount: 10 }],
+        lessons: ['第 3 波铁桶走第 2 行'],
+        note: '上局输在第 5 波',
+        lastAt: '2026-01-01T00:00:00.000Z',
+      },
+    },
+  }));
+  resetAssetCache();
+  const game = createFakeGame({ slots: 3 });
+  game.levelController.Level = { name: 'west13' };
+  const bridge = createBridge(game.ctx);
+  try {
+    const b = bridge.briefing();
+    assert.ok(b.history, JSON.stringify(b.history));
+    assert.equal(b.history.key, 'west13');
+    assert.deepEqual(b.history.lessons, ['第 3 波铁桶走第 2 行']);
+    assert.equal(b.history.note, '上局输在第 5 波');
+    assert.equal(b.history.lastResult, 'lost');
+    assert.deepEqual(b.levelContext.history.lessons, ['第 3 波铁桶走第 2 行']);
+  } finally {
+    teardown(bridge);
+    globalThis.window = prev;
+  }
 });
