@@ -1,5 +1,11 @@
 # PvZ2 Gardendless · AI 草坪指挥官
 
+<p align="center">
+  <a href="https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/tag/v0.4.13">
+    <img src="https://raw.githubusercontent.com/MuliyStudio/pvz2-ai-gardendless/main/docs/cover-v0.4.13.jpg" alt="PvZ2 Gardendless · AI 草坪指挥官 v0.4.13 封面" width="100%">
+  </a>
+</p>
+
 > **现行实现（2026-10-30）**：新目录 [`pvz-llm-agent/`](pvz-llm-agent/README.md) 是本项目的唯一入口——LLM 是唯一决策者，代码只给事实 / 执行动作 / 返回真实结果 / 记录计划，**没有本地卡组、自动补卡、策略队列**。旧 `pvz-agent/`、`PvZ-MCP/`、`pvz-ai-agent-mod/` 保留但冻结，不再更新。
 
 让大模型（或 Claude / Cursor / OpenCode 这类 Agent）读取《植物大战僵尸2 花园无尽》的战场，自己决定种什么、种哪一格、什么时候铲掉重种，并自动打完一关。
