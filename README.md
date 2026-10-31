@@ -339,3 +339,21 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:an
 ## License
 
 MIT。游戏本体、素材和 PvZ2 Gardendless 版权归其作者/权利方所有；本仓库不包含游戏资源。
+
+## 鸣谢
+
+本项目的桌宠、界面与部分架构参考了以下开源项目和社区作者：
+
+| 项目 / 作者 | 用途 |
+| --- | --- |
+| **PvZ2 Gardendless 作者** | 游戏本体与运行环境 |
+| **GP-Next 作者** | 模组加载器与 JS Modding 接口 |
+| [gmskywalker/deepseek-fat-fish-codex-pet](https://github.com/gmskywalker/deepseek-fat-fish-codex-pet) | 大肥鱼桌宠精灵图（待机 / 思考 / 成功 / 失败 / 等待 / 悬停）；非官方同人素材，仅个人使用 |
+| [1190fasheqi/dafeiyu-pet](https://github.com/1190fasheqi/dafeiyu-pet) | 大肥鱼桌宠底座、三视图与交互参考（MIT） |
+| [QCYTSN/dsh-dafeiyu](https://github.com/QCYTSN/dsh-dafeiyu) | 由 Agent 事件驱动桌宠状态的架构参考（MIT） |
+| [Lannistersyh/fatfish-prompt-atelier](https://github.com/Lannistersyh/fatfish-prompt-atelier) | 精灵图集帧映射与提取方式参考 |
+| [Neko3000/deepseek-whalechan](https://github.com/Neko3000/deepseek-whalechan) | 鲸鱼娘角色设定与二创素材规范参考（CC BY-NC-SA 4.0） |
+| [Lucide](https://lucide.dev) / Lucide Contributors | 配置页与思考窗图标（ISC License） |
+| **DeepSeek** | 模型 API；「大肥鱼 / 鲸鱼娘」社区二创形象的灵感来源（非官方） |
+
+> 「大肥鱼 / 鲸鱼娘」是 DeepSeek 蓝鲸 logo 的社区二创，不是 DeepSeek 官方形象；名称、标识和可识别形象的权利归各自权利人所有。本项目仅用于个人单机体验，不商用。
