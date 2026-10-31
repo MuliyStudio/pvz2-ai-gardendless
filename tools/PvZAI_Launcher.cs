@@ -403,13 +403,28 @@ namespace PvZAI
                 CopyDirectory(d, Path.Combine(dst, Path.GetFileName(d)));
         }
 
-        // 清掉上一次事务的 journal / recovery 绑定。安装新包后如果还指着旧 revision，
-        // GP-Next 会在 beforeEngineImport 报 Invalid journal binding 并崩溃。
+        // 清掉上一次事务的 journal / recovery 绑定，并把失败实体历史重置为空。
+        // 注意：这三个键必须保留（null / []），不能整个删掉——GP-Next 会校验
+        // failedEntityTargets 这个键存在，缺键会报 Invalid failed entity history。
         static bool ClearTransientState(Dictionary<string, object> root)
         {
             bool changed = false;
-            foreach (var key in new[] { "journal", "recovery", "failedEntityTargets" })
-                if (root.Remove(key)) changed = true;
+            if (!root.ContainsKey("journal") || root["journal"] != null)
+            {
+                root["journal"] = null;
+                changed = true;
+            }
+            if (!root.ContainsKey("recovery") || root["recovery"] != null)
+            {
+                root["recovery"] = null;
+                changed = true;
+            }
+            var failed = root.ContainsKey("failedEntityTargets") ? root["failedEntityTargets"] as object[] : null;
+            if (failed == null || failed.Length > 0)
+            {
+                root["failedEntityTargets"] = new object[0];
+                changed = true;
+            }
             return changed;
         }
 

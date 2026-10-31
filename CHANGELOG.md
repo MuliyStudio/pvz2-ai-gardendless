@@ -4,6 +4,17 @@
 
 ---
 
+## v0.4.15
+
+**修复 `Invalid failed entity history`（版本 0.4.15）**
+
+- 0.4.14 启动器把 `journal` / `recovery` / `failedEntityTargets` 三个键整个删掉；GP-Next 会校验 `failedEntityTargets` 必须存在，缺键就报 `Invalid failed entity history`。
+- 现在改为保留键并写空值：`journal: null`、`recovery: null`、`failedEntityTargets: []`。
+- 已经卡在恢复页的配置也可以补这三个空键后重新启动；启动器 0.4.15 会自动做。
+- 发布包重建为 `PvZAI-LLM-Agent-Bundle-v0.4.15.zip`，141 项测试通过。
+
+---
+
 ## v0.4.14
 
 **修复 GP-Next「Invalid journal binding」启动崩溃（版本 0.4.14）**

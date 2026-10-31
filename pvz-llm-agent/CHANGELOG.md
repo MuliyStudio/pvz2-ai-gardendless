@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.15 — 2026-10-31
+
+> 修复 0.4.14 的 `Invalid failed entity history`：`journal` / `recovery` / `failedEntityTargets` 三个键必须保留，分别写 `null` / `null` / `[]`，不能整个删除。
+
+---
+
 ## 0.4.14 — 2026-10-31
 
 > 修复启动器升级模组后 GP-Next 报 **Invalid journal binding** 的启动崩溃：写入 `configuration-state.json` 前清理旧的 `journal` / `recovery` / `failedEntityTargets`，不再让 journal 绑定旧 revision。

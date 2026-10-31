@@ -1,7 +1,7 @@
 {
   "uuid": "pvzllm.agent",
   "name": "PvZ LLM Agent",
-  "version": "0.4.14",
+  "version": "0.4.15",
   "author": "pvz-llm-agent",
   "description": "LLM 唯一决策者的工具层：读状态 / 执行动作 / 发事件 / 记录计划。无本地卡组、无本地策略队列、不自动补卡。",
   "packFormatVersion": 1,

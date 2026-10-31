@@ -1,7 +1,7 @@
 # PvZ2 Gardendless · AI 草坪指挥官
 
 <p align="center">
-  <a href="https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/tag/v0.4.14">
+  <a href="https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/tag/v0.4.15">
     <img src="https://raw.githubusercontent.com/MuliyStudio/pvz2-ai-gardendless/main/docs/cover-v0.4.13.jpg" alt="PvZ2 Gardendless · AI 草坪指挥官封面" width="100%">
   </a>
 </p>
@@ -64,7 +64,7 @@
 
 | 文件 | 内容 | 适合 |
 | --- | --- | --- |
-| `PvZAI-LLM-Agent-Bundle-v0.4.14.zip` | 模组 ZIP + 启动器 + MCP Server + 配置脚本 + 安装说明 | 第一次用，推荐 |
+| `PvZAI-LLM-Agent-Bundle-v0.4.15.zip` | 模组 ZIP + 启动器 + MCP Server + 配置脚本 + 安装说明 | 第一次用，推荐 |
 | `pvz-llm-agent.zip` | 只有 GP-Next 模组（`pack.json` + `scripts/main.js`），**不含启动器** | 已经会装 GP-Next 模组 |
 
 ---
@@ -76,7 +76,7 @@
 ### 方式 A：发布包（推荐）
 
 1. **完全退出游戏**（不是最小化）。
-2. 解压 `PvZAI-LLM-Agent-Bundle-v0.4.14.zip`（整个文件夹，别只拿一个 exe）。
+2. 解压 `PvZAI-LLM-Agent-Bundle-v0.4.15.zip`（整个文件夹，别只拿一个 exe）。
 3. 双击 `PvZAI_Launcher.exe`。
    - 自动把 `pvz-llm-agent.zip` 装进 GP-Next 并启用（写 `installed/<digest>` + `configuration-state.json`）；
    - 带 9222 调试端口启动游戏；
@@ -332,9 +332,9 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:an
 
 ## 更新日志
 
-当前版本：**版本 0.4.14 + 启动器 1.0.1**（大肥鱼桌宠 + 图标化配置页 + 数据完整性/能量豆策略）。
+当前版本：**版本 0.4.15 + 启动器 1.0.1**（大肥鱼桌宠 + 图标化配置页 + 数据完整性/能量豆策略）。
 
-> v0.2.x / v0.3.x 的旧发布（`pvz-ai-agent-mod` 时代）已归档为 Pre-release，只作存档，不再更新；下载请用 [v0.4.14+](https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/latest)。
+> v0.2.x / v0.3.x 的旧发布（`pvz-ai-agent-mod` 时代）已归档为 Pre-release，只作存档，不再更新；下载请用 [v0.4.15+](https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/latest)。
 
 完整版本记录见 **[CHANGELOG.md](CHANGELOG.md)**；逐版本实现细节另见 **[pvz-llm-agent/CHANGELOG.md](pvz-llm-agent/CHANGELOG.md)**。
 
