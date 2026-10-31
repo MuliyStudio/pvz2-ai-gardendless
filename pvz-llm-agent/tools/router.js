@@ -63,7 +63,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-export function createToolRouter({ bridge, version = '0.4.13', sleep = routerSleep, latency = null }) {
+export function createToolRouter({ bridge, version = '0.4.14', sleep = routerSleep, latency = null }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。

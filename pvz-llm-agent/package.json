@@ -1,6 +1,6 @@
 {
   "name": "pvz-llm-agent",
-  "version": "0.4.13",
+  "version": "0.4.14",
   "private": true,
   "type": "module",
   "description": "PvZ2 Gardendless 的 LLM 工具层：唯一决策者是 LLM；代码只给事实、执行动作、返回真实结果、记录计划。",

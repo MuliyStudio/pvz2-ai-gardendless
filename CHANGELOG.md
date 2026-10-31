@@ -4,6 +4,17 @@
 
 ---
 
+## v0.4.14
+
+**修复 GP-Next「Invalid journal binding」启动崩溃（版本 0.4.14）**
+
+- 原因：启动器写 `configuration-state.json` 时只更新了 `active` / `desired`，保留了上一次事务的 `journal`；journal 的 target 还指着旧 revision/旧模组，GP-Next 在 `beforeEngineImport` 绑定失败并崩溃。
+- 启动器现在在注册新包前清理 `journal` / `recovery` / `failedEntityTargets`，再写入新的 `active` / `desired`，让 GP-Next 走 cold-start。
+- 已经崩在恢复界面的处理：先点「关闭 JS Modding」→「重新启动」；能进游戏后完全退出，再用 0.4.14 启动器启动/更新。
+- 发布包重建为 `PvZAI-LLM-Agent-Bundle-v0.4.14.zip`，141 项测试通过。
+
+---
+
 ## v0.4.13
 
 **大肥鱼桌宠 + 图标化配置页 + 数据完整性（版本 0.4.13）**

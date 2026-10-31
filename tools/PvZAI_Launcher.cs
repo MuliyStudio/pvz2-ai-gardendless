@@ -403,6 +403,26 @@ namespace PvZAI
                 CopyDirectory(d, Path.Combine(dst, Path.GetFileName(d)));
         }
 
+        // 清掉上一次事务的 journal / recovery 绑定。安装新包后如果还指着旧 revision，
+        // GP-Next 会在 beforeEngineImport 报 Invalid journal binding 并崩溃。
+        static bool ClearTransientState(Dictionary<string, object> root)
+        {
+            bool changed = false;
+            foreach (var key in new[] { "journal", "recovery", "failedEntityTargets" })
+                if (root.Remove(key)) changed = true;
+            return changed;
+        }
+
+        static void SaveConfig(string cfgPath, Dictionary<string, object> root)
+        {
+            string outgoing = Ser.Serialize(root);
+            File.Copy(cfgPath, cfgPath + ".bak-before-launcher", true);
+            string tmp = cfgPath + ".tmp";
+            File.WriteAllText(tmp, outgoing, new UTF8Encoding(false));
+            File.Delete(cfgPath);
+            File.Move(tmp, cfgPath);
+        }
+
         // 把包注册进 configuration-state.json，让 GP-Next 下次启动直接启用它。
         static bool RegisterPack(string gpRoot, string uuid, string version, string digest, string name)
         {
@@ -414,6 +434,7 @@ namespace PvZAI
                 var desired = root["desired"] as Dictionary<string, object>;
                 var active = root["active"] as Dictionary<string, object>;
                 if (desired == null || active == null) return false;
+                bool transientCleared = ClearTransientState(root);
 
                 // 已经是这个版本且启用，就不重复改写配置
                 var current = desired["mods"] as object[];
@@ -439,7 +460,15 @@ namespace PvZAI
                         }
                         var ordered = active["ordered"] as object[];
                         bool inOrdered = ordered != null && ordered.Length == 1 && Convert.ToString(ordered[0]) == uuid;
-                        if (inActive && inOrdered) return true;
+                        if (inActive && inOrdered)
+                        {
+                            if (transientCleared)
+                            {
+                                root["sequence"] = Convert.ToInt32(root["sequence"]) + 1;
+                                SaveConfig(cfgPath, root);
+                            }
+                            return true;
+                        }
                     }
                 }
 
@@ -490,12 +519,7 @@ namespace PvZAI
                 active["generation"] = Convert.ToInt32(active["generation"]) + 1;
                 root["sequence"] = Convert.ToInt32(root["sequence"]) + 1;
 
-                string outgoing = Ser.Serialize(root);
-                File.Copy(cfgPath, cfgPath + ".bak-before-launcher", true);
-                string tmp = cfgPath + ".tmp";
-                File.WriteAllText(tmp, outgoing, new UTF8Encoding(false));
-                File.Delete(cfgPath);
-                File.Move(tmp, cfgPath);
+                SaveConfig(cfgPath, root);
                 return true;
             }
             catch (Exception ex)

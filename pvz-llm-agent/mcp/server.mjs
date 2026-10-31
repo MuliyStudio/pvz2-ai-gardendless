@@ -12,7 +12,7 @@ import { createCdpBridge } from './cdp.js';
 import { createToolRouter } from '../tools/router.js';
 import { createMcpServer } from './protocol.js';
 
-const VERSION = '0.4.13';
+const VERSION = '0.4.14';
 const PORT = Number(process.env.PVZ_CDP_PORT || 9222);
 const GLOBAL = process.env.PVZ_GLOBAL || 'PvzLlm';
 

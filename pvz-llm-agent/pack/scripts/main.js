@@ -6129,7 +6129,7 @@ function createEventStreamApi({ snapshot, onLevelEnd = null, keyOf = null }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.4.13';
+const BRIDGE_VERSION = '0.4.14';
 
 function createBridge(ctx) {
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
@@ -7168,7 +7168,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.4.13', sleep = routerSleep, latency = null }) {
+function createToolRouter({ bridge, version = '0.4.14', sleep = routerSleep, latency = null }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -7902,7 +7902,7 @@ function getOpenCodeSession() {
   return openCodeSession;
 }
 
-function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep = sleepDefault, version = '0.4.13', latency = null }) {
+function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep = sleepDefault, version = '0.4.14', latency = null }) {
   const config = {
     baseUrl: DEFAULT_LLM.baseUrl,
     model: DEFAULT_LLM.model,
