@@ -119,3 +119,40 @@ test('router：pvz_set_plan 保存计划并按本关能力缺口返回 audit.war
     assert.ok(r.audit && r.audit.ok === false);
   } finally { teardown(bridge); }
 });
+
+test('plan audit：墙/雷写死列时提示改用 ahead / safe', () => {
+  const r = auditPlan({
+    text: 'x',
+    queue: [
+      { id: 'w1', type: 'plant', plant: 'wallnut', lane: 0, column: 5 },
+      { id: 'm1', type: 'plant', plant: 'potatomine', lane: 1, column: 5 },
+      { id: 'ok', type: 'plant', plant: 'wallnut', lane: 2, column: 'ahead' },
+    ],
+  }, { wallTypes: ['wallnut'], mineTypes: ['potatomine'] });
+  assert.ok(r.warnings.some((w) => w.code === 'PLAN_FIXED_WALL_COLUMN' && w.ids.includes('w1')), JSON.stringify(r.warnings));
+  assert.ok(r.warnings.some((w) => w.code === 'PLAN_FIXED_MINE_COLUMN' && w.ids.includes('m1')), JSON.stringify(r.warnings));
+});
+
+test('plan audit：开局写死行/列时提示 PLAN_POSITIONAL_AT_START', () => {
+  const plan = {
+    text: 'x',
+    lanes: [{ lane: 0, wall: 4, output: [1, 2, 3] }],
+    queue: [{ id: 'q1', type: 'plant', plant: 'wallnut', lane: 0, column: 5 }],
+  };
+  const prep = auditPlan(plan, { phase: 'preparing' });
+  assert.ok(prep.warnings.some((w) => w.code === 'PLAN_POSITIONAL_AT_START'), JSON.stringify(prep.warnings));
+  const running = auditPlan(plan, { phase: 'running' });
+  assert.ok(!running.warnings.some((w) => w.code === 'PLAN_POSITIONAL_AT_START'), JSON.stringify(running.warnings));
+});
+
+test('plan audit：counters.tags 数组也能覆盖能力缺口', () => {
+  const gap = { capability: 'protect_key', tags: ['steal', 'steal_sun'], candidates: [] };
+  const r = auditPlan({ text: 'x', counters: [{ tags: ['steal'], card: 'iceburg', capability: 'control' }] }, { coverageGaps: [gap] });
+  assert.ok(!r.warnings.some((w) => w.code === 'PLAN_MISSING_COUNTER'), JSON.stringify(r.warnings));
+});
+
+test('plan audit：counter 卡不在实际卡组时不算覆盖', () => {
+  const gap = { capability: 'multi_target', tags: ['group'], candidates: ['bloomerang'] };
+  const r = auditPlan({ text: 'x', deck: ['sunflower'], counters: [{ card: 'bloomerang' }] }, { coverageGaps: [gap], deck: ['sunflower'] });
+  assert.ok(r.warnings.some((w) => w.code === 'PLAN_MISSING_COUNTER'), JSON.stringify(r.warnings));
+});

@@ -17,7 +17,16 @@ export function setupInGame(ctx) {
   const bridge = createBridge(ctx);
   const latency = bridge.latency;
   const router = createToolRouter({ bridge, version: AGENT_VERSION, latency });
-  const agent = createLlmAgent({ router, version: AGENT_VERSION, latency, cfg: { stream: true } });
+  const agent = createLlmAgent({
+    router,
+    version: AGENT_VERSION,
+    latency,
+    cfg: { stream: true },
+    // 模型思考期间暂停普通队列任务（避免队列先花掉阳光、模型按旧状态决策），
+    // urgent 规则（三叶草这类短窗口救场）仍会执行。
+    onModelRequestStart: () => { try { bridge.setQueueThinking(true); } catch { /* ignore */ } },
+    onModelRequestEnd: () => { try { bridge.setQueueThinking(false); } catch { /* ignore */ } },
+  });
   let ui = null;
   try { ui = createInGameUI({ agent, bridge }); } catch (e) {
     try { console.error('[pvz-llm-agent] UI 初始化失败', e); } catch { /* ignore */ }

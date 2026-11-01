@@ -28,8 +28,13 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
   function compactFood(pf) {
     if (!pf) return null;
     return {
-      kind: pf.kind, area: pf.area, radius: pf.radius, total: pf.total,
+      kind: pf.kind, area: pf.area, radius: pf.radius,
+      total: pf.total, totalPerTarget: pf.totalPerTarget, maxTotal: pf.maxTotal,
+      sunTotal: pf.sunTotal, sunValue: pf.sunValue,
+      count: pf.count, projectileDamage: pf.projectileDamage,
+      targetsPerHit: pf.targetsPerHit, hitsPerTarget: pf.hitsPerTarget,
       durationSec: pf.durationSec, confidence: pf.confidence,
+      assumptions: pf.assumptions,
     };
   }
 
@@ -52,6 +57,15 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
       burst: st.burst || null,
       effectiveDps: st.effectiveDps || null,
       area: st.area || null,
+      // 短射程输出（reach<=1 且有伤害）必须贴住僵尸，不能当后排墙用。
+      role: (st.reach != null && Number(st.reach) <= 1 && ((st.attack && Number(st.attack.dps) > 0) || st.burst))
+        ? 'melee_output'
+        : (String(st.family || '') === 'Defence' ? 'wall'
+          : (st.sun ? 'economy' : (st.attack ? 'ranged' : 'support'))),
+      needsContact: (st.reach != null && Number(st.reach) <= 1 && !!((st.attack && Number(st.attack.dps) > 0) || st.burst)) || undefined,
+      // once = 触发一次、持续几秒；repeat = 按 interval 反复打。
+      trigger: (st.attack && st.attack.trigger) || undefined,
+      repeatAttack: st.attack ? !!st.attack.repeat : undefined,
       stepDamage: !!st.stepDamage,
       poison: st.poison || null,
       // 伤害与护甲：yes/no/unknown 三态 + 语义（normal/pierce/true/poison/drain）
@@ -65,6 +79,8 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
       // 激活方式必须常驻：点击卡如果模型不知道要手点，等于不能用的卡
       activation: (st.usage && st.usage.activation) || 'auto',
       aim: (st.usage && st.usage.aim) || null,
+      // 放置类别：游戏 TAGS 原样上报（amphibious / fly / vine / lilypad …）
+      placement: st.placement || null,
       shot: st.shot,
       brief: st.brief,
       // 图鉴长文本只在 pvz_knowledge 单查时给；简报里省掉能省一大截 token
@@ -97,6 +113,8 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
       immunities: st.immunities && st.immunities.length ? st.immunities : undefined,
       spawns: st.spawns && st.spawns.length ? st.spawns : undefined,
       boss: st.boss || undefined,
+      // 血量阈值阶段：巨人扔小鬼 / 狂暴 / 掉手 / 放鸡 / 放黄鼠狼
+      phases: st.phases && st.phases.length ? st.phases : undefined,
       behaviorText: st.behaviorText || undefined,
       brief: st.brief,
       introduction: lean ? undefined : st.introduction,
@@ -144,11 +162,47 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
   function briefing() {
     const state = reader.snapshot({ full: true });
     if (!state.ok) return { ok: false, code: state.code || 'NO_SCENE', reason: state.reason || '不在关卡内' };
+    const levelNow = state.level || {};
+    const sourceNow = levelNow.source || {};
+    // 页面过渡/回地图时可能返回 ok 但关卡、世界、波次全空；不要给模型一份“空简报”。
+    const hasLevel = !!((sourceNow.asset || sourceNow.world || sourceNow.levelId)
+      || levelNow.name || state.world || state.levelScript);
+    if (!hasLevel) {
+      return {
+        ok: false,
+        code: 'BRIEFING_NOT_READY',
+        retry: true,
+        reason: '关卡数据还没加载完（可能是关卡切换/回地图的过渡帧），稍后再读一次。',
+      };
+    }
     const seed = state.seedSelection;
     const pool = (seed && seed.available) || state.cards || [];
     const cards = pool.map((c) => plantEntry(c.type, true)).filter(Boolean);
 
     const waveList = wavesOf(state);
+    // 过渡帧里 Level.name 还在（asset=egypt1），但波次/卡池全空——这不是有效简报。
+    // 以前这种骨架会被当成事实喂给模型（卡槽 undefined / 起始阳光 ? / 波次 0），
+    // 模型再转手去读一次，形成“反复读开局简报”的循环。
+    const dataReady = !!(state.level && state.level.gameStarted)
+      || waveList.length > 0
+      || (state.cards || []).length > 0
+      || ((state.seedSelection && state.seedSelection.available) || []).length > 0;
+    if (!dataReady) {
+      return {
+        ok: false,
+        code: 'BRIEFING_NOT_READY',
+        retry: true,
+        reason: '关卡/卡槽还在加载（波次和卡池都为空），稍后再读一次。',
+      };
+    }
+    if (!waveList.length && state.phase === 'objective') {
+      return {
+        ok: false,
+        code: 'BRIEFING_NOT_READY',
+        retry: true,
+        reason: '关卡波次还没初始化（objective 阶段常见），关闭目标弹窗进入准备后再读。',
+      };
+    }
     const waveTypes = new Set();
     for (const w of waveList) for (const t of Object.keys(w.zombies || {})) waveTypes.add(t);
     for (const z of state.zombies || []) waveTypes.add(z.type);
@@ -196,9 +250,27 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
         byLane.get(c.lane).push(c.column);
       }
       const where = [...byLane.entries()].map(([l, cols]) => `第${l}行 c${cols.slice().sort((a, b) => a - b).join('/c')}`).join('；');
+      // 保护目标是谁也要写清：只有坐标时，模型会把它当空格，失败后把锅甩给向日葵。
+      const protectTypes = [...new Set(liveProtect
+        .map((c) => (c.plant && (c.plant.name || c.plant.type)) || c.type)
+        .filter(Boolean))];
+      const ability = liveProtect.map((c) => c.plant).filter(Boolean).map((p) => {
+        const extra = [];
+        if (p.brief) extra.push(p.brief);
+        if (p.restSec != null) extra.push(`触发后休息 ${p.restSec}s`);
+        if (p.knockback != null) extra.push(`击退 ${p.knockback} 格`);
+        return `${p.name || p.type}${extra.length ? '：' + extra.join('，') : ''}`;
+      });
       constraints.push({
         id: 'protect_cells',
-        text: `${where} 是必须保护的植物。僵尸会走到这些格上啃它：短手植物（接触/接近/前后/3x3/N 格）只能种在同行、离保护格不超过它的射程（多数是 1 格）的位置；远程/整行/抛物种在保护格左侧同一行就能覆盖。种在保护格左侧 2 格以外，短手既打不到僵尸也保护不到。`,
+        text: `${where} 是必须保护的植物${protectTypes.length ? `（${protectTypes.join('、')}）` : ''}${ability.length ? `；它们的特性：${ability.join('；')}` : ''}。判负条件是这些植物死，不是普通防线植物。僵尸会走到这些格上啃它：短手植物（接触/接近/前后/3x3/N 格）只能种在同行、离保护格不超过它的射程（多数是 1 格）的位置；远程/整行/抛物种在保护格左侧同一行就能覆盖。种在保护格左侧 2 格以外，短手既打不到僵尸也保护不到。`,
+        source: 'task',
+      });
+    }
+    if (liveProtect.length && state.brief && state.brief.protect && state.brief.protect.mode === 'contact') {
+      constraints.push({
+        id: 'protect_contact',
+        text: '本关是“踩踏/接触”判定：僵尸只要走到保护格就判负，不需要啃食。防守必须在保护格右侧挡住或提前击杀；高血量墙/肉盾也要种在保护格右侧，种左侧完全无效。',
         source: 'task',
       });
     }
@@ -251,20 +323,20 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
       if (prep.mode === 'preplant') {
         constraints.push({
           id: 'preplant',
-          text: `提前布阵关：波次还没开始，但已经可以种植物。先用给定阳光把阵型摆好；准备好后调用 pvz_start_level 开打（现在 canStart=${prep.canStart}）。不要一直种下去不等开始，也不要在开打前反复读状态。`,
+          text: `提前布阵关：波次还没开始，但已经可以种植物。开局数据已算好（forecast/levelContext 是整关全部波次）；先用 pvz_set_plan 按波次写清每行职责、counter 和应急，再用给定阳光布阵。阵型好后调用 pvz_start_level 开打（现在 canStart=${prep.canStart}）。没有计划就点开始会返回 NEED_PLAN；不要一直种下去不等开始，也不要在开打前反复读状态。`,
           source: 'prep',
         });
       } else if (prep.mode === 'conveyor') {
         constraints.push({
           id: 'conveyor',
-          text: '传送带关：卡组由传送带给定，不能选卡也不能改卡组，直接 pvz_start_level 开打；之后每轮看 cards 里当前可用的传送带卡，种完等下一张。',
+          text: '传送带关：卡组由传送带动态给定，不能选卡也不能改卡组。state.cards / conveyor.cards 是当前带上的卡（index 每轮可能变），不扣阳光、不吃种子冷却；一张卡只种一次，不要用 cells 铺多格。实时性最高：每轮用最新 index 先堵最危险行，不要把卡攒到下一波。',
           source: 'prep',
         });
       }
       if (prep.deckLocked && prep.mode !== 'conveyor') {
         constraints.push({
           id: 'forced_deck',
-          text: `本关卡组是给定的（锁定 ${prep.lockedCount}/${prep.slots} 张，可选 ${prep.availableCount} 张）：不要尝试换卡；卡组已满就直接 pvz_start_level。choose_deck 会原样返回 actualDeck。`,
+          text: `本关是“使用给定植物通关”（锁定 ${prep.lockedCount}/${prep.slots} 张，可选 ${prep.availableCount} 张）：没有选卡页，不要换卡也不要直接点开始。先用本简报的整关波次/卡组数值/coverageGaps 想清楚每张给定卡的对策，用 pvz_set_plan 写 counters 和分波次方案，然后再 pvz_start_level。choose_deck 会原样返回 actualDeck；没有计划就开局会返回 NEED_PLAN。`,
           source: 'prep',
         });
       }
@@ -464,6 +536,39 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
       },
     };
 
+    // 开局脚本建议：按本关卡组 + 判定自动生成，模型直接抄进 plan.rules 即可。
+    // 只是模板，不替模型选卡；不在卡组里的卡不会出现。
+    const deckSet = new Set(deckTypes);
+    const cardOf = (t) => cards.find((c) => c && c.type === t) || null;
+    const suggestedRules = [];
+    if (deckSet.has('blover')) {
+      suggestedRules.push({
+        id: 'blover-air',
+        when: { airborne: true, cardReady: 'blover', minSun: (cardOf('blover') && cardOf('blover').cost) || 50 },
+        do: { type: 'plant', plant: 'blover', lane: 'airborne', column: 'back' },
+        limits: { cooldownSec: 20, validForSec: 240 },
+        onFail: 'ask',
+      });
+    }
+    const protectModeNow = state.brief && state.brief.protect && state.brief.protect.mode;
+    if (liveProtect.length && protectModeNow === 'contact') {
+      for (const t of ['squash', 'chillypepper', 'cranjelly']) {
+        if (!deckSet.has(t)) continue;
+        const c = cardOf(t);
+        suggestedRules.push({
+          id: `guard-${t}`,
+          when: {
+            protectContactLt: t === 'squash' ? 2.5 : 3,
+            cardReady: t,
+            minSun: (c && c.cost) || 50,
+          },
+          do: { type: 'plant', plant: t, lane: 'protect', column: t === 'squash' ? 'ahead' : 'back' },
+          limits: { cooldownSec: 20, validForSec: 240 },
+          onFail: 'ask',
+        });
+      }
+    }
+
     return {
       ok: true,
       version,
@@ -473,7 +578,12 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
       missionHints: state.missionHints,
       levelContext,
       level: {
-        name: state.level.name || null,
+        name: state.level.name || (world
+          ? `${world.name}${levelNow.source && levelNow.source.number ? ` ${levelNow.source.number}` : ''}`
+          : (sourceNow.asset || null)),
+        label: state.level.name || (world
+          ? `${world.name}${levelNow.source && levelNow.source.number ? ` ${levelNow.source.number}` : ''}`
+          : (sourceNow.asset || '本关')),
         asset: (state.level.source && state.level.source.asset) || null,
         wave: state.level.wave,
         waves: state.level.waves,
@@ -511,6 +621,8 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
       startingSun: state.startingSun,
       plantLimit: state.plantLimit,
       prep,
+      // 传送带当前带上的卡（index/type/name）；战斗中也每轮从 state.cards 刷新。
+      conveyor: state.conveyor || null,
       airRaid,
       minePlan: (state.brief && state.brief.minePlan) || null,
       laneMath: (state.brief && state.brief.laneMath) || null,
@@ -524,6 +636,7 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
         ? { ...state.brief.protect, airThreats: flyingThreats.map((z) => z.type) }
         : (liveProtect.length && flyingThreats.length ? { airThreats: flyingThreats.map((z) => z.type) } : null),
       constraints,
+      suggestedRules,
       mechanics,
       forecast,
       history,
@@ -554,7 +667,10 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
         'plantLimit 为 null 就是本关没有植物数量上限；不要从任务原文、图鉴或以往关卡推断上限。objective.trusted=false 表示只是未初始化的模板，missions 已清空。',
         'forecast 是逐波的确定信息：带 lanes 的僵尸是写死的行，lanes=null 的生成时随机行；dynamic.mode=generated 表示本局动态僵尸已经生成（dynamicCount 是随机追加的数量），estimated 表示还没生成、estimate 是模拟期望。',
         'history 是这一关以前的结果记录（含用过的卡组、打到第几波、计划、备注）。它来自你的上一局，不是系统建议；开局先看它，结束时系统会自动把本局结果写回去。history.lessons 是以前（含自动复盘）写下的可执行经验，优先读。',
-        'prep 是准备模式：mode=normal 正常选卡；preplant 提前布阵（先种，再 pvz_start_level）；conveyor 传送带（不能选卡）；forced_deck 卡组已给定/锁定（不要换卡，直接开局）。',
+        'prep 是准备模式：mode=normal 正常选卡；preplant 提前布阵（先按整关波次写计划，再种，最后 pvz_start_level）；conveyor 传送带（不能选卡，当前卡在 conveyor.cards，index 每轮会变）；forced_deck 使用给定植物通关（没有选卡页，先写计划对策再开局，不能直接 start）。prep.mustPlanBeforeStart=true 表示现在点开始会返回 NEED_PLAN。',
+        ...(prep && prep.ready === false
+          ? ['准备还没就绪：卡槽/卡池尚未初始化（常见于关卡目标弹窗或页面过渡）。不要据此判断传送带或卡组；进入选卡/准备阶段后再 pvz_briefing 一次。']
+          : []),
         ...(state.objective && state.objective.trusted === false
           ? ['本关没有下发任务文本（objective 是模板），tasks 为空就按普通关卡打。']
           : []),
@@ -602,6 +718,25 @@ export function createBriefing({ stats, reader, planStore, levelMemory = null, v
   }
 
   function knowledge(args) {
+    // 批量图鉴：开局强制读卡池/僵尸时一次查多张，避免几十次往返。
+    if (args && Array.isArray(args.types) && args.types.length) {
+      const entries = [];
+      const missing = [];
+      for (const t of args.types.slice(0, 24)) {
+        if (!t) continue;
+        const r = knowledge({ type: String(t), kind: args.kind });
+        if (r && r.ok && r.entry) entries.push(r.entry);
+        else missing.push(String(t));
+      }
+      return {
+        ok: entries.length > 0,
+        batch: true,
+        count: entries.length,
+        entries,
+        missing,
+        hint: missing.length ? 'missing 里的 codename 没查到，可单独用 query 搜中文名。' : undefined,
+      };
+    }
     const { type, kind, query } = normalizeQuery(args);
     if (kind && !['plant', 'zombie', 'level'].includes(kind)) {
       return { ok: false, code: 'BAD_QUERY', reason: 'kind 只能是 plant / zombie / level' };

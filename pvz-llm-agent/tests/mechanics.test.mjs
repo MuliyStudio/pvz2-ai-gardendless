@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   travelSec, ttkSec, canKillBeforeHouse, armWindow, counterMatrix, laneMath,
-  cardCapabilities, deckCapabilities, coverageAudit, wallSurvive, wallRebuildPlan, batchPreflight,
+  cardCapabilities, deckCapabilities, coverageAudit, wallSurvive, wallRebuildPlan, batchPreflight, isWallCard,
 } from '../bridge/mechanics.js';
 
 test('mechanics：到达时间 / 击杀时间 / 能否在到房子前清掉', () => {
@@ -12,6 +12,15 @@ test('mechanics：到达时间 / 击杀时间 / 能否在到房子前清掉', ()
   assert.equal(r.killSec, 10);
   assert.equal(r.etaSec, 35);
   assert.equal(r.ok, true);
+});
+
+test('mechanics：墙卡用 family + Toughness 识别，不靠固定卡名', () => {
+  assert.equal(isWallCard('primalwallnut', { family: 'Defence', hp: 4000 }), true);
+  assert.equal(isWallCard('pumpkin', { family: 'Defence', hp: 4000 }), true);
+  assert.equal(isWallCard('gumnut', { family: 'Defence', hp: 450 }), true);
+  assert.equal(isWallCard('aloe', { family: 'Defence', hp: 450 }), false);
+  assert.equal(isWallCard('repeater', { family: 'Peashooter', hp: 300 }), false);
+  assert.equal(isWallCard('wallnut', null), true);
 });
 
 test('mechanics：土豆雷 14s 出土窗口', () => {
@@ -143,6 +152,18 @@ test('mechanics：批量预检 BATCH_COOLDOWN / BATCH_CONFLICT / 墙前输出', 
     ],
   });
   assert.deepEqual(short.issues, [], '基础冷却 ≤3.5s 交给执行层自动等');
+
+  const medium = batchPreflight({
+    cards,
+    actions: [
+      { type: 'plant', card: 1, lane: 0, column: 1 },
+      { type: 'plant', card: 1, lane: 1, column: 1 },
+    ],
+  });
+  assert.equal(medium.issues.length, 1);
+  assert.equal(medium.issues[0].code, 'BATCH_COOLDOWN');
+  assert.equal(medium.issues[0].defer, true, '5s 卡第 2 次交给执行层排队');
+  assert.equal(medium.issues[0].maxSuccess, 2);
 
   const conflict = batchPreflight({
     cards,

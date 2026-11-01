@@ -20,7 +20,7 @@ function teardown(bridge) {
 }
 
 test('工具契约：名字唯一、每个工具都有 inputSchema', () => {
-  assert.equal(TOOLS.length, 18);
+  assert.equal(TOOLS.length, 19);
   assert.equal(new Set(TOOL_NAMES).size, TOOLS.length);
   for (const t of TOOLS) {
     assert.ok(t.name.startsWith('pvz_'), t.name);
@@ -84,12 +84,44 @@ test('router: 墙种在该行僵尸右侧时返回 WALL_TOO_LATE，并给左侧�
   } finally { teardown(bridge); }
 });
 
-test('router: 提前布阵关 start_level 不会被“已在 running”提前挡掉', async () => {
+test('router: WALL_TOO_LATE 不再把目标格 c1 当成可改种位', async () => {
+  const { bridge, router } = setup({ slots: 3, zombies: [{ type: 'tutorial', lane: 0, column: 1.2, health: 190 }] });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    const r = await router.call('pvz_act', { actions: [{ type: 'plant', plant: 'wallnut', lane: 0, column: 1 }] });
+    const res = r.results[0];
+    assert.equal(res.code, 'WALL_TOO_LATE', JSON.stringify(res));
+    assert.deepEqual(res.suggestedColumns, [0], '僵尸在 c1.2，只有 c0 还在它前面');
+    assert.ok(!res.suggestedColumns.includes(1), '不能建议改种当前目标格');
+    assert.equal(res.blockable, true);
+  } finally { teardown(bridge); }
+});
+
+test('router: WALL_TOO_LATE 前方空位被占时给 replaceCells，而不是空 suggestions', async () => {
+  const { game, bridge, router } = setup({ slots: 3, zombies: [{ type: 'tutorial', lane: 0, column: 1.2, health: 190 }] });
+  try {
+    await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
+    game.grid[0][0].addPlant('sunflower');
+    const r = await router.call('pvz_act', { actions: [{ type: 'plant', plant: 'wallnut', lane: 0, column: 1 }] });
+    const res = r.results[0];
+    assert.equal(res.code, 'WALL_TOO_LATE', JSON.stringify(res));
+    assert.deepEqual(res.suggestedColumns, []);
+    assert.equal(res.replaceCells[0].column, 0);
+    assert.equal(res.replaceCells[0].type, 'sunflower');
+    assert.equal(res.blockable, true);
+  } finally { teardown(bridge); }
+});
+
+test('router: 提前布阵关 start_level 不会被“已在 running”提前挡掉，但必须先写计划', async () => {
   const { game, bridge, router } = setup({ slots: 3, preplant: true });
   try {
     const before = await router.call('pvz_state', {});
     assert.equal(before.phase, 'running');
     assert.equal(before.prep.mode, 'preplant');
+    const denied = await router.call('pvz_start_level', {});
+    assert.equal(denied.ok, false, JSON.stringify(denied));
+    assert.equal(denied.code, 'NEED_PLAN');
+    await router.call('pvz_set_plan', { plan: { text: '按波次布阵', lanes: [{ lane: 2, role: 'main' }] } });
     const r = await router.call('pvz_start_level', {});
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(game.levelController.gameStarted, true);
@@ -145,7 +177,7 @@ test('router: health 带工具清单和版本', async () => {
   try {
     const h = await router.call('pvz_health', {});
     assert.equal(h.ok, true);
-    assert.equal(h.tools.length, 18);
+    assert.equal(h.tools.length, 19);
     assert.equal(h.namespace, 'pvz-llm-agent');
     assert.equal(h.serverVersion, '0.1.19');
   } finally { teardown(bridge); }
@@ -264,7 +296,7 @@ test('router: pvz_restart 重开本关回到选卡阶段', async () => {
   } finally { teardown(bridge); }
 });
 
-test('router: 一批动作里同卡重复且基础冷却 >3.5s 时，提前返回 BATCH_COOLDOWN', async () => {
+test('router: 一批动作里同卡重复且冷却 5s 时自动排队，2 个都能种下', async () => {
   const { game, bridge, router } = setup({ slots: 3 });
   try {
     await router.call('pvz_choose_deck', { cards: ['sunflower', 'peashooter', 'wallnut'], replace: true });
@@ -275,12 +307,11 @@ test('router: 一批动作里同卡重复且基础冷却 >3.5s 时，提前返�
         { type: 'plant', plant: 'sunflower', lane: 1, column: 0 },
       ],
     });
-    assert.equal(r.ok, false);
+    assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(r.results[0].ok, true, '第一个照常执行');
-    assert.equal(r.results[1].code, 'BATCH_COOLDOWN');
-    assert.equal(r.results[1].maxSuccess, 1, '告诉模型本轮最多成功几个');
-    assert.ok(r.results[1].retryAfter >= 5);
-    assert.equal(bridge.snapshot().plants.length, 1, '不会在同一轮里硬撞冷却');
+    assert.equal(r.results[1].ok, true, '第二个排队等冷却后执行');
+    assert.equal(r.results[1].batchDeferred, true);
+    assert.equal(bridge.snapshot().plants.length, 2, '两个都应落地');
   } finally { teardown(bridge); }
 });
 

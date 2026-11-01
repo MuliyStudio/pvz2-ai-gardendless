@@ -103,9 +103,19 @@ export function laneMath({ lanes = [], zombies = [] } = {}) {
   return lanes.map((l) => {
     const zs = zombies.filter((z) => z.lane === l.lane);
     const front = zs.sort((a, b) => a.column - b.column)[0] || null;
-    const dpsUsed = zs.length >= 2 && l.dpsGroup != null ? l.dpsGroup : l.dps;
+    // dpsOnFront 只算能打到最前僵尸的植物；没有这个字段时才退回全行 dps。
+    const dpsUsed = l.dpsOnFront != null
+      ? l.dpsOnFront
+      : (zs.length >= 2 && l.dpsGroup != null ? l.dpsGroup : l.dps);
     const ehp = front ? (front.ehp != null ? front.ehp : front.ehpMax) : null;
-    const math = front ? canKillBeforeHouse({ ehp, dps: dpsUsed, column: front.column, speed: front.speed }) : { killSec: null, etaSec: null, ok: null };
+    // 有 projectedHouseSec 时用它（已经算上沿路植物被啃的拖延）；否则退回纯走路时间。
+    const math = front ? (() => {
+      const killSec = ttkSec(ehp, dpsUsed);
+      const etaSec = l.projectedHouseSec != null
+        ? Number(l.projectedHouseSec)
+        : travelSec(front.column, front.speed);
+      return { killSec, etaSec, ok: killSec != null && etaSec != null ? killSec <= etaSec : null };
+    })() : { killSec: null, etaSec: null, ok: null };
     return {
       lane: l.lane,
       frontType: front ? front.type : null,
@@ -117,6 +127,7 @@ export function laneMath({ lanes = [], zombies = [] } = {}) {
       killSec: math.killSec,
       etaSec: math.etaSec,
       canKillBeforeHouse: math.ok,
+      killBeforeHouse: math.ok,
       wallHp: l.wallHp,
       gap: l.gap,
       lossIn: l.lossIn,
@@ -284,8 +295,16 @@ export function wallRebuildPlan({ wallPlan = [], leadSec = 0 } = {}) {
   });
 }
 
-function isWallCard(type, meta) {
-  return WALL_RE.test(String(type || '')) || String((meta && meta.family) || '') === 'Defence';
+export function isWallCard(type, meta) {
+  const t = String(type || '');
+  if (WALL_RE.test(t)) return true;
+  if (!meta) return false;
+  const family = String(meta.family || '');
+  if (family !== 'Defence') return false;
+  // Defence 家族里还有芦荟/雨伞叶/薄荷这类辅助卡，不能全算墙。
+  // 高血量，或名字明确是坚果（gumnut），才算阻挡位。
+  const hp = Number(meta.hpMax || meta.hp || 0);
+  return hp >= 1500 || /nut/i.test(t);
 }
 
 function isOutputCard(meta) {
@@ -300,7 +319,7 @@ function isOutputCard(meta) {
  *  - OUTPUT_IN_FRONT_OF_WALL：同一批里先种墙、再把输出种到墙右侧（桥上单动作校验看不到前一个动作）。
  * 只返回问题，不执行任何动作。
  */
-export function batchPreflight({ actions = [], cards = [], state = null, cooldownLimitSec = 3.5 } = {}) {
+export function batchPreflight({ actions = [], cards = [], state = null, cooldownLimitSec = 3.5, autoWaitSec = 8 } = {}) {
   const list = Array.isArray(actions) ? actions : [];
   const cardByIndex = new Map();
   const cardByType = new Map();
@@ -421,8 +440,17 @@ export function batchPreflight({ actions = [], cards = [], state = null, cooldow
         }
       }
       if (isWallCard(plantType, meta)) {
-        const cur = batchWalls.get(cell.lane);
-        if (!cur || cell.column > cur.column) batchWalls.set(cell.lane, { column: cell.column, index: i });
+        // 如果这一行最前僵尸已经在墙格左侧/同格，这面墙本来就会在
+        // WALL_TOO_LATE 被拒；不要拿一面“注定失败的墙”去拒绝后面的输出。
+        const zs = state && Array.isArray(state.zombies)
+          ? state.zombies.filter((z) => z.lane === cell.lane)
+          : [];
+        const front = zs.length ? Math.min(...zs.map((z) => Number(z.column)).filter(Number.isFinite)) : null;
+        const willBlock = front == null || cell.column + 0.25 < front;
+        if (willBlock) {
+          const cur = batchWalls.get(cell.lane);
+          if (!cur || cell.column > cur.column) batchWalls.set(cell.lane, { column: cell.column, index: i });
+        }
       }
       seenCells.set(key, { op: type, index: i });
     }
@@ -432,14 +460,22 @@ export function batchPreflight({ actions = [], cards = [], state = null, cooldow
       const occ = occurrences.get(plantType) || [];
       const baseCd = Number(meta && meta.baseCd) || 0;
       if (occ.length >= 2 && baseCd > cooldownLimitSec) {
+        // 第二张同卡如果冷却不太长，交给执行层排队等一次，不再把整轮动作判死；
+        // 第三张及以后仍然硬拒绝，避免一轮连发 3 个同卡。
+        const autoQueue = baseCd <= autoWaitSec;
+        const defer = occ.length === 2 && autoQueue;
         issues.push({
           index: i, code: 'BATCH_COOLDOWN',
-          reason: `${plantType} 基础冷却 ${baseCd}s（>${cooldownLimitSec}s）：同一批里第 ${occ.length} 次种它不可能成功。本轮最多成功 1 个，其余改下一轮或换一张卡。`,
+          reason: defer
+            ? `${plantType} 基础冷却 ${baseCd}s：同一批里第 2 次种它会先排队等冷却，最多成功 2 个。`
+            : `${plantType} 基础冷却 ${baseCd}s（>${cooldownLimitSec}s）：同一批里第 ${occ.length} 次种它不可能成功。本轮最多成功 ${autoQueue ? 2 : 1} 个，其余改下一轮或换一张卡。`,
           card: a.card != null ? Number(a.card) : null,
           type: plantType,
           cd: baseCd,
           retryAfter: baseCd,
-          maxSuccess: 1,
+          maxSuccess: autoQueue ? 2 : 1,
+          defer,
+          autoWaitSec: defer ? baseCd : undefined,
           duplicateOf: occ[0],
         });
       }

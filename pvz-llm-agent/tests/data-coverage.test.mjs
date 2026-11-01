@@ -65,6 +65,20 @@ test('数据配额：有 plantfood 字段的卡必须给出结构化 plantFood�
   assert.deepEqual(unknown, [], `这些卡的能量豆类别没看懂（需要在 knowledge/plant-rules.js 加字段族）：${unknown.join(', ')}`);
 });
 
+test('数据配额：回旋镖能量豆必须算出 16 发 × 20 × 来回 2 次 = 640/目标', { skip: !hasAssets && '没有 game code 目录' }, () => {
+  const rows = loadAll();
+  const st = rows.find((r) => r.t === 'bloomerang')?.st;
+  assert.ok(st, '真实资源里必须找到 bloomerang');
+  assert.equal(st.plantFood.kind, 'lob_barrage');
+  assert.equal(st.plantFood.area, 'row');
+  assert.equal(st.plantFood.count, 16);
+  assert.equal(st.plantFood.projectileDamage, 20);
+  assert.equal(st.plantFood.targetsPerHit, 3);
+  assert.equal(st.plantFood.hitsPerTarget, 2);
+  assert.equal(st.plantFood.totalPerTarget, 640);
+  assert.equal(st.plantFood.maxTotal, 1920);
+});
+
 test('数据配额：图鉴写明「点击」的卡必须被识别成手动激活，并给出 aim', { skip: !hasAssets && '没有 game code 目录' }, () => {
   const rows = loadAll();
   const clicky = rows.filter(({ alm }) => {

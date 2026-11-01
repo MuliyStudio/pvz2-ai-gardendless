@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.17 — 2026-11-01
+
+**世界识别 / 保护植物 / 图鉴门禁 / 窗口交互**
+
+- **世界识别不再看资源名**：优先用 `levelController._levelWorldName` 和 `levelNameString`（如“海盗港湾 - 第 16 天”），关卡资源名（`egypt1` 这种模板名）只作兜底 id。修复自定义海盗关被标成“神秘埃及 16”、并按埃及给出机制/僵尸预告的问题；`level.source.worldName` 一并返回。
+- **保护植物带本体**：`protectCells[].plant` 现在给 type/name/hp/brief/usage.restSec/knockback，对应 `plants[].protected=true`；地块型保护格也按“见过有、现在没了”判定 `dead`；保护植物死亡后整格会从场景消失，这种“本局见过、后来消失”的格子也按死亡上报（`missing:true`），复盘可以写清“死的是弹簧豆”而不是甩锅向日葵。
+- **简报不再喂骨架**：过渡帧里波次/卡池都为空时返回 `BRIEFING_NOT_READY`（retry），不再返回“卡槽 undefined / 起始阳光 ? / 波次 0”的残缺简报，减少“反复读开局简报”的循环。
+- **图鉴门禁只查这一局会用的卡**：`NEED_KNOWLEDGE` 只校验当前卡组 + 保护/预置植物 + 本次 chooseDeck 要换上的卡，不再要求 52 张卡池全查；briefing 已含本关僵尸图鉴，战斗中没有新卡/新僵尸就不必重查。
+- **窗口交互**：AI 思考窗改为主窗口（默认显示，只能“缩小为桌宠”，没有关闭）；配置页改为二级页面（只能关闭，不能缩小，关闭后思考窗不受影响），并移除配置页里的“显示/隐藏思考窗”按钮。
+- **窗口极短的救场交给本地队列**：`plan.queue` 新增 `lane:'airborne'`、`cond.airborne:true`、`cond.zombieType`、`cond.cardReady`。三叶草这类只有 0.5–1s 窗口的卡可以开局写成队列任务（如 `{"type":"plant","plant":"blover","lane":"airborne","column":"back","cond":{"airborne":true},"validForSec":180}`），由 450ms 队列在“空中”那一帧执行；`COOLDOWN/SUN` 会自动重试并把失败码留在 `queue.history`，下一轮再由模型决定补阳光/换卡。
+- **当局本地规则 plan.rules**：和 queue 共用同一个 450ms 执行器，开局由思考模型写好紧急策略。每条规则 `{ id, when, do, limits:{oncePerWave,cooldownSec,validForSec}, onFail }`；`when` 支持 airborne/zombieType/cardReady/minSun/waveGte/…，`do` 支持 plant/replace/shovel/plant_food/activate，`lane` 支持 airborne。规则只执行声明过的动作，不自己选卡；`onFail:"ask"` 的失败码留在 `queue.history`，由快模型下一轮兜底。
+- **规则落点自动挪格**：`lane:'airborne'` / `column:'back'|'ahead'|'safe'` 这类关键字落点被占时，自动在同行走最近的空格，不再把整条规则按 `TASK_OCCUPIED` 删掉（修复三叶草规则触发一次就消失）。
+- **模型思考期间暂停普通队列**：普通建造任务等模型返回后再执行，`urgent` 规则（三叶草等短窗口救场）照常跑；`queue.history` 记录每条动作的 `sunSpent`，`SUN` 失败会带 `queueSpentRecent`，模型能对账而不是误判“阳光被自动收走”。
+- 复盘按保护植物归因：失败说明会带上保护目标名称（如“保护植物 弹簧豆 1/2 死亡”）。
+- 测试 216 项通过。
+
+## 0.4.16 — 2026-10-31
+
+**桌宠先说“正在思考”，想完再显示回复；三类特殊关卡**
+
+- **桌宠气泡不再流式播报 reasoning 原文**：模型思考时只显示“正在思考…”，推理原文仍只在思考窗顶部滚动；`assistant` 的可见回复到了才进气泡。回复会先停留约 4 秒，避免“先说话再调工具”时被动作气泡立刻顶掉；工具动作/结果随后显示。出错、停止、胜负会立即清掉挂起的气泡。
+- **“使用给定植物通关”（forced_deck）**：没有选卡页时也能正确识别（`seedChooser` 不存在但卡组已下发）。开局前必须先读 `pvz_briefing` 的整关波次/卡组数值/coverageGaps，写 `pvz_set_plan` 对策；没计划就 `pvz_start_level`（或在 `pvz_act` 里 start）会返回 `NEED_PLAN`，不会再一点开始就进战斗。
+- **“提前布阵击败僵尸”（preplant）**：布阵期继续用主模型（不会因为 `phase=running` 就切快模型），开局简报在点开始前不再被提前归档。必须先按整关波次写计划再布阵；布阵完成后 `pvz_start_level` 支持 `startReadySet / readySetPlant / startGame` 与“开始！”按钮多种入口，缺计划同样返回 `NEED_PLAN`。选卡完成时 `pvz_choose_deck` 会带回新的 `prep`，模型能立刻知道已进入布阵期。
+- **传送带关（conveyor）**：补回真实 `Conveyor` 组件读取——`state.cards` / `state.conveyor.cards` 是当前带上的卡（index 会变、无阳光/冷却），种植走 `getCards()` + `chooseCard(cf, slot)` + `PlaceUIPlant()`；支持按 `card` 下标或更稳的 `plant` codename 种植，旧 index 失效返回 `NO_CARD` / `CARD_UNAVAILABLE` 并附当前可用的卡。传送带不再被批量预检误报 `BATCH_COOLDOWN`，循环延迟压到 ≤120ms，提示词要求实时用掉当前卡、不要攒卡/用 cells 铺同一张卡。
+- 关卡 JSON 的 `ConveyorSeedBankProperties` / Conveyor 模块也会参与模式判断，组件未初始化时 `prep.mode` 仍然正确。
+- **贴脸救场（本版补丁）**：`state.brief.rescuePlan` 按行给出最前僵尸、接触倒计时、前方植物 `holdSec`（当前血量 ÷ 实际啃食 DPS）、击杀窗口、可 replace 的低价值植物、可打到的输出/一次性卡和能量豆；`lanes[].dpsOnFront` 只算僵尸左侧真正能打到它的植物，不再拿全行 DPS 冒充救场输出。`plants[].underAttack/eatDps/holdSec`、`zombies[].eatDps/eating` 同步给模型。
+- **墙支撑时间按实际接触计算**：`wallPlan` 只累计贴住这面墙的僵尸 `eatDps`，同行远处僵尸不再被算进去；墙在僵尸右侧（已被越过）会标 `wallBehind`，不再拿旧墙血量误判。
+- **种植物报错**：`WALL_TOO_LATE` 不再把当前目标格当成 `suggestedColumns`（修复“种 c1 → 可改种 c1”死循环），并新增 `replaceCells` / `blockable`；前方无空位时明确告诉模型改 replace/一次性卡。同批“计划中的墙”如果本身会 WALL_TOO_LATE，不再连带误杀后面的输出动作。5–8s 的同卡重复（如卷心菜投手 5s）改为执行层排队等一次，不再直接 `BATCH_COOLDOWN`；20s 墙仍然拒绝。
+- **能量豆弹幕数据**：从 `PeaTypePlantfood / CabbageTypePlantfood / BoomerangType` 指向的 `ProjectileProps` 解析单发伤害，并输出 `count / projectileDamage / targetsPerHit / hitsPerTarget / totalPerTarget / maxTotal`。回旋镖能量豆现在明确为 `16 发 × 20 伤害 × 来回 2 次 = 640/目标`，最多 3 目标 `maxTotal=1920`；字段缺失时标 `assumptions`，不拿单发伤害冒充总伤害。
+- **更多能量豆字段别名**：补 `PlantfoodDamageNear/Far`、`ZombieDamagePlantfood`、`SmashDamage`、`ArmorToughness`、`SunValue/EnlightenSunValue`、召唤/处决数量等；阳光型输出 `sunTotal`，召唤/处决型输出 `count`。只写 `PlantfoodPeaCount` 的卡（如藤蔓豌豆）会回退普通攻击弹丸伤害。未识别的 `*Plantfood*` 字段保留到 `rawFields`（`pvz_knowledge` 可查），游戏新增字段不会静默消失。真实资源 160 张有能量豆结构的植物，`kind=unknown` 仍为 0；女巫榛/火鸡投手/树脂投手这 3 张的 PF 是变形/召唤/铺地液，`total` 保持 null 并标 assumptions，不硬编伤害。
+- **省 token（lean context）**：`leanContext` 默认开启。`pvz_state` / `pvz_act` 发给模型的 state 只保留决策字段（lanes 的 `dpsOnFront/frontPlant/holdSec/killWindowSec`、zombies 的 `eatDps`、plants 的 `underAttack/food`、cards 的 `cost/cd/ready`、brief 的 `pressure/rescuePlan/plantFoodPlan/wallPlan` 等），不再每轮重复 `coverageGaps/counterMatrix/laneMath/deckCapabilities/board`。旧 `pvz_state` / `pvz_act` 只保留最近 2 条，之前的状态替换为一行归档；需要完整事实仍可 `pvz_briefing` 或 `pvz_state full=true`。
+- **系统提示词 lean 版**：从约 13k 字符压到约 3.9k 字符，保留协议、坐标、准备/战斗循环、救场、能量豆、墙/输出位置、常见错误处理和计划要求，去掉重复解释。固定前缀每轮都省。
+- **批量动作提醒**：连续 2 轮只发 1 个非 wait 动作时，下一轮自动提醒“2–4 个可并行动作放进同一个 pvz_act”；不替模型决策，只减少往返轮数。可用 `batchNudgeAfter: 0` 关闭。
+- **预算告警**：`tokenBudget` 默认 120 万 tokens，80% / 100% 各发一次提醒；`run_end.stats` 增加 `totalTokens/budgetUsedPct/tokenBudget/estimatedCost`，UI 配置页可改预算（0=关），结束日志显示总量与可选估算金额。单价可用 `inputPricePerM/outputPricePerM` 配置，不填只显示 token。
+- **模型授权的本地执行队列（plan.queue）**：模型在 `pvz_set_plan` 里写 `queue`，本地按 `queueTickMs`（默认 450ms）执行第一条 `cond` 满足的任务；遇到 `COOLDOWN/SUN/占格/墙太晚` 跳过并试下一条，不需要模型为每株植物等一次往返。支持 `lane: danger/protect`、`column: ahead/safe/back`、`cond: minSun/minPlantFood/waveGte/waveLte/zombieInLane/zombieColumnLt/noWall/noShooter/cellEmpty`；队列只执行模型指定的卡/行/顺序，不本地选卡。`queue:[]` 清空，模型更新计划时带 queue 继续。停止 AI/关卡结束会清空队列。
+- **残敌与空行**：`brief.wave.done` 只表示波次计数到底，不再等于关卡结束；新增 `brief.activeLanes / idleLanes / residual{count,lanes,ehp,front}`。提示词明确要求：残敌存在时先清 activeLanes，不要按旧计划给 idleLanes 补墙/输出（保护格/下一波很近/计划明确预布防除外）；队列任务建议用 `lane:'danger'` 或 `cond.zombieInLane:true`。队列还有本地保险：残敌阶段空行的 plant/replace 默认跳过，确实要预布防必须写 `cond.allowIdleLane:true`。
+- **上下文再压缩**：`historyMaxMessages` 默认 16；局内 `plan` 只回 text/goal/queue/emergency/thresholds，完整 lanes/counters/phases 用 `pvz_state full=true`；`pvz_state full=true` 不再被 lean 化。
+- **队列 coast**：队列还有任务时，先让本地执行 `queueCoastRounds`（默认 2）拍、每拍 `queueCoastMs`（默认 700ms），同时本地刷新 state，不请求模型、不烧 token；遇到换波、丢车、任务紧急、胜负立即结束 coast。可由 `queueCoastRounds:0` 关闭。
+- 测试 162 项通过（新增 WALL_TOO_LATE 目标格/替换位、5s 同卡排队、救场窗口、墙接触 DPS、回旋镖能量豆、更多能量豆字段别名、藤蔓豌豆弹丸回退、未知字段保留、lean state/旧状态归档、预算告警、批量动作提醒、plan.queue 执行/危险行/清空、残敌/空行识别、allowIdleLane 预布防、队列 coast）。
+
 ## 0.4.15 — 2026-10-31
 
 > 修复 0.4.14 的 `Invalid failed entity history`：`journal` / `recovery` / `failedEntityTargets` 三个键必须保留，分别写 `null` / `null` / `[]`，不能整个删除。

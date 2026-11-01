@@ -1,16 +1,33 @@
 # PvZ2 Gardendless · AI 草坪指挥官
 
 <p align="center">
-  <a href="https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/tag/v0.4.15">
-    <img src="https://raw.githubusercontent.com/MuliyStudio/pvz2-ai-gardendless/main/docs/cover-v0.4.13.jpg" alt="PvZ2 Gardendless · AI 草坪指挥官封面" width="100%">
-  </a>
+  <img src="docs/assets/logo.png" alt="PvZ2 Gardendless · AI 草坪指挥官" width="200">
 </p>
 
-> **现行实现（2026-10-30）**：新目录 [`pvz-llm-agent/`](pvz-llm-agent/README.md) 是本项目的唯一入口——LLM 是唯一决策者，代码只给事实 / 执行动作 / 返回真实结果 / 记录计划，**没有本地卡组、自动补卡、策略队列**。旧 `pvz-agent/`、`PvZ-MCP/`、`pvz-ai-agent-mod/` 保留但冻结，不再更新。
+> **现行实现（2026-11-01）**：新目录 [`pvz-llm-agent/`](pvz-llm-agent/README.md) 是本项目的唯一入口——LLM 是唯一决策者，代码只给事实 / 执行动作 / 返回真实结果 / 记录计划，**没有本地卡组、自动补卡、策略队列**。旧 `pvz-agent/`、`PvZ-MCP/`、`pvz-ai-agent-mod/` 保留但冻结，不再更新。
 
 让大模型deepseek读取《植物大战僵尸2 花园无尽》的战场，自己决定种什么、种哪一格、什么时候铲掉重种，并自动打完一关。
 
 > 非官方社区项目，与 EA / PopCap / PvZ2 Gardendless 作者无关。仅用于单机体验，请勿用于联机或排行榜。
+
+---
+
+## 演示
+
+<p align="center">
+  <img src="docs/assets/demo-think.gif" alt="开局选卡与 AI 思考窗" width="720">
+  <br><sub>开局读简报、自己配卡，桌宠同步播报</sub>
+</p>
+
+<p align="center">
+  <img src="docs/assets/demo-battle.gif" alt="战斗中自动布防" width="720">
+  <br><sub>战斗中读局面、自己选行选格，失败码原样回传</sub>
+</p>
+
+<p align="center">
+  <img src="docs/assets/demo-burst.gif" alt="能量豆与清场" width="720">
+  <br><sub>贴脸救场、能量豆和整行爆发</sub>
+</p>
 
 ---
 
@@ -38,8 +55,8 @@
 - **真实结果回传**：每次动作都返回 `ok / code / reason / retryAfter`，以及冷却、阳光、占用、上限；失败不会“自动兜底成功”。
 - **计划可回看**：模型用 `pvz_set_plan` 写下的整关计划会一直带在 `state.plan` 里，思考窗也能随时展开看。
 - **增量事件**：`pvz_events` 给波次、丢车、植物损失、新威胁、任务紧急、胜负，模型不用每回合全量对比。
-- **思考浮窗**：推理原文、工具调用、真实结果、计划、状态摘要分开放，F10 开关。
-- **大肥鱼桌宠**：配置页/思考窗点缩小图标收成桌宠，AI 思考/调工具时用打字机气泡同步播报，点桌宠恢复对应窗口；配置页不会被销毁。
+- **思考浮窗（主窗口）**：推理原文、工具调用、真实结果、计划、状态摘要分开放；默认显示，只能缩小成桌宠，F10 缩小/展开。
+- **大肥鱼桌宠**：思考窗缩小后变成桌宠，AI 思考/调工具时用打字机气泡同步播报，点桌宠回到思考窗；配置页是二级页面，点齿轮打开、关闭即关闭，不会被销毁。
 - **两种驱动方式**：游戏内直接填 Key 调用模型，或通过 MCP 交给外部 Agent（不需要在游戏里填 Key）。
 
 ---
@@ -52,7 +69,7 @@
 | 模型 | 游戏内浮窗填 OpenAI 兼容接口 | MCP 客户端自带的模型 |
 | 需要 API Key | 需要 | 不需要（客户端负责） |
 | 需要启动器 | **需要**（解除 CSP + 开调试端口） | 需要启动器开调试端口，但不需要解 CSP |
-| 操作入口 | 游戏内浮窗 / F8 | MCP 工具（16 个 `pvz_*`） |
+| 操作入口 | 游戏内浮窗 / F8 | MCP 工具（19 个 `pvz_*`） |
 
 > 两种模式不要同时“开始 AI”，否则会抢操作。
 
@@ -64,7 +81,7 @@
 
 | 文件 | 内容 | 适合 |
 | --- | --- | --- |
-| `PvZAI-LLM-Agent-Bundle-v0.4.15.zip` | 模组 ZIP + 启动器 + MCP Server + 配置脚本 + 安装说明 | 第一次用，推荐 |
+| `PvZAI-LLM-Agent-Bundle-v0.4.17.zip` | 模组 ZIP + 启动器 + MCP Server + 配置脚本 + 安装说明 | 第一次用，推荐 |
 | `pvz-llm-agent.zip` | 只有 GP-Next 模组（`pack.json` + `scripts/main.js`），**不含启动器** | 已经会装 GP-Next 模组 |
 
 ---
@@ -76,7 +93,7 @@
 ### 方式 A：发布包（推荐）
 
 1. **完全退出游戏**（不是最小化）。
-2. 解压 `PvZAI-LLM-Agent-Bundle-v0.4.15.zip`（整个文件夹，别只拿一个 exe）。
+2. 解压 `PvZAI-LLM-Agent-Bundle-v0.4.17.zip`（整个文件夹，别只拿一个 exe）。
 3. 双击 `PvZAI_Launcher.exe`。
    - 自动把 `pvz-llm-agent.zip` 装进 GP-Next 并启用（写 `installed/<digest>` + `configuration-state.json`）；
    - 带 9222 调试端口启动游戏；
@@ -117,12 +134,12 @@
 | --- | --- | --- |
 | 服务商 | `DeepSeek 官方` / `OpenCode Go（本地代理）` / `自定义` | 切换后自动填 API Base 和模型，模型名仍可手改 |
 | API Base | `https://api.deepseek.com/v1` | 必须包含 `/v1` |
-| 模型 | `deepseek-chat` / `deepseek-flash` | 支持 OpenAI 兼容且支持 tool calling 的接口 |
+| 模型 | `deepseek-flash`（推荐）/ `deepseek-v4-pro` | 支持 OpenAI 兼容且支持 tool calling 的接口；战斗快模型建议留空 |
 | API Key | `sk-...` | 默认只保存在内存；勾选“记住 Key”后明文存本机 localStorage |
 
 3. 点 **测试**（发一条 8 token 的请求）确认模型可用。
 4. 点 **开始 AI**，或按 **F8**。
-5. 浮窗会按模型自己的节奏走完整套流程，底部 `F8 开始 / 停止 · F10 思考窗` 一直可见。
+5. 浮窗会按模型自己的节奏走完整套流程，底部 `F8 开始 / 停止 · F10 缩小 / 展开思考窗` 一直可见。
 6. 再按 **F8** 或点 **停止** 立即中止；关卡胜负会自动停。
 
 ### 勾选项说明
@@ -134,8 +151,8 @@
 
 ### 浮窗操作
 
-- 底部主按钮区：**思考窗**（切换显示/隐藏，同 F10）、**测试连接**、**开始 AI**、**停止**；标题栏右侧 **缩小** 图标收成大肥鱼桌宠。**点桌宠展开 AI 思考窗，思考窗右上角齿轮打开配置页**；配置页缩小时会连同思考窗一起关掉，只留桌宠。思考窗「×」直接关闭、不生成桌宠。
-- 界面按钮已图标化（Lucide，ISC），悬停有中文提示；默认模型 `deepseek-flash`、战斗快模型 `deepseek-chat`。
+- 标题栏主按钮区：**测试连接**、**开始 AI**、**停止**；右上角 **×** 关闭配置页，**齿轮**在思考窗里打开配置页。**AI 思考窗是主窗口**：默认显示，右上角只有「缩小为桌宠」，没有关闭；缩成桌宠后点桌宠恢复。
+- 界面按钮已图标化（Lucide，ISC），悬停有中文提示；默认模型 `deepseek-flash`，战斗快模型建议**留空**（全程单模型，避免切换重建上下文、丢缓存）。
 - 标题栏可拖动；鼠标放到窗口**边缘/角落**变缩放光标，按住拖动缩放；标题栏**双击**恢复默认大小和位置。主浮窗和思考窗都支持，大小会记住。
 - 浮窗底部有一行 **CSP 自检**：检测到页面 CSP 时会提示，此时模型请求可能被拦截，需要用启动器。
 - 如果挡住“一起摇滚吧”或暂停按钮，拖到别处或收起。
@@ -278,7 +295,7 @@ Key 错误、Base URL 少了 `/v1`、模型名不对，或中转不兼容。先�
 ```text
 pvz-llm-agent/          GP-Next 模组 + MCP Server + 游戏内浮窗（唯一入口）
   bridge/               只读状态 / 执行动作 / 发事件 / 存计划
-  tools/                16 个工具的 Schema、router、错误码、wait、格式化
+  tools/                19 个工具的 Schema、router、错误码、wait、格式化
   mcp/                  stdio MCP Server（CDP 传输）
   in-game/              提示词、tool calling 循环、浮窗 UI
   knowledge/            世界机制 + 从游戏数据生成的静态图鉴
@@ -332,9 +349,9 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:an
 
 ## 更新日志
 
-当前版本：**版本 0.4.15 + 启动器 1.0.1**（大肥鱼桌宠 + 图标化配置页 + 数据完整性/能量豆策略）。
+当前版本：**版本 0.4.17 + 启动器 1.0.1**（桌宠先思考后回复 + 给定卡组/提前布阵/传送带适配）。
 
-> v0.2.x / v0.3.x 的旧发布（`pvz-ai-agent-mod` 时代）已归档为 Pre-release，只作存档，不再更新；下载请用 [v0.4.15+](https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/latest)。
+> v0.2.x / v0.3.x 的旧发布（`pvz-ai-agent-mod` 时代）已归档为 Pre-release，只作存档，不再更新；下载请用 [v0.4.17+](https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/latest)。
 
 完整版本记录见 **[CHANGELOG.md](CHANGELOG.md)**；逐版本实现细节另见 **[pvz-llm-agent/CHANGELOG.md](pvz-llm-agent/CHANGELOG.md)**。
 

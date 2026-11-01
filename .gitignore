@@ -29,3 +29,6 @@ pvz-llm-agent/pvz-llm-agent.zip
 tools/_*
 pvz-llm-agent/tools/_*
 pvz-llm-agent/live-watch-*.json
+
+# 录屏源文件
+*.mp4

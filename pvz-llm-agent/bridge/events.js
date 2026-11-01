@@ -77,10 +77,17 @@ export function createEventStreamApi({ snapshot, onLevelEnd = null, keyOf = null
       .map((l) => ({ lane: l.lane, gap: l.gap, lossIn: l.lossIn, dps: l.dps }));
     const protect = (state && state.protectCells) || [];
     const flowerLineCells = protect.filter((c) => c && c.source !== 'tile');
-    const flowersDead = flowerLineCells.filter((c) => c.dead).length;
+    // 地块型保护格现在也能判定死亡（见过植物、后来没了），所以按全部保护格统计。
+    const flowersDead = protect.filter((c) => c && c.dead).length;
     const deadCells = protect.filter((c) => c && c.dead).map((c) => ({
       lane: c.lane, column: c.column, source: c.source || null, tip: c.tip || null,
+      // 死亡的保护目标要说清是哪张卡（弹簧豆/花…），否则复盘只能瞎归因。
+      plant: (c.plant && c.plant.type) || c.type || null,
+      name: (c.plant && c.plant.name) || null,
     }));
+    const protectTypes = [...new Set(protect
+      .map((c) => (c && c.plant && c.plant.type) || (c && c.type) || null)
+      .filter(Boolean))];
     const lastZombies = ((state && state.zombies) || []).slice(0, 16).map((z) => ({
       type: z.type, name: z.name || null, lane: z.lane, column: z.column, tags: z.tags || [], ehp: z.ehp,
     }));
@@ -113,7 +120,24 @@ export function createEventStreamApi({ snapshot, onLevelEnd = null, keyOf = null
       sunEnd: state && state.sun != null ? state.sun : null,
       plantsLost: run.plantsLost,
       mowersLost: run.mowersLost,
-      flowers: protect.length ? { total: protect.length, dead: flowersDead, deadKnown: flowerLineCells.length > 0, cells: deadCells } : null,
+      flowers: protect.length ? {
+        total: protect.length,
+        dead: flowersDead,
+        // 判负那一帧会清场，不能据此断言“全部死亡”。
+        lossTriggered: !!(state.level && state.level.lost),
+        // contact = 碰到即判负（踩坏鲜花）；eat = 被啃死。
+        mode: (state.brief && state.brief.protect && state.brief.protect.mode) || null,
+        // 地块型保护格以前 deadKnown 恒为 false，复盘会以为“没有保护植物死亡”；
+        // 现在保护格带了本体类型和死亡判定，可以当作已知事实用。
+        deadKnown: flowerLineCells.length > 0 || protectTypes.length > 0 || deadCells.length > 0,
+        types: protectTypes,
+        cells: deadCells,
+        goal: protect.map((c) => ({
+          lane: c.lane, column: c.column,
+          type: (c.plant && c.plant.type) || c.type || null,
+          dead: !!c.dead,
+        })),
+      } : null,
       lastZombies,
       pressure,
       tasks,

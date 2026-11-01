@@ -131,3 +131,40 @@ test('actAll 部分失败不抛异常，并返回每个动作的真实 code', as
     assert.equal(r.results[1].code, 'EMPTY');
   } finally { teardown(bridge); }
 });
+
+test('开局强制读图鉴：未 briefing/knowledge 时选卡被拦截，批量查完放行', async () => {
+  resetAssetCache();
+  const game = createFakeGame({ slots: 3 });
+  const bridge = createBridge(game.ctx, { knowledgeGate: true });
+  try {
+    const early = await bridge.chooseDeck(['sunflower', 'peashooter', 'wallnut'], true);
+    assert.equal(early.ok, false, JSON.stringify(early));
+    assert.ok(['NEED_BRIEFING', 'NEED_KNOWLEDGE'].includes(early.code), JSON.stringify(early));
+
+    const brief = await bridge.briefing();
+    assert.equal(brief.ok, true, JSON.stringify(brief));
+    const types = [...new Set([
+      ...((brief.cards || []).map((c) => c.type)),
+      ...((brief.zombies || []).map((z) => z.type)),
+    ].filter(Boolean))];
+    const know = await bridge.knowledge({ types });
+    assert.equal(know.ok, true, JSON.stringify(know));
+
+    const ok = await bridge.chooseDeck(['sunflower', 'peashooter', 'wallnut'], true);
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+  } finally { teardown(bridge); }
+});
+
+test('clearMemory：清除关卡记忆时也清掉当前计划和队列', async () => {
+  resetAssetCache();
+  const game = createFakeGame({ slots: 3 });
+  const bridge = createBridge(game.ctx);
+  try {
+    await bridge.setPlan({ text: 'old plan', goal: 'x' });
+    assert.ok(bridge.snapshot().plan, '先有旧计划');
+    const r = bridge.clearMemory('all');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(bridge.snapshot().plan, null, '计划应被清空');
+    assert.equal(bridge.queueStatus().pending, 0, '队列应被清空');
+  } finally { teardown(bridge); }
+});

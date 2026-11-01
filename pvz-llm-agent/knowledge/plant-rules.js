@@ -144,16 +144,37 @@ export function damageModel(props, ctx = {}) {
 // ─────────────────────────────────────────────────────────────
 
 /** 出现任意一个就算「这株有专属能量豆效果」。 */
-export const PLANTFOOD_ANY_RE = /plantfood/i;
+export const PLANTFOOD_ANY_RE = /plantfood|ArmorToughness/i;
 
 const PF_NUM = {
-  dmgPerHit: ['DamagePlantfood', 'PlantfoodDamage', 'PlantfoodDamagePerHit', 'DamagePerHitPlantfood', 'StabDamagePlantfood', 'ButterDamagePlantfood'],
+  // 伤害字段可能有“近/远”“植物/僵尸”“重击”等多种写法；ZombieDamagePlantfood
+  // 必须排在 PlantDamagePlantfood 前，否则月豆会被 0 伤害字段截胡。
+  dmgPerHit: [
+    'DamagePlantfood', 'PlantfoodDamage', 'PlantfoodDamagePerHit', 'DamagePerHitPlantfood',
+    'StabDamagePlantfood', 'ButterDamagePlantfood', 'PlantfoodDamageNear', 'PlantfoodDamageFar',
+    'ZombieDamagePlantfood', 'PlantDamagePlantfood', 'SmashDamage', 'TongueSlapDamagePF',
+    'TongueSlapDamage',
+  ],
   hits: ['PlantfoodHitCount', 'ShootCountPlantfood', 'ShootCount', 'PlantFoodPeaCount', 'PlantfoodPeaCount'],
   dps: ['PlantfoodDPS', 'PlantFoodDPS', 'DPSPlantfood', 'PlantfoodSideDPS', 'PlantFoodSplashDPS', 'PFDPS', 'PlantfoodRayDamage'],
   duration: ['PlantfoodDuration', 'PlantfoodTime', 'PlantFoodDurationSeconds', 'PFDuration', 'AttackDurationPlantfood', 'PlantfoodLastingTime'],
   chance: ['ChanceToPlantfood'],
   heal: ['HealthPlantfoodHeal', 'HealHPSPlantfood', 'HealthPerHeal'],
-  armor: ['ToughnessPlantfooded'],
+  armor: ['ToughnessPlantfooded', 'ArmorToughness'],
+  // 非弹幕效果的数量：召唤数、处决数、阳光脉冲数等。
+  effectCount: [
+    'PlantfoodEnlightenCount', 'PlantfoodChildrenCount', 'PlantfoodSummonCount',
+    'ExplodeSeedlingCount', 'PlantfoodSwallowCount', 'ZombieCountPerSwallow',
+    'PlantfoodGumProjectileCount', 'PlantfoodFireCount',
+  ],
+  sun: ['EnlightenSunValue', 'SunProducePerZombiePF', 'SunProducePerZombie', 'SunValue'],
+  // 弹幕型能量豆的“发数”。注意：这些是弹丸数，不是伤害；伤害要取
+  // PeaTypePlantfood / CabbageTypePlantfood / BoomerangType 指向的 ProjectileProps。
+  projectileCount: [
+    'PlantfoodBoomerangCount', 'PlantfoodPeaCount', 'PlantFoodPeaCount', 'PlantfoodPeaCountBack',
+    'PlantfoodProjectilesToFire', 'PlantfoodProjectileCount', 'PlantfoodProjectilesCount',
+    'ShootCountPlantfood', 'PlantfoodSporeCount', 'PlantfoodLightningCount',
+  ],
 };
 
 const PF_RULES = [
@@ -235,14 +256,16 @@ export function plantFoodFacts(props, ctx = {}) {
   // 图鉴写了能量豆短语时优先采用（它描述的是这个效果本身）
   const almKind = kindFromAlmanac(almPf);
   if (almKind && almKind !== kind && confidence !== 'high') { kind = almKind; confidence = 'medium'; }
-  if (kind === 'nuke' && !area) { area = 'full'; radius = null; }
 
   // 范围：显式字段 > 图鉴 AREA/RANGE > 家族
   // 注意：图鉴 AREA 常常描述的是「这一个效果的爆炸范围」，不等于能量豆的范围
   // （例如椰子炮 AREA=3x3 是炮弹爆炸，它的能量豆是本行连射），所以只让「全屏」优先覆盖。
   let area = rule ? rule.area : null;
   let radius = area === 'self_aoe' ? 1 : (area === 'self_tile' ? 0 : null);
-  const fromText = areaFromText(ctx.almanacArea, ctx.almanacRange);
+  const fromText = areaFromText(
+    [ctx.almanacArea, ctx.almanacPlantFood].filter(Boolean).join(' '),
+    ctx.almanacRange,
+  );
   if (fromText.area === 'full') {
     area = 'full';
     radius = null;
@@ -256,6 +279,7 @@ export function plantFoodFacts(props, ctx = {}) {
     else area = 'self';
     confidence = confidence === 'high' ? 'medium' : confidence;
   }
+  if (kind === 'nuke' && !area) { area = 'full'; radius = null; }
 
   const dmgPerHit = prFirst(d, PF_NUM.dmgPerHit);
   const hits = prFirst(d, PF_NUM.hits);
@@ -264,27 +288,125 @@ export function plantFoodFacts(props, ctx = {}) {
   const chance = prFirst(d, PF_NUM.chance);
   const heal = prFirst(d, PF_NUM.heal);
   const armor = prFirst(d, PF_NUM.armor);
+  const effectCount = prFirst(d, PF_NUM.effectCount);
+  const sunValue = prFirst(d, PF_NUM.sun);
+
+  // ── 弹幕型能量豆：把「发数 × 单发弹丸伤害」也算出来 ──
+  // 例：回旋镖 PlantfoodBoomerangCount=16，BoomerangType=boomerang，
+  // boomerang Damage=20，PierceCount=3，图鉴写“来回两次” → hitsPerTarget=2。
+  // 因此 totalPerTarget=16×20×2=640，maxTotal=640×3=1920。
+  // 字段缺失时保留 null，不拿单发伤害冒充整次能量豆总伤害。
+  const attack = ctx.attack || null;
+  let projectileCount = prFirst(d, PF_NUM.projectileCount);
+  if (!projectileCount) {
+    const perShot = prFirst(d, ['PeaCountPerShotPlantfood']);
+    const shootTime = prFirst(d, ['PlantfoodShootTime']);
+    if (perShot && shootTime) {
+      projectileCount = { key: `${perShot.key}*${shootTime.key}`, value: perShot.value * shootTime.value };
+    }
+  }
+  const projectiles = Array.isArray(ctx.plantFoodProjectiles) ? ctx.plantFoodProjectiles : [];
+  const proj = projectiles.find((p) => p && Number(p.damage) > 0)
+    || (Number(ctx.fallbackProjectileDamage) > 0
+      ? { type: null, damage: Number(ctx.fallbackProjectileDamage), fallback: true }
+      : null);
+  const projectileDamage = proj ? Number(proj.damage) : null;
+  // 没有显式发数但拿到了弹丸伤害：至少按 1 发记，并标 assumptions 让模型知道这是下界。
+  let count = projectileCount ? Number(projectileCount.value)
+    : (projectileDamage != null && ['barrage', 'lob_barrage'].includes(kind) ? 1 : null);
+  // 非弹幕效果的数量（召唤数/处决数/阳光脉冲数）也放到 count，避免只有 kind 没有数量。
+  if (count == null && effectCount) count = Number(effectCount.value);
+  if (count == null && kind === 'sun_burst' && duration) count = Number(duration.value);
+  const hitsPerTarget = Math.max(1, Number(attack && attack.hitsPerTarget) || 1);
+  const targetsPerHit = Math.max(1, Number(attack && attack.targets) || 1);
+  const projectileTotal = projectileDamage != null && count != null ? projectileDamage * count : null;
+  const totalPerTarget = projectileTotal != null ? projectileTotal * hitsPerTarget : null;
+  const maxTotal = totalPerTarget != null && area !== 'full'
+    ? totalPerTarget * targetsPerHit
+    : null;
 
   let total = null;
+  let sunTotal = null;
   if (dmgPerHit && hits) total = dmgPerHit.value * hits.value;
   else if (dmgPerHit && duration && kind === 'self_aoe_dot') total = dmgPerHit.value * duration.value;
   else if (dps && duration) total = Math.round(dps.value * duration.value);
   else if (dps) total = dps.value;
   else if (dmgPerHit) total = dmgPerHit.value;
+  else if (totalPerTarget != null) total = totalPerTarget;
+  // 阳光型：SunValue × 脉冲次数。没有次数字段时只给单次 sunValue，不硬乘。
+  if (kind === 'sun_burst' && sunValue) {
+    const pulses = effectCount ? Number(effectCount.value)
+      : (duration ? Number(duration.value) : null);
+    if (pulses != null && pulses > 0) sunTotal = sunValue.value * pulses;
+  }
+
+  const assumptions = [];
+  if (projectileDamage != null && !projectileCount) assumptions.push('发数字段缺失，按 1 发计算（下界）');
+  if (proj && proj.fallback) assumptions.push('PF 未指定弹丸类型，暂用普通攻击弹丸伤害作为单发伤害');
+  if (projectileDamage == null && ['barrage', 'lob_barrage'].includes(kind)) assumptions.push('未解析到弹丸伤害，total 可能不完整');
+  if (hitsPerTarget > 1) assumptions.push(`按每发命中同一目标 ${hitsPerTarget} 次计算`);
+  if (targetsPerHit > 1) assumptions.push(`按每发最多命中 ${targetsPerHit} 个目标计算`);
+  if (sunTotal != null) assumptions.push('阳光总量按 sunValue × 脉冲次数估算');
+  if (count != null && !projectileCount && effectCount) assumptions.push('count 是效果数量（召唤/处决/脉冲），不是弹丸数');
+
+  const fields = [...new Set([
+    matchedKey,
+    dmgPerHit && dmgPerHit.key,
+    hits && hits.key,
+    duration && duration.key,
+    armor && armor.key,
+    projectileCount && projectileCount.key,
+    effectCount && effectCount.key,
+    sunValue && sunValue.key,
+  ].filter(Boolean))];
+  // 未归类的 plantfood 字段原样留给 pvz_knowledge：游戏新增字段时，
+  // kind 可能暂时只能到 unknown，但模型仍然能看到原始字段名和值。
+  const used = new Set([
+    ...Object.values(PF_NUM).flat(),
+    matchedKey,
+    dmgPerHit && dmgPerHit.key,
+    hits && hits.key,
+    duration && duration.key,
+    armor && armor.key,
+  ].filter(Boolean));
+  const rawFields = {};
+  for (const [k, v] of Object.entries(d)) {
+    if (!/plantfood/i.test(k) || used.has(k) || v == null) continue;
+    if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') {
+      rawFields[k] = typeof v === 'string' ? v.slice(0, 160) : v;
+      if (Object.keys(rawFields).length >= 12) break;
+    }
+  }
 
   return {
     kind, area,
     radius,
+    // total = 所有弹丸命中“一个目标”的总伤害；maxTotal = 同时命中多个目标时的上限。
     total: total != null ? Math.round(total) : null,
-    dmgPerHit: dmgPerHit ? dmgPerHit.value : null,
-    hits: hits ? hits.value : null,
+    totalPerTarget: totalPerTarget != null ? Math.round(totalPerTarget) : null,
+    maxTotal: maxTotal != null ? Math.round(maxTotal) : null,
+    sunTotal: sunTotal != null ? Math.round(sunTotal) : null,
+    sunValue: sunValue ? sunValue.value : null,
+    count,
+    projectile: proj ? {
+      type: proj.type || null,
+      damage: projectileDamage,
+      splashDamage: proj.splashDamage != null ? proj.splashDamage : null,
+    } : null,
+    projectileDamage,
+    targetsPerHit,
+    hitsPerTarget,
+    dmgPerHit: dmgPerHit ? dmgPerHit.value : projectileDamage,
+    hits: hits ? hits.value : count,
     dps: dps ? dps.value : null,
     durationSec: duration ? duration.value : null,
     heal: heal ? heal.value : null,
     armorHp: armor ? armor.value : null,
     chance: chance ? chance.value : null,
     almanac: almPf || null,
-    fields: [matchedKey].filter(Boolean),
+    fields,
+    rawFields: Object.keys(rawFields).length ? rawFields : undefined,
+    assumptions: assumptions.length ? assumptions : undefined,
     confidence,
   };
 }

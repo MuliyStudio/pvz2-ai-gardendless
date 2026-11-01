@@ -135,6 +135,14 @@ try {
       plan: agent && agent.plan ? agent.plan : null,
       timings: parseTimings(agent && agent.logText).slice(-3),
       guardCodes: agent && agent.codes ? agent.codes : null,
+      // P1 跨关指标：墙/救场缺口、队列、推车、leadSec。
+      mowersLost: state && Array.isArray(state.lanes)
+        ? state.lanes.filter((l) => l && l.mower === false).length : null,
+      threatGaps: state && Array.isArray(state.threatGaps)
+        ? state.threatGaps.map((g) => ({ kind: g.kind, lane: g.lane, capability: g.requiredCapability || null })) : null,
+      queue: state && state.queue
+        ? { pending: state.queue.pending, paused: state.queue.paused, stats: state.queue.stats || null } : null,
+      latency: state && state.latency ? state.latency : null,
       errors: agent && agent.ui && agent.ui.lastError ? [agent.ui.lastError] : [],
     };
     report.samples.push(sample);
@@ -162,13 +170,38 @@ try {
 
   const phases = [...new Set(report.samples.map((s) => s.phase).filter(Boolean))];
   report.phases = phases;
+  const running = report.samples.filter((s) => s.phase === 'running');
+  const lastQueue = [...report.samples].reverse().find((s) => s.queue) || null;
+  const nums = (key) => report.samples.map((s) => Number(s.latency && s.latency[key])).filter(Number.isFinite);
+  const avg = (list) => list.length ? Math.round(list.reduce((a, b) => a + b, 0) / list.length) : null;
+  const gapKinds = {};
+  for (const s of running) {
+    for (const g of s.threatGaps || []) gapKinds[g.kind] = (gapKinds[g.kind] || 0) + 1;
+  }
+  report.metrics = {
+    runningSamples: running.length,
+    maxMowersLost: running.reduce((m, s) => Math.max(m, Number(s.mowersLost) || 0), 0),
+    emptyQueueSamples: running.filter((s) => s.queue && Number(s.queue.pending) === 0).length,
+    avgLeadSec: avg(nums('leadSec')),
+    maxLeadSec: nums('leadSec').length ? Math.max(...nums('leadSec')) : null,
+    avgModelMs: avg(nums('modelMs')),
+    avgToolMs: avg(nums('toolMs')),
+    queueStale: lastQueue && lastQueue.queue && lastQueue.queue.stats ? lastQueue.queue.stats.stale : null,
+    queueExpired: lastQueue && lastQueue.queue && lastQueue.queue.stats ? lastQueue.queue.stats.expired : null,
+    queueSkipped: lastQueue && lastQueue.queue && lastQueue.queue.stats ? lastQueue.queue.stats.skipped : null,
+    threatGapKinds: gapKinds,
+  };
   report.ok = !report.errors.length && phases.some((p) => ['running', 'won', 'lost'].includes(p));
 } catch (e) {
   report.errors.push(String(e && e.message || e));
   report.ok = false;
 } finally {
   fs.writeFileSync(OUT, JSON.stringify(report, null, 2), 'utf8');
-  console.log(JSON.stringify({ ok: report.ok, samples: report.samples.length, phases: report.phases, errors: report.errors, codes: report.codes, cellBlocked: report.cellBlocked, out: OUT }, null, 2));
+  console.log(JSON.stringify({
+    ok: report.ok, samples: report.samples.length, phases: report.phases,
+    metrics: report.metrics, errors: report.errors, codes: report.codes,
+    cellBlocked: report.cellBlocked, out: OUT,
+  }, null, 2));
   try { bridge.close(); } catch { /* ignore */ }
   process.exitCode = report.ok ? 0 : 1;
 }

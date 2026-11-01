@@ -167,7 +167,7 @@ test('events 产生波次事件（增量、去抖）', () => {
   } finally { teardown(bridge); }
 });
 
-test('health 报告能力，且明确没有本地策略/自动卡组/队列', () => {
+test('health 报告能力：无本地选卡/自动卡组，队列只执行模型任务', () => {
   const { bridge } = setup({ slots: 3 });
   try {
     const h = bridge.health();
@@ -178,7 +178,7 @@ test('health 报告能力，且明确没有本地策略/自动卡组/队列', ()
     assert.match(String(h.version), /^\d+\.\d+\.\d+$/);
     assert.equal(h.features.localStrategy, false);
     assert.equal(h.features.autoDeck, false);
-    assert.equal(h.features.queue, false);
+    assert.equal(h.features.queue, true, '模型授权的本地执行队列');
     assert.equal(h.missing.length, 0);
   } finally { teardown(bridge); }
 });

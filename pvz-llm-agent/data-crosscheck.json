@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-01T05:43:11.474Z",
+  "plants": {
+    "checked": 233,
+    "issues": 0,
+    "byField": {},
+    "samples": []
+  },
+  "zombies": {
+    "checked": 335,
+    "issues": 0,
+    "byField": {},
+    "samples": []
+  }
+}

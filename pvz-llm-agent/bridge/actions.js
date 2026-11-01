@@ -4,6 +4,7 @@
  * 不补卡、不换卡、不改 LLM 的卡组；选卡只做校验 + 逐张执行 + 等待 UI 同步。
  */
 import { plantFoodTargets } from '../knowledge/plant-rules.js';
+import { isWallCard } from './mechanics.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const cleanType = (t) => String(t || '').replace(/^RTID\(([^@()]+)@.*\)$/, '$1').trim();
@@ -42,9 +43,39 @@ function nearestZombieCol(C, lane) {
   } catch { return null; }
 }
 
-export function createActions({ getCc, findComps, findCompByClass, stats, reader, version }) {
+export function createActions({ getCc, findComps, findCompByClass, stats, reader, version, getPlan, getLevelKey }) {
+  const isWallType = (type) => {
+    try { return isWallCard(type, stats.plantStatsOf(type)); } catch { return isWallCard(type, null); }
+  };
   function fail(code, extra, reason) {
     return { ok: false, code, reason: reason || code, ...(extra || {}) };
+  }
+
+  // 传送带：当前带上的卡在 Conveyor.getCards()，不在 Cards.CFs。
+  // 关卡 JSON 里有 Conveyor 模块时也算（组件还没初始化时，至少模式判断正确）。
+  function conveyorInfo(map, cards) {
+    const cv = map && (map.Conveyor || map.ConveyorBelt || null);
+    let ls = null;
+    try { ls = map && map.levelController ? stats.levelScriptOf(map.levelController) : null; } catch { ls = null; }
+    const fromLevel = !!(ls && ls.seedBank && ls.seedBank.conveyor);
+    if (!cv && !fromLevel) return null;
+    let list = [];
+    let slots = [];
+    let plantList = [];
+    try {
+      if (cv) {
+        list = (typeof cv.getCards === 'function' ? cv.getCards() : []) || [];
+        slots = [].concat(cv.lane1slots || [], cv.lane2slots || [], cv.laneVertslots || []).filter(Boolean);
+        plantList = (Array.isArray(cv.plantList) ? cv.plantList : [])
+          .map((p) => cleanType(p && (p.PlantType || p.Type) || p)).filter(Boolean);
+      }
+    } catch { /* ignore */ }
+    const cardCount = cards && Array.isArray(cards.CFs) ? cards.CFs.length : 0;
+    const enabled = cv
+      ? (list.length > 0 || plantList.length > 0 || cardCount === 0)
+      : (fromLevel && cardCount === 0);
+    if (!enabled) return null;
+    return { cv, cards: list, slots, plantList, enabled: true };
   }
 
   function deckStatus() {
@@ -57,13 +88,17 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     const slots = cards.maxSlotCount || 0;
     const current = (cards.CFs || []).filter(Boolean).map((c) => cleanType(c.Type));
     const seed = cards.seedChooser;
-    const conveyor = !!(cards.conveyor || (lvl && lvl.conveyorMode));
+    const cinfo = conveyorInfo(ctxg.map, cards);
+    const conveyor = !!(cinfo && cinfo.enabled) || !!(cards.conveyor || (lvl && lvl.conveyorMode));
     return {
       ok: true,
       phase: phaseState.phase,
       gameStarted: !!cards.gameStarted,
       prepReady: !!(seed && slots > 0),
       conveyor,
+      conveyorCards: cinfo && cinfo.enabled
+        ? cinfo.cards.map((cf, i) => ({ index: i, type: cleanType(cf.Type), name: (stats.plantStatsOf(cleanType(cf.Type)) || {}).name || cleanType(cf.Type) }))
+        : [],
       slots,
       current,
       gameStartable: typeof cards.GameStartable === 'function' ? !!cards.GameStartable() : null,
@@ -138,7 +173,8 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
       if (phaseNow === 'objective') return fail('PREP_NOT_READY', { phase: phaseNow, retryable: true }, '任务弹窗还没关闭，再试一次');
     }
     if (phaseNow === 'running' || phaseNow === 'won' || phaseNow === 'lost') return fail('ALREADY_STARTED', { phase: phaseNow });
-    if (cards.conveyor || (lvl && lvl.conveyorMode)) {
+    const cinfo = conveyorInfo(ctxg.map, cards);
+    if ((cinfo && cinfo.enabled) || cards.conveyor || (lvl && lvl.conveyorMode)) {
       return { ok: true, conveyor: true, slots: 0, requested: [], applied: [], skipped: [], missing: [], actualDeck: [], full: true, detail: '传送带关卡无需选卡' };
     }
     // 给定/锁定卡组：卡槽已满且没有可选卡（或全部锁定）。不要清空、不要报“缺卡”，原样返回。
@@ -148,12 +184,16 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     const seedUnlocked = cards.seedChooser && Array.isArray(cards.seedChooser.CFs)
       ? cards.seedChooser.CFs.filter((cf) => cf && cf.Type && !(cf.ca && (cf.ca.locked || cf.ca.disallowed))).length
       : 0;
-    if (slotsNow > 0 && currentNow.length >= slotsNow && (lockedNow >= slotsNow || seedUnlocked === 0)) {
+    const noChooser = !cards.seedChooser;
+    const forcedFlag = !!(cards.forcedDeck || cards.deckLocked || cards.presetDeck)
+      || !!(lvl && (lvl.forcedDeck || lvl.deckLocked || lvl.presetDeck || lvl.givenDeck));
+    if (forcedFlag || (currentNow.length > 0 && (noChooser || (slotsNow > 0 && currentNow.length >= slotsNow && (lockedNow >= slotsNow || seedUnlocked === 0))))) {
       return {
         ok: true, forced: true, deckLocked: true, slots: slotsNow,
         requested: Array.isArray(requested) ? requested : [], applied: [], skipped: [], missing: [],
         actualDeck: currentNow, full: true,
-        detail: '本关卡组由系统给定/锁定，无需也不能换卡；直接 pvz_start_level',
+        mustPlanBeforeStart: true,
+        detail: '本关卡组由系统给定/锁定，无需也不能换卡；先 pvz_briefing + pvz_set_plan，再 pvz_start_level',
       };
     }
     if (!cards.seedChooser) return fail('PREP_NOT_READY', { retryable: true }, '选卡界面还没准备好');
@@ -298,28 +338,86 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     };
   }
 
+  // 提前布阵关的“开始！”按钮在不同版本里可能是节点，而不是 lvl 方法。
+  function clickSceneNode(scene, names) {
+    const wanted = names.map((x) => String(x).toLowerCase());
+    let hit = null;
+    const walk = (n) => {
+      if (hit || !n) return;
+      const name = String(n.name || '').toLowerCase();
+      if (wanted.includes(name)) { hit = n; return; }
+      for (const ch of n.children || []) { walk(ch); if (hit) return; }
+    };
+    try { walk(scene); } catch { return false; }
+    if (!hit) return false;
+    for (const method of ['emit', 'click', 'onClick', 'trigger']) {
+      try {
+        if (typeof hit[method] !== 'function') continue;
+        if (method === 'emit') hit.emit('click');
+        else hit[method]();
+        return true;
+      } catch { /* try next */ }
+    }
+    return false;
+  }
+
   async function startLevel() {
     const ctxg = findComps();
     if (!ctxg) return fail('NO_SCENE');
     const cards = ctxg.map.Cards;
     const lvl = ctxg.map.levelController;
-    if (!lvl || typeof lvl.letsRock !== 'function') return fail('NO_SCENE', {}, '当前场景无法开局');
+    if (!lvl) return fail('NO_SCENE', {}, '当前场景无法开局');
     if (lvl.gameStarted) return { ok: true, detail: '已经在战斗中', started: true };
-    if (cards && cards.seedChooser && !lvl.lastStandPrepareStarted) {
+    const prep = (() => { try { return reader.snapshot().prep; } catch { return null; } })();
+    // 给定卡组 / 提前布阵必须先把整关波次和对策写进计划，再允许点开始。
+    // 这不是替模型决策：只要求“先想再开局”，计划内容仍完全由模型写。
+    if (prep && prep.mustPlanBeforeStart) {
+      const p = typeof getPlan === 'function' ? getPlan() : null;
+      let levelKey = null;
+      try { levelKey = typeof getLevelKey === 'function' ? getLevelKey() : null; } catch { levelKey = null; }
+      const stale = !!(p && p.plan && levelKey && p.plan.levelKey && p.plan.levelKey !== levelKey);
+      if (!p || !p.plan || !String(p.plan.text || '').trim() || stale) {
+        return fail('NEED_PLAN', {
+          prep,
+          stalePlan: stale || undefined,
+          hint: stale
+            ? '这份计划是上一关的；先针对本关重新 pvz_briefing + pvz_set_plan，再开局。'
+            : '先用 pvz_briefing 读完整关波次/卡组/克制，再用 pvz_set_plan 写下对策（text + lanes/counters/phases），然后才能 pvz_start_level。',
+        }, stale ? '计划属于上一关，需要按本关事实重写' : '还没有作战计划：先想清楚卡组对策再开局');
+      }
+    }
+    const cinfoStart = conveyorInfo(ctxg.map, cards);
+    const conveyorStart = !!(cinfoStart && cinfoStart.enabled);
+    if (!conveyorStart && cards && cards.seedChooser && !(prep && prep.preplant)) {
       if (typeof cards.GameStartable === 'function' && !cards.GameStartable()) {
         const current = (cards.CFs || []).filter(Boolean).map((c) => cleanType(c.Type));
         return fail('DECK_NOT_FULL', { current, slots: cards.maxSlotCount || 0 }, `卡组还没选满（${current.length}/${cards.maxSlotCount || 0}）`);
       }
     }
-    if (lvl.lastStandPrepareStarted && !lvl.gameStarted && typeof lvl.startReadySet === 'function') {
-      try { lvl.startReadySet(); return { ok: true, detail: '开始了提前布阵', started: true }; } catch (e) { return fail('START_FAILED', {}, String(e && e.message || e)); }
+    if (prep && prep.preplant) {
+      // 不同版本的方法名：startReadySet / readySetPlant / startGame。
+      for (const method of ['startReadySet', 'readySetPlant', 'startGame']) {
+        try {
+          if (typeof lvl[method] !== 'function') continue;
+          lvl[method]();
+          return { ok: true, detail: `开始了提前布阵（${method}）`, started: true };
+        } catch { /* try next */ }
+      }
+      if (clickSceneNode(ctxg.scene, ['LastStandStartButton', 'StartReadyButton', 'StartButton', 'ReadyButton'])) {
+        return { ok: true, detail: '已点击提前布阵“开始！”按钮', started: true };
+      }
+    }
+    if (typeof lvl.letsRock !== 'function') {
+      return fail('START_UNSUPPORTED', { prep }, '当前关卡没有 letsRock / 提前布阵开始入口');
     }
     try {
       lvl.letsRock();
       return { ok: true, detail: '已开局', started: true };
     } catch (e) {
       // 传送带关的 letsRock 可能在隐藏种子栏 UI 时抛错，但战斗已经启动；交给上层用 phase 复核。
-      return fail('START_FAILED', { started: !!(lvl.letsRocked || lvl.gameStarted || (cards && cards.gameStarted)) }, String(e && e.message || e));
+      const started = !!(lvl.letsRocked || lvl.gameStarted || (cards && cards.gameStarted));
+      if (started) return { ok: true, detail: '已开局（启动时 UI 有非致命异常）', started: true, warning: String(e && e.message || e) };
+      return fail('START_FAILED', { started }, String(e && e.message || e));
     }
   }
 
@@ -390,11 +488,11 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
 
   // 同行还能种的空格（按离目标列的距离排序）：占用/不可种时直接给候选，
   // 省掉"撞一次错误、再想一轮"的往返。
-  function emptyCellsInLane(C, lane, wantColumn, cf, limit = 3) {
+  function emptyCellsInLane(C, lane, wantColumn, cf, limit = 3, excludeColumn = wantColumn) {
     const cols = C.ColumnCount || 9;
     const out = [];
     for (let c = 0; c < cols; c++) {
-      if (c === wantColumn) continue;
+      if (c === excludeColumn) continue;
       const cell = C.getLnC(lane, c);
       if (!cell) continue;
       try { if (reader.cellPlants(cell).length) continue; } catch { continue; }
@@ -403,6 +501,54 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
       if (ok) out.push({ lane, column: c });
     }
     out.sort((a, b) => Math.abs(a.column - wantColumn) - Math.abs(b.column - wantColumn));
+    return out.slice(0, limit);
+  }
+
+  /**
+   * 僵尸还在“左边/前面”的空格：墙必须种在这僵尸的左侧（column 更小），
+   * 否则僵尸已经走过去，墙只会种在它背后。
+   * 这里用与 WALL_TOO_LATE 相同的 0.25 格提前量，并排除本次目标格，
+   * 避免返回“可改种 c1”但 c1 就是当前格这种死循环。
+   */
+  function emptyCellsInFrontOfZombie(C, lane, zombieColumn, cf, limit = 3, excludeColumn = null) {
+    const cols = C.ColumnCount || 9;
+    const out = [];
+    for (let c = 0; c < cols; c++) {
+      if (c === excludeColumn) continue;
+      if (c + 0.25 >= zombieColumn) continue;
+      const cell = C.getLnC(lane, c);
+      if (!cell) continue;
+      try { if (reader.cellPlants(cell).length) continue; } catch { continue; }
+      let ok = true;
+      try { ok = cell.putPlantAvailable ? cell.putPlantAvailable(true, cf && cf.ID, true, true, cf && cf.spf) : true; } catch { ok = true; }
+      if (ok) out.push({ lane, column: c });
+    }
+    // 离僵尸最近的可挡位优先（列号越大越靠前）。
+    out.sort((a, b) => b.column - a.column);
+    return out.slice(0, limit);
+  }
+
+  /** 僵尸前方、已被占用的格子；给 WALL_TOO_LATE 提供“可 replace 哪个植物”。 */
+  function occupiedCellsInFrontOfZombie(C, lane, zombieColumn, excludeColumn = null, limit = 3) {
+    const cols = C.ColumnCount || 9;
+    const out = [];
+    for (let c = 0; c < cols; c++) {
+      if (c === excludeColumn || c + 0.25 >= zombieColumn) continue;
+      const cell = C.getLnC(lane, c);
+      if (!cell) continue;
+      const plants = reader.cellPlants(cell);
+      if (!plants.length) continue;
+      const type = cleanType(plants[0] && plants[0].Plant_Type);
+      let st = null;
+      try { st = stats.plantStatsOf(type); } catch { st = null; }
+      out.push({
+        lane, column: c, type,
+        family: (st && st.family) || null,
+        hp: Math.round((plants[0] && (plants[0].health || plants[0].toughness)) || 0),
+        dps: (st && st.attack && st.attack.dps) || null,
+      });
+    }
+    out.sort((a, b) => b.column - a.column);
     return out.slice(0, limit);
   }
 
@@ -434,7 +580,8 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     const out = [];
     const seen = new Set();
     for (const p of protectCells) {
-      for (const d of [1, 0, -1]) {
+      // d=0 是保护格本身，永远不能当“守卫格”推荐出去。
+      for (const d of [1, -1]) {
         const column = p.column + d;
         if (column < 0 || column >= cols || seen.has(column)) continue;
         seen.add(column);
@@ -458,9 +605,7 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
       try { ps = reader.cellPlants(cell) || []; } catch { ps = []; }
       for (const p of ps) {
         const t = cleanType(p && p.Plant_Type);
-        let st = null;
-        try { st = stats.plantStatsOf(t); } catch { st = null; }
-        if (/peanut|tallnut|wallnut|holonut|endurian/i.test(t) || (st && String(st.family || '') === 'Defence')) {
+        if (isWallType(t)) {
           out.push({ column: c, type: t });
         }
       }
@@ -488,26 +633,54 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     if (a.type === 'move_cart') return moveCart(a.cart, a.direction);
 
     if (!C) return fail('NO_SCENE');
-    if (!cards) return fail('NO_SCENE', {}, '卡槽还没加载');
+    // 传送带可以没有常规卡槽组件；只要 Conveyor 在就不算“卡槽还没加载”。
+    const preCinfo = conveyorInfo(map, cards);
+    if (!cards && !(preCinfo && preCinfo.enabled)) return fail('NO_SCENE', {}, '卡槽还没加载');
     const cols = C.ColumnCount || 9;
 
     const lane = Number(a.lane), column = Number(a.column);
     if (!Number.isFinite(lane) || !Number.isFinite(column)) return fail('BAD_POSITION');
 
     if (a.type === 'plant' || a.type === 'replace') {
+      const cinfo = conveyorInfo(map, cards);
+      const conveyorMode = !!(cinfo && cinfo.enabled);
       let index = Number(a.card);
-      if (!Number.isFinite(index) && a.plant) {
-        index = (cards.CFs || []).findIndex((cf) => cleanType(cf.Type) === String(a.plant));
+      let cf = null;
+      let conveyorSlot = null;
+      if (conveyorMode) {
+        // 传送带 index 会随带子变化：只要模型给了 codename，就以 codename 为准，
+        // 避免旧的 card 下标在下一轮指到另一张卡。
+        if (a.plant) {
+          index = cinfo.cards.findIndex((x) => cleanType(x && x.Type) === String(a.plant));
+        }
+        cf = Number.isFinite(index) ? cinfo.cards[index] : null;
+        if (!cf) {
+          return fail('NO_CARD', {
+            conveyor: true, card: a.card, plant: a.plant || null,
+            available: cinfo.cards.map((x, i) => ({ index: i, type: cleanType(x && x.Type) })),
+            hint: '传送带卡会变：用本轮 state.cards / state.conveyor.cards 的最新 index，不要沿用上一轮。',
+          }, `传送带当前没有这张卡（现在有 ${cinfo.cards.length} 张）`);
+        }
+        conveyorSlot = cinfo.slots.find((s) => s && s.card === cf) || null;
+        if (!conveyorSlot) {
+          return fail('CARD_UNAVAILABLE', { conveyor: true, card: index, type: cleanType(cf.Type) }, '这张卡已经离开传送带，重新读 state.cards 取最新的卡');
+        }
+      } else {
+        if (!Number.isFinite(index) && a.plant) {
+          index = (cards.CFs || []).findIndex((x) => cleanType(x.Type) === String(a.plant));
+        }
+        cf = cards && cards.CFs && cards.CFs[index];
+        if (!cf) return fail('NO_CARD', { card: a.card, plant: a.plant || null });
       }
-      const cf = cards && cards.CFs && cards.CFs[index];
-      if (!cf) return fail('NO_CARD', { card: a.card, plant: a.plant || null });
       const type = cleanType(cf.Type);
-      const upper = cards.cardsUIUpper && cards.cardsUIUpper[index];
-      const cd = upper ? Math.max(0, +upper.CD || 0) : 0;
-      if (cd > 0) return fail('COOLDOWN', { card: index, type, retryAfter: Math.round(cd * 10) / 10 }, `${type} 冷却中 ${cd.toFixed(1)}s${a.type === 'replace' ? '（铲除本身没有冷却；这里是新卡的种子冷却）' : ''}`);
-      const cost = Number.isFinite(cf.SUNCOST) ? cf.SUNCOST : 0;
-      const sunNow = map.SunCount ? map.SunCount.CurrentValue : null;
-      if (sunNow != null && sunNow < cost && !(cf.ca && cf.ca.free)) return fail('SUN', { card: index, type, need: cost, have: sunNow }, `阳光不足：需要 ${cost}，现有 ${sunNow}`);
+      if (!conveyorMode) {
+        const upper = cards.cardsUIUpper && cards.cardsUIUpper[index];
+        const cd = upper ? Math.max(0, +upper.CD || 0) : 0;
+        if (cd > 0) return fail('COOLDOWN', { card: index, type, retryAfter: Math.round(cd * 10) / 10 }, `${type} 冷却中 ${cd.toFixed(1)}s${a.type === 'replace' ? '（铲除本身没有冷却；这里是新卡的种子冷却）' : ''}`);
+        const cost = Number.isFinite(cf.SUNCOST) ? cf.SUNCOST : 0;
+        const sunNow = map.SunCount ? map.SunCount.CurrentValue : null;
+        if (sunNow != null && sunNow < cost && !(cf.ca && cf.ca.free)) return fail('SUN', { card: index, type, need: cost, have: sunNow }, `阳光不足：需要 ${cost}，现有 ${sunNow}`);
+      }
 
       // 三叶草只对空中单位生效；没有 airborne 目标时种下去就是浪费。
       if (/blover/i.test(type)) {
@@ -530,14 +703,20 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
       if (prot.length) {
         const onCell = prot.find((p) => Math.abs(column - p.column) < 0.75);
         if (onCell) {
-          const guardCells = guardCellsFor(C, lane, prot);
-          const cellText = guardCells.length ? guardCells.map((x) => `c${x.column}`).join('/') : '（保护格旁边没有空位）';
-          return fail('PROTECT_CELL_BLOCKED', {
-            lane, column, card: index, type,
-            protectCells: prot.map((p) => ({ lane: p.lane, column: p.column })),
-            guardCells,
-            hint: `c${onCell.column} 本身是必须保护的植物，不能种别的；改种 ${cellText}（左侧远程/右侧墙或近战）。`,
-          }, `${type} 不能种在保护格 c${onCell.column} 上；改种 ${cellText}`);
+          // 保护格不一定是“不能种的格子”：很多关的花是地块装饰，格位本身可以种。
+          // 只有这一格真的有植物实体时才拒绝；否则交给游戏判定（被占会报 OCCUPIED）。
+          let occupied = false;
+          try { occupied = reader.cellPlants(C.getLnC(lane, column)).length > 0; } catch { occupied = false; }
+          if (occupied) {
+            const guardCells = guardCellsFor(C, lane, prot);
+            const cellText = guardCells.length ? guardCells.map((x) => `c${x.column}`).join('/') : '（保护格旁边没有空位）';
+            return fail('PROTECT_CELL_BLOCKED', {
+              lane, column, card: index, type,
+              protectCells: prot.map((p) => ({ lane: p.lane, column: p.column })),
+              guardCells,
+              hint: `c${onCell.column} 上有保护植物实体，不能覆盖；改种 ${cellText}（左侧远程/右侧墙或近战）。`,
+            }, `${type} 不能覆盖保护格 c${onCell.column} 上的植物；改种 ${cellText}`);
+          }
         }
         if (reach != null) {
           const nearest = prot.reduce((best, p) => Math.min(best, Math.abs(column - p.column)), Infinity);
@@ -554,18 +733,42 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
             }, `${type} 离保护格 ${nearest} 格，短手够不到；可改种 ${cellText}`);
           }
         }
+        // 墙/高血量肉盾种在保护格左侧（房子侧）= 完全没用：僵尸从右往左来，
+        // 先踩到花才轮到这面墙。吸血牛肝菌这种高血量卡也算“墙”。
+        const tankProbe = (() => { try { return stats.plantStatsOf(type); } catch { return null; } })();
+        const tanky = isWallType(type) || !!(tankProbe && Number(tankProbe.hp) >= 1000
+          && !(tankProbe.attack && Number(tankProbe.attack.dps) > 0) && !tankProbe.burst);
+        const behindCells = prot.filter((p) => column < p.column - 0.25);
+        if (tanky && behindCells.length) {
+          const p = behindCells[0];
+          const frontCol = Math.min(cols - 1, p.column + 1);
+          const guardCells = guardCellsFor(C, lane, prot);
+          const suggest = [frontCol, ...guardCells.map((x) => x.column)].filter((c, i, arr) => arr.indexOf(c) === i && c > p.column);
+          return fail('WALL_BEHIND_PROTECT', {
+            lane, column, card: index, type, protectColumn: p.column,
+            suggestedColumns: suggest,
+            protectCells: prot.map((x) => ({ lane: x.lane, column: x.column })),
+            hint: `${type} 是高血量肉盾，但种在 c${column} 位于保护格 c${p.column} 的左侧（房子侧）：僵尸从右往左走，会先踩/啃到花，这面墙挡不到任何东西。改种保护格右侧 c${suggest.join('/c')}，或者用一次性/远程卡在花前方解决。`,
+          }, `${type} 种在保护格 c${p.column} 左侧挡不到；应种在右侧 c${suggest.join('/c')}`);
+        }
       }
 
       // 输出种在本行墙的右侧（僵尸先啃输出再啃墙）：等于把墙白放了。
       // 输出应放墙左侧；没位置就 replace 墙为输出，再把新墙补到右侧。
       let stType = null;
       try { stType = stats.plantStatsOf(type); } catch { stType = null; }
-      const isWallType = /peanut|tallnut|wallnut|holonut|endurian/i.test(type)
-        || !!(stType && String(stType.family || '') === 'Defence');
+      const isWallPlant = isWallType(type);
       // 地刺类：伤害来自“僵尸走过这一格”，必须种在墙前（右侧），否则僵尸被墙挡住、永远踩不到。
       const isStepDamage = !!(stType && stType.stepDamage);
-      const isOutputType = !!(stType && stType.attack && Number(stType.attack.dps) > 0 && !isWallType && !isStepDamage);
-      if (isStepDamage) {
+      // 土豆雷/地雷虽然被标成 stepDamage（本格），但它是“接触触发的一次性爆炸”，
+      // 不是地刺那种“走过就持续掉血”。雷种在墙后是有效的最后防线：墙拖时间，
+      // 雷在后面出土，僵尸破墙后踩上一起炸。不能按 SPIKE_BEHIND_WALL 拒绝。
+      const isMinePlant = !!(stType && (Number(stType.armTimeSec) > 0 || String(stType.family || '') === 'Explosive'));
+      const isOutputType = !!(stType && stType.attack && Number(stType.attack.dps) > 0 && !isWallPlant && !isStepDamage);
+      // 整行/全屏一次性卡（寒冰辣椒、果冻蔓越莓、火爆辣椒…）的效果与落点无关：
+      // 站在僵尸左边还是右边都能命中，之前按“输出只能打右侧”拒绝，会把救场卡全部挡掉。
+      const rowWideEffect = !!(stType && /整行|本行|一行|全屏|全场|多行/.test(String(stType.area || '')));
+      if (isStepDamage && !isMinePlant) {
         const walls = wallColumnsInLane(C, lane);
         const frontWall = walls.length ? Math.max(...walls.map((w) => w.column)) : null;
         if (frontWall != null && column < frontWall) {
@@ -632,7 +835,16 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
             : (alternatives.length ? '这格不能种（墓碑/水面/障碍）；alternatives 是同行可种位' : '这行没有可种的空位'),
         }, `${lane} 行 ${column} 列不能种${emptied ? '（旧植物已铲掉，现在空着）' : ''}${alternatives.length ? `，可改种 ${alternatives.map((x) => `c${x.column}`).join('/')}` : ''}`);
       }
-      if (ui && typeof ui.tryChangingIndex === 'function' && ui.index !== index) {
+      if (conveyorMode) {
+        try {
+          cinfo.cv.chooseCard(cf, conveyorSlot);
+        } catch (e) {
+          return fail('CARD_UNAVAILABLE', { conveyor: true, card: index, type }, `传送带选卡失败：${String(e && e.message || e)}`);
+        }
+        if (ui && ui.currentFreeCF && ui.currentFreeCF !== cf) {
+          return fail('CARD_UNAVAILABLE', { conveyor: true, card: index, type }, '传送带卡没有选中');
+        }
+      } else if (ui && typeof ui.tryChangingIndex === 'function' && ui.index !== index) {
         ui.tryChangingIndex(index);
         // 等种子栏真正切到目标卡，再发起种植；否则 PlaceUIPlant 可能用旧卡。
         await waitFor(() => Number(ui.index) === index, 120);
@@ -646,14 +858,47 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
         late: nearZombie <= column + 0.25,
         suggestedColumn,
       };
-      const lateNote = timing && timing.late
-        ? `；⚠ 僵尸已到 c${timing.nearestZombieColumn}，这个落点可能在它身后，下一轮改 c${timing.suggestedColumn} 或往左 1–2 格`
+      const lateNote = timing && timing.late && !rowWideEffect
+        ? `；⚠ 僵尸已到 c${timing.nearestZombieColumn}，这个落点打不到它，只对右侧更远的僵尸有效`
         : '';
+      // 输出种在本行最前僵尸的右侧/同格：它已经走过这一格，而输出只向右打，
+      // 这株现在打不到它。如果目标格右侧也没有别的僵尸，这一株这波就是纯浪费
+      // （扣阳光 + 吃种子冷却），必须在扣资源前拒绝，而不是种下后再警告。
+      if (isOutputType && !rowWideEffect && timing && timing.late) {
+        let rightZombies = [];
+        try {
+          const snap = reader.snapshot();
+          rightZombies = (snap.zombies || []).filter((z) => Number(z.lane) === lane
+            && Number(z.column) > column + 0.25);
+        } catch { rightZombies = []; }
+        if (!rightZombies.length) {
+          const safeCells = emptyCellsInFrontOfZombie(C, lane, nearZombie, cf, 3, column);
+          const replaceCells = occupiedCellsInFrontOfZombie(C, lane, nearZombie, column, 3);
+          const emptyText = safeCells.length ? safeCells.map((x) => `c${x.column}`).join('/c') : null;
+          const replaceText = replaceCells.length
+            ? replaceCells.map((x) => `c${x.column}(${x.type}${x.dps ? ` ${x.dps}dps` : ''})`).join('/')
+            : null;
+          const parts = [];
+          if (emptyText) parts.push(`改种左侧空位 c${emptyText}`);
+          if (replaceText) parts.push(`或 replace ${replaceText} 腾格`);
+          if (!parts.length) parts.push('前方没有可种/可换的格子，改用冰冻/一次性/能量豆，或等这波清完再补');
+          return fail('PLANT_BEHIND_ZOMBIE', {
+            lane,
+            column,
+            type,
+            nearestZombieColumn: timing.nearestZombieColumn,
+            suggestedColumns: safeCells.map((x) => x.column),
+            replaceCells,
+            hint: `僵尸已到 c${timing.nearestZombieColumn}，${type} 种在 c${column} 已经在它身后（输出只向右打，打不到它），目标格右侧也没有别的僵尸；现在种只会白扣阳光和冷却。${parts.join('；')}。`,
+          }, `${type} 落在僵尸 c${timing.nearestZombieColumn} 身后，打不到；先处理这只再补`);
+        }
+      }
       // 土豆雷有出土时间，不是瞬爆：按当前僵尸距离算，来不及就别埋在脸上。
-      if (/potatomine/i.test(type) && stType && Number(stType.armTimeSec) > 0) {
+      if (stType && Number(stType.armTimeSec) > 0 && String(stType.family || '') === 'Explosive') {
         const arm = Number(stType.armTimeSec);
         let minEta = null;
         let closest = null;
+        let planOk = false;
         try {
           const snap = reader.snapshot();
           for (const z of (snap.zombies || [])) {
@@ -662,17 +907,51 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
             const eta = (Number(z.column) - column) / speed;
             if (minEta == null || eta < minEta) { minEta = eta; closest = z; }
           }
+          // 本地 minePlan 已经把“路上植物/墙的啃食时间”算进去了；
+          // 它在 safeColumns 里就说明雷能在僵尸到达前出土（哪怕直接距离不够）。
+          const mp = (snap.brief && snap.brief.minePlan || [])
+            .find((m) => m && m.card === type && Number(m.lane) === Number(lane));
+          planOk = !!(mp && Array.isArray(mp.safeColumns) && mp.safeColumns.includes(Number(column)));
         } catch { /* ignore */ }
-        if (minEta != null && minEta < arm + 1) {
-          const needCol = closest ? Math.max(0, Math.floor(Number(closest.column) - arm * 0.2)) : null;
+        if (minEta != null && minEta < arm + 1 && !planOk) {
+          // 安全列：c <= 僵尸列 - (arm+1) × 真实速度。不能用固定 0.2 或
+          // “僵尸列 - 几格”拍脑袋，否则会给到仍然来不及的列。
+          const speed = closest && Number(closest.speed) > 0 ? Number(closest.speed) : 0.18;
+          const latestSafe = closest ? Math.floor(Number(closest.column) - (arm + 1) * speed) : null;
+          const candidates = latestSafe == null ? [] : emptyCellsInLane(C, lane, latestSafe, cf, 6, column)
+            .filter((x) => x.column <= latestSafe)
+            .sort((a, b) => b.column - a.column)
+            .slice(0, 3);
+          const needCol = candidates.length ? candidates[0].column : null;
           return fail('MINE_TOO_LATE', {
             lane, column, type, armTimeSec: arm,
             nearestZombieColumn: closest ? closest.column : null,
+            speed,
             etaSec: Math.round(minEta * 10) / 10,
+            latestSafeColumn: latestSafe,
             suggestedColumn: needCol,
-            hint: `土豆地雷需要 ${arm} 秒出土，按当前僵尸速度只剩 ${Math.round(minEta * 10) / 10} 秒，埋在 c${column} 来不及。改种樱桃/倭瓜，或提前埋到 c${needCol != null ? needCol : '?'} 或更靠左（给足 ${arm} 秒）；不要把地雷种在贴脸僵尸脚下。`,
+            suggestedColumns: candidates.map((x) => x.column),
+            hint: `土豆地雷需要 ${arm} 秒出土，按当前僵尸速度（${speed} 格/秒）只剩 ${Math.round(minEta * 10) / 10} 秒，埋在 c${column} 来不及。按计算最晚安全列是 c${latestSafe != null ? latestSafe : '?'}；${needCol != null ? `可提前埋到 c${needCol} 或更靠左` : '前方没有空位，改用樱桃/倭瓜/冰冻等瞬发手段'}。不要把地雷种在贴脸僵尸脚下。`,
           }, `土豆地雷只剩 ${Math.round(minEta * 10) / 10}s 准备时间，来不及（需 ${arm}s）`);
         }
+      }
+      // 接触触发植物（冰冻生菜等）种在僵尸右侧/身后：僵尸已经走过，不会被踩到。
+      // 和输出一样，在扣阳光前拒绝；一次性爆炸卡不受这条限制（3x3 仍可能覆盖）。
+      const isContactEffect = !!(stType && !stType.attack && !isWallPlant
+        && (String(stType.family || '') === 'Cold' || !!(stType.usage && stType.usage.contact)));
+      if (isContactEffect && !rowWideEffect && timing && timing.late) {
+        const candidates = emptyCellsInLane(C, lane, Math.max(0, Math.floor(nearZombie)), cf, 4, column)
+          .filter((x) => x.column <= nearZombie)
+          .sort((a, b) => b.column - a.column);
+        const cols = candidates.map((x) => x.column);
+        return fail('PLANT_BEHIND_ZOMBIE', {
+          lane,
+          column,
+          type,
+          nearestZombieColumn: timing.nearestZombieColumn,
+          suggestedColumns: cols,
+          hint: `僵尸已到 c${timing.nearestZombieColumn}，${type} 是接触触发，种在 c${column} 在它身后不会被踩到；${cols.length ? `改种僵尸所在格或左侧 c${cols.join('/c')}` : '前方没有空位，改用输出/能量豆或等这波清完'}。`,
+        }, `${type} 落在僵尸 c${timing.nearestZombieColumn} 身后，踩不到`);
       }
       // 墙类植物种在最前僵尸的右侧/同列：它已经过去了，这面墙挡不到它。
       // 这是几何事实，不是打法建议；直接给出左侧可种位。
@@ -680,19 +959,26 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
       try { stNow = stats.plantStatsOf(type); } catch { stNow = null; }
       const isWall = !!(stNow && String(stNow.family || '') === 'Defence');
       if (isWall && timing && timing.late) {
-        const want = Math.max(0, Math.floor(nearZombie) - 1);
-        const leftCells = emptyCellsInLane(C, lane, want, cf, 6)
-          .filter((x) => x.column < nearZombie)
-          .slice(0, 3);
-        const cellText = leftCells.length ? leftCells.map((x) => `c${x.column}`).join('/') : '（左侧没有空位）';
+        // 墙必须种在僵尸左侧（column 更小）。这里排除本次目标格，且只给
+        // c + 0.25 < 僵尸列 的格子，避免出现“可改种 c1”但目标就是 c1 的死循环。
+        const safeCells = emptyCellsInFrontOfZombie(C, lane, nearZombie, cf, 3, column);
+        const replaceCells = occupiedCellsInFrontOfZombie(C, lane, nearZombie, column, 3);
+        const emptyText = safeCells.length ? safeCells.map((x) => `c${x.column}`).join('/c') : null;
+        const replaceText = replaceCells.length
+          ? replaceCells.map((x) => `c${x.column}(${x.type}${x.dps ? ` ${x.dps}dps` : ''})`).join('/')
+          : null;
+        const parts = [];
+        if (emptyText) parts.push(`空位改种 c${emptyText}`);
+        if (replaceText) parts.push(`或 replace ${replaceText} 腾格`);
+        if (!parts.length) parts.push('前方已经没有可种/可换的格子');
         return fail('WALL_TOO_LATE', {
           lane, column, type,
           nearestZombieColumn: Math.round(nearZombie * 10) / 10,
-          suggestedColumns: leftCells.map((x) => x.column),
-          hint: leftCells.length
-            ? `该行最前僵尸已在 c${Math.round(nearZombie * 10) / 10}，你把墙种在 c${column} 在它右边，挡不到它；改种 ${cellText}，或用倭瓜/樱桃/三叶草先处理这只。`
-            : `该行僵尸已经贴到 c${Math.round(nearZombie * 10) / 10}，左侧没有空位放墙；用一次性卡处理，别把墙种在它身后。`,
-        }, `${type} 种在 c${column} 挡不到 c${Math.round(nearZombie * 10) / 10} 的僵尸；可改种 ${cellText}`);
+          suggestedColumns: safeCells.map((x) => x.column),
+          replaceCells,
+          blockable: !!(safeCells.length || replaceCells.length),
+          hint: `本行最前僵尸已在 c${Math.round(nearZombie * 10) / 10}，墙必须种在它左侧（column 更小）才挡得住；c${column} 已经是它背后。${parts.join('；')}。如果来不及种墙，就不要继续试墙，改用输出/一次性卡/冰冻先把这只僵尸磨掉。`,
+        }, `${type} 种在 c${column} 挡不到 c${Math.round(nearZombie * 10) / 10} 的僵尸；${parts.join('，')}`);
       }
       try {
         cell.PlaceUIPlant();
@@ -934,6 +1220,22 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     return fail('UNKNOWN_ACTION', { type: a.type });
   }
 
+  /** 批量发起后统一等落地：队列一拍连发多株时不用每株各等一次。 */
+  async function settlePending(pending) {
+    const list = (Array.isArray(pending) ? pending : []).filter((p) => p
+      && Number.isInteger(Number(p.lane)) && Number.isInteger(Number(p.column)));
+    if (!list.length) return { ok: true, settled: true, count: 0 };
+    const ctxg = findComps();
+    const map = ctxg && ctxg.map;
+    const C = map && map.Square && map.Square.constructor;
+    if (!C) return { ok: false, code: 'NO_SCENE' };
+    const settled = await waitFor(() => list.every((p) => {
+      const cell = C.getLnC(Number(p.lane), Number(p.column));
+      return !!(cell && reader.cellPlants(cell).length > 0);
+    }), 900);
+    return { ok: settled, settled, count: list.length };
+  }
+
   async function actAll(actions) {
     const list = Array.isArray(actions) ? actions.slice(0, 6) : [];
     if (!list.length) return fail('NO_ACTIONS', {}, 'actions 为空（一次 1–6 个）');
@@ -953,5 +1255,5 @@ export function createActions({ getCc, findComps, findCompByClass, stats, reader
     };
   }
 
-  return { act, actAll, chooseDeck, startLevel, restartLevel, dismissObjective, resume, collect, moveCart, deckStatus, fail };
+  return { act, actAll, settlePending, chooseDeck, startLevel, restartLevel, dismissObjective, resume, collect, moveCart, deckStatus, fail };
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { formatToolCall, formatToolResult, formatPlan } from '../tools/format.js';
+import { formatToolCall, formatToolResult, formatPlan, localizeDisplay } from '../tools/format.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const plants = JSON.parse(fs.readFileSync(path.join(root, 'knowledge', 'data', 'plants.json'), 'utf8'));
@@ -48,9 +48,9 @@ test('format：工具调用和结果都是人话，不整段 JSON', () => {
   assert.ok(pending.includes('⏳'));
   assert.ok(pending.includes('等待落地'));
 
-  const deck = formatToolResult('pvz_choose_deck', { ok: false, code: 'DECK_NOT_FULL', actualDeck: ['sunflower'], slots: 3, missing: ['wallnut'] });
+  const deck = localizeDisplay(formatToolResult('pvz_choose_deck', { ok: false, code: 'DECK_NOT_FULL', actualDeck: ['sunflower'], slots: 3, missing: ['wallnut'] }));
   assert.ok(deck.includes('1/3'));
-  assert.ok(deck.includes('wallnut'));
+  assert.ok(deck.includes('坚果墙'));
 
   const plan = formatPlan({ style: 'test', deck: ['sunflower'], lanes: ['L1 输出'], thresholds: { sun: 150 } });
   assert.ok(plan.includes('风格'));
@@ -76,4 +76,16 @@ test('format：events 数组变成可读行', () => {
   assert.ok(text.includes('波次开始'));
   assert.ok(text.includes('第2行'));
   assert.ok(!text.includes('"t"'));
+});
+
+test('format：不同世界的植物/僵尸名称走动态缓存，不依赖写死名单', () => {
+  const r = formatToolResult('pvz_state', {
+    ok: true,
+    plants: [{ type: 'futureplant', name: '未来植物' }],
+    zombies: [{ type: 'futurezombie', name: '未来僵尸' }],
+  });
+  const text = localizeDisplay(`${r} futureplant futurezombie`);
+  assert.ok(text.includes('未来植物'), text);
+  assert.ok(text.includes('未来僵尸'), text);
+  assert.ok(!text.includes('futureplant'), text);
 });

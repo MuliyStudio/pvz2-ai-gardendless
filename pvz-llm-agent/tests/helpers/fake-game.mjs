@@ -53,7 +53,7 @@ function cell(lane, column) {
   };
 }
 
-export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, noBoard = false, task = null, zombies = null, conveyor = false, forcedDeck = false, preplant = false } = {}) {
+export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, noBoard = false, task = null, zombies = null, conveyor = false, forcedDeck = false, preplant = false, night = false } = {}) {
   const grid = [];
   for (let r = 0; r < 5; r++) {
     const row = [];
@@ -63,6 +63,7 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
   SquareClass._grid = grid;
   SquareClass._lanes = Array.from({ length: 5 }, () => ({ zombiePool: () => [], hypnoZombiePool: () => [], mower: {} }));
   if (Array.isArray(zombies)) {
+    const byLane = new Map();
     for (const z of zombies) {
       const obj = {
         Zombie_Type: `RTID(${z.type}@ZombieProps)`,
@@ -72,7 +73,11 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
         isAlive: () => true,
       };
       if (z.armorHp != null) obj.armorHp = z.armorHp;
-      SquareClass._lanes[z.lane].zombiePool = () => [obj];
+      if (!byLane.has(z.lane)) byLane.set(z.lane, []);
+      byLane.get(z.lane).push(obj);
+    }
+    for (const [lane, list] of byLane) {
+      SquareClass._lanes[lane].zombiePool = () => list;
     }
   }
 
@@ -103,7 +108,8 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
   if (conveyor) cards.conveyor = true;
   if (forcedDeck) {
     cards.CFs = available.slice(0, slots).map((type) => ({ Type: type, SUNCOST: 50, ID: type, ca: { locked: true } }));
-    cards.seedChooser.CFs = [];
+    // “使用给定植物通关”没有选卡页：seedChooser 根本不存在。
+    cards.seedChooser = null;
   }
 
   const levelController = {
@@ -150,6 +156,32 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
     },
   };
   scene._components.push(pauseScreen);
+  let conveyorComp = null;
+  if (conveyor) {
+    const live = ['sunflower', 'peashooter', 'wallnut'].map((type) => ({ Type: type, ID: type }));
+    const slots = live.map((cf) => ({ card: cf }));
+    conveyorComp = {
+      __classname__: 'Conveyor',
+      plantList: ['sunflower', 'peashooter', 'wallnut'],
+      isVertical: false,
+      lane1slots: slots,
+      lane2slots: [],
+      laneVertslots: [],
+      cards: live.slice(),
+      chooseCalls: 0,
+      getCards() { return this.cards; },
+      chooseCard(cf, slot) {
+        this.chooseCalls += 1;
+        this.chosen = cf;
+        this.lastSlot = slot;
+        ui.currentFreeCF = cf;
+        ui.index = 8;
+        this.cards = this.cards.filter((x) => x !== cf);
+        return true;
+      },
+    };
+    scene._components.push(conveyorComp);
+  }
   if (objective) {
     scene._components.push({
       __classname__: 'LevelObjectiveScreen',
@@ -183,11 +215,15 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
           { CODENAME: 'peashooter', NAME: { zh: '豌豆射手', en: 'Peashooter' } },
           { CODENAME: 'wallnut', NAME: { zh: '坚果墙', en: 'Wall-nut' } },
           { CODENAME: 'cherry_bomb', NAME: { zh: '樱桃炸弹', en: 'Cherry Bomb' } },
+          { CODENAME: 'bloomerang', NAME: { zh: '回旋镖射手', en: 'Bloomerang' }, TAGS: ['plant'] },
+          { CODENAME: 'seashooter', NAME: { zh: '海豌豆', en: 'Seashooter' }, TAGS: ['amphibious'] },
           { CODENAME: 'spikeweed', NAME: { zh: '地刺', en: 'Spikeweed' } },
           { CODENAME: 'coconutcannon', NAME: { zh: '椰子加农炮', en: 'Coconut Cannon' } },
           { CODENAME: 'bonkchoy', NAME: { zh: '菜问', en: 'Bonk Choy' } },
           { CODENAME: 'hollyknight', NAME: { zh: '冬青骑士', en: 'Holly Knight' } },
           { CODENAME: 'cabbagepult', NAME: { zh: '卷心菜投手', en: 'Cabbage-pult' } },
+          { CODENAME: 'iceburg', NAME: { zh: '冰冻生菜', en: 'Iceberg Lettuce' } },
+          { CODENAME: 'potatomine', NAME: { zh: '土豆地雷', en: 'Potato Mine' } },
         ],
       },
     },
@@ -197,6 +233,8 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
         ZOMBIES: [
           { CODENAME: 'tutorial', NAME: { zh: '普通僵尸', en: 'Basic Zombie' } },
           { CODENAME: 'dark_armor2', NAME: { zh: '铁桶农夫', en: 'Buckethead' } },
+          { CODENAME: 'seagull', NAME: { zh: '海鸥僵尸', en: 'Seagull Zombie' } },
+          { CODENAME: 'gargantuar', NAME: { zh: '巨人僵尸', en: 'Gargantuar' } },
         ],
       },
     },
@@ -205,14 +243,19 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
       json: {
         objects: [
           { aliases: ['sunflower'], objdata: { SunCost: 50, Cooldown: 5, Toughness: 300, Family: 'Sun', ProduceInterval: 24, SunValue: 25 } },
-          { aliases: ['peashooter'], objdata: { SunCost: 100, Cooldown: 5, Toughness: 300, Family: 'Peashooter', Damage: 20, AttackInterval: 1.5 } },
+          { aliases: ['peashooter'], objdata: { SunCost: 100, Cooldown: 5, Toughness: 300, Family: 'Peashooter', Damage: 20, AttackInterval: 1.5, PeaType: 'pea' } },
           { aliases: ['wallnut'], objdata: { SunCost: 50, Cooldown: 20, Toughness: 4000, Family: 'Defence' } },
-          { aliases: ['cherry_bomb'], objdata: { SunCost: 150, Cooldown: 35, Toughness: 300, Family: 'Explosive' } },
+          { aliases: ['cherry_bomb'], objdata: { SunCost: 150, Cooldown: 35, Toughness: 300, Family: 'Explosive', Damage: 1800 } },
           { aliases: ['spikeweed'], objdata: { SunCost: 100, Cooldown: 5, Toughness: 300, Family: 'Sharp', Damage: 10, AttackInterval: 0.5 } },
           { aliases: ['coconutcannon'], objdata: { SunCost: 400, Cooldown: 5, Toughness: 300, Family: 'Lobber', PeaType: 'coconut', PeaTypePlantfood: 'coconut_pf', RestTime: 15, AlwaysShoots: false } },
           { aliases: ['bonkchoy'], objdata: { SunCost: 150, Cooldown: 5, Toughness: 300, Family: 'Melee', Damage: 15, DamageHeavy: 30, DamagePlantfood: 60, PlantfoodHitCount: 25, AttackInterval: 0.3 } },
           { aliases: ['hollyknight'], objdata: { SunCost: 150, Cooldown: 15, Toughness: 2500, Family: 'Defence', AttackDamage: 20, AttackInterval: 1, MaxProjectileCount: 3 } },
           { aliases: ['cabbagepult'], objdata: { SunCost: 100, Cooldown: 5, Toughness: 300, Family: 'Lobber', ThrowInterval: 3, CabbageType: 'cabbage', CabbageTypePlantfood: 'cabbage_pf', PlantfoodProjectilesToFire: 6 } },
+          { aliases: ['bloomerang'], objdata: { SunCost: 175, Cooldown: 5, Toughness: 300, Family: 'Sharp', Damage: 10, AttackInterval: 1, PierceCount: 3 } },
+          { aliases: ['squash'], objdata: { SunCost: 50, Cooldown: 30, Toughness: 300, Family: 'Melee', Damage: 1800 } },
+          { aliases: ['seashooter'], objdata: { SunCost: 175, Cooldown: 5, Toughness: 300, Family: 'Peashooter', Damage: 20, AttackInterval: 1.5 } },
+          { aliases: ['iceburg'], objdata: { SunCost: 0, Cooldown: 20, Toughness: 300, Family: 'Cold', FreezeDuration: 10 } },
+          { aliases: ['potatomine'], objdata: { SunCost: 25, Cooldown: 20, Toughness: 300, Family: 'Explosive', ChargeTime: 14, Damage: 1800 } },
         ],
       },
     },
@@ -223,7 +266,15 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
           { aliases: ['sunflower'], objdata: { BriefIntroduction: { zh: '提供额外阳光' }, Introduction: { zh: '向日葵提供阳光' }, Special: [], Elements: [{ TYPE: 'RANGE', SORT: { zh: '直线' } }] } },
           { aliases: ['peashooter'], objdata: { BriefIntroduction: { zh: '发射豌豆' }, Introduction: { zh: '豌豆射手' }, Special: [], Elements: [{ TYPE: 'DAMAGE', VALUE: 20 }, { TYPE: 'RANGE', SORT: { zh: '直线' } }] } },
           { aliases: ['wallnut'], objdata: { BriefIntroduction: { zh: '阻挡僵尸' }, Introduction: { zh: '坚果墙' }, Special: [], Elements: [] } },
-          { aliases: ['cherry_bomb'], objdata: { BriefIntroduction: { zh: '3x3 爆炸' }, Introduction: { zh: '樱桃炸弹' }, Special: [], Elements: [] } },
+          {
+            aliases: ['cherry_bomb'],
+            objdata: {
+              BriefIntroduction: { zh: '3x3 爆炸' },
+              Introduction: { zh: '樱桃炸弹' },
+              Special: [],
+              Elements: [{ TYPE: 'DAMAGE', VALUE: 1800 }, { TYPE: 'AREA', SORT: { zh: '3x3 范围' } }],
+            },
+          },
           {
             aliases: ['spikeweed'],
             objdata: {
@@ -269,6 +320,42 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
               Elements: [{ TYPE: 'DAMAGE', VALUE: 40 }],
             },
           },
+          {
+            aliases: ['bloomerang'],
+            objdata: {
+              BriefIntroduction: { zh: '回旋镖可以打到三个目标' },
+              Introduction: { zh: '回旋镖射手' },
+              Special: [],
+              Elements: [{ TYPE: 'DAMAGE', VALUE: 10 }, { TYPE: 'RANGE', SORT: { zh: '直线' } }],
+            },
+          },
+          {
+            aliases: ['potatomine'],
+            objdata: {
+              BriefIntroduction: { zh: '接触后爆炸' },
+              Introduction: { zh: '土豆地雷' },
+              Special: [],
+              Elements: [{ TYPE: 'DAMAGE', VALUE: 1800 }, { TYPE: 'AREA', SORT: { zh: '本格' } }],
+            },
+          },
+          {
+            aliases: ['seashooter'],
+            objdata: {
+              BriefIntroduction: { zh: '水陆两栖射手' },
+              Introduction: { zh: '海豌豆' },
+              Special: [],
+              Elements: [{ TYPE: 'DAMAGE', VALUE: 20 }, { TYPE: 'RANGE', SORT: { zh: '直线' } }],
+            },
+          },
+          {
+            aliases: ['squash'],
+            objdata: {
+              BriefIntroduction: { zh: '压扁一只僵尸' },
+              Introduction: { zh: '倭瓜' },
+              Special: [],
+              Elements: [{ TYPE: 'DAMAGE', VALUE: 1800 }, { TYPE: 'RANGE', SORT: { zh: '接近' } }],
+            },
+          },
         ],
       },
     },
@@ -276,22 +363,31 @@ export function createFakeGame({ slots = 3, objective = false, asyncAddMs = 40, 
       name: 'ZombieProps',
       json: {
         objects: [
-          { aliases: ['tutorial'], objdata: { Toughness: 190, WalkSPS: 0.185, EatDPS: 100 } },
+          { aliases: ['tutorial'], objdata: { Toughness: 190, WalkSPS: 0.185, EatDPS: 100, HealthPercentThrowImp0: 0.8, ImpType: 'imp' } },
           { aliases: ['dark_armor2'], objdata: { Toughness: 190, StartingArmors: ['dark_bucket'], WalkSPS: 0.2, EatDPS: 100 } },
+          { aliases: ['seagull'], objdata: { Toughness: 190, WalkSPS: 0.2, EatDPS: 100, FlyingSpeed: 0.3 } },
+          { aliases: ['gargantuar'], objdata: { Toughness: 3000, WalkSPS: 0.15, EatDPS: 100, SmashDamage: 1800, ZombieSort: 'Gargantuar' } },
         ],
       },
     },
     {
       name: 'ZombieAlmanac',
-      json: { objects: [{ aliases: ['tutorial'], objdata: { BriefIntroduction: { zh: '普通僵尸' }, Introduction: { zh: '普通僵尸' }, Special: [] } }] },
+      json: {
+        objects: [
+          { aliases: ['tutorial'], objdata: { BriefIntroduction: { zh: '普通僵尸' }, Introduction: { zh: '普通僵尸' }, Special: [] } },
+          { aliases: ['seagull'], objdata: { BriefIntroduction: { zh: '飞行僵尸' }, Introduction: { zh: '海鸥僵尸会飞过植物' }, Special: [] } },
+          { aliases: ['gargantuar'], objdata: { BriefIntroduction: { zh: '巨人僵尸' }, Introduction: { zh: '巨人僵尸会砸碎植物' }, Special: [] } },
+        ],
+      },
     },
+    { name: 'ProjectileProps', json: { objects: [{ aliases: ['pea'], objdata: { Damage: 20 } }] } },
     { name: 'ArmorProps', json: { objects: [{ aliases: ['dark_bucket'], objdata: { Toughness: 460, isMetal: true } }] } },
-    { name: 'LawnProps', json: { objects: [{ aliases: ['FrontLawnStage'], objdata: { IsAtNight: false } }] } },
+    { name: 'LawnProps', json: { objects: [{ aliases: ['FrontLawnStage'], objdata: { IsAtNight: !!night } }] } },
     { name: 'TombstoneProps', json: { objects: [] } },
   ];
   const assetManager = { assets: { forEach(fn) { assets.forEach(fn); } } };
   const cc = { director: { getScene: () => scene }, assetManager };
-  const ctx = { unsafe: { engine: { getCc: () => cc } } };
+  const ctx = { unsafe: { engine: { getCc: () => cc } }, testMode: true };
 
-  return { ctx, scene, cards, levelController, ui, sun, food, grid, available, SquareClass, pauseScreen };
+  return { ctx, scene, cards, levelController, ui, sun, food, grid, available, SquareClass, pauseScreen, conveyorComp };
 }

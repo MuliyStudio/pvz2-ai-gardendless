@@ -123,6 +123,71 @@ test('能量豆字段族：近身多段 / 本行连射 / 图鉴写法都能分�
   assert.ok(np.plantFood, '未知字段不能把 plantFood 变成 null');
   assert.equal(np.plantFood.kind, 'unknown');
   assert.equal(np.plantFood.confidence, 'low');
+  assert.equal(np.plantFood.rawFields.FancyPlantfoodThing, 3, '未知新字段要原样保留，不能静默丢掉');
+});
+
+test('能量豆字段别名：近/远伤害、植物/僵尸伤害、护甲、阳光脉冲都能自动适配', () => {
+  const stats = readerOf(assets([
+    { alias: 'mangosteen', props: { SunCost: 150, Cooldown: 10, Toughness: 300, Family: 'Nope', PlantfoodDamageNear: 1800, PlantfoodDamageFar: 1800 } },
+    { alias: 'moonbean', props: { SunCost: 25, Cooldown: 10, Toughness: 300, Family: 'Nope', PlantDamagePlantfood: 0, ZombieDamagePlantfood: 1250 } },
+    { alias: 'wallnut', props: { SunCost: 50, Cooldown: 20, Toughness: 4000, Family: 'Defence', ArmorToughness: 4000 } },
+    { alias: 'sunflower', props: { SunCost: 50, Cooldown: 5, Toughness: 300, Family: 'Sun', PlantfoodTime: 3, SunValue: 50 } },
+    { alias: 'squash', props: { SunCost: 50, Cooldown: 10, Toughness: 300, Family: 'Nope', PlantfoodSmashTime: 2, SmashDamage: 1800 } },
+  ]));
+  assert.equal(stats.plantStatsOf('mangosteen').plantFood.total, 1800);
+  assert.equal(stats.plantStatsOf('moonbean').plantFood.total, 1250, 'ZombieDamagePlantfood 不能被 0 的 PlantDamagePlantfood 截胡');
+  assert.equal(stats.plantStatsOf('wallnut').plantFood.armorHp, 4000, 'ArmorToughness 也是加甲字段');
+  const sun = stats.plantStatsOf('sunflower').plantFood;
+  assert.equal(sun.kind, 'sun_burst');
+  assert.equal(sun.count, 3);
+  assert.equal(sun.sunTotal, 150);
+  assert.equal(stats.plantStatsOf('squash').plantFood.total, 1800);
+});
+
+test('能量豆弹幕：只写 PlantfoodPeaCount 时回退普通弹丸伤害（藤蔓豌豆 60×20）', () => {
+  const list = assets([
+    { alias: 'pvine', props: { SunCost: 125, Cooldown: 5, Toughness: 300, Family: 'Peashooter', ShootInterval: 1.35, PeaType: 'pea', PlantfoodPeaCount: 60 } },
+  ]);
+  list.find((a) => a.name === 'ProjectileProps').json.objects = [{ aliases: ['pea'], objdata: { Damage: 20 } }];
+  const pf = readerOf(list).plantStatsOf('pvine').plantFood;
+  assert.equal(pf.kind, 'barrage');
+  assert.equal(pf.count, 60);
+  assert.equal(pf.projectileDamage, 20);
+  assert.equal(pf.total, 1200);
+  assert.ok(pf.assumptions.some((x) => /普通攻击弹丸/.test(x)));
+});
+
+test('能量豆弹幕：回旋镖 16 发 × 20 伤害 × 来回 2 次 → 640/目标，上限 1920', () => {
+  const list = assets(
+    [{
+      alias: 'bloomerang',
+      props: {
+        SunCost: 175, Cooldown: 5, Toughness: 300, Family: 'Sharp',
+        ShootInterval: 2.7, BoomerangType: 'boomerang', PierceCount: 3,
+        PlantfoodBoomerangCount: 16,
+      },
+    }],
+    [{
+      alias: 'bloomerang',
+      objdata: {
+        BriefIntroduction: { zh: '击打本行的三个目标，各两次' },
+        Introduction: { zh: '回旋镖来回都能造成伤害' },
+        Elements: [{ TYPE: 'DAMAGE', VALUE: 20 }, { TYPE: 'RANGE', SORT: { zh: '多重打击' } }],
+      },
+    }],
+  );
+  const proj = list.find((a) => a.name === 'ProjectileProps');
+  proj.json.objects = [{ aliases: ['boomerang'], objdata: { Damage: 20 } }];
+  const st = readerOf(list).plantStatsOf('bloomerang');
+  assert.equal(st.plantFood.kind, 'lob_barrage');
+  assert.equal(st.plantFood.area, 'row');
+  assert.equal(st.plantFood.count, 16);
+  assert.equal(st.plantFood.projectileDamage, 20);
+  assert.equal(st.plantFood.targetsPerHit, 3);
+  assert.equal(st.plantFood.hitsPerTarget, 2);
+  assert.equal(st.plantFood.totalPerTarget, 640);
+  assert.equal(st.plantFood.maxTotal, 1920);
+  assert.ok(st.plantFood.assumptions.length >= 2, JSON.stringify(st.plantFood));
 });
 
 test('点击识别：瞄准/再点击也能认出来，并且区分 aim', () => {

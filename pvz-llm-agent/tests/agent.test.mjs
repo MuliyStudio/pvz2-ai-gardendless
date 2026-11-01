@@ -59,7 +59,7 @@ test('agent 执行 tool_calls、回填结果、显示推理，并在收到停止
   assert.ok(events.some((e) => e.type === 'tool_call' && e.name === 'pvz_health'));
   assert.ok(events.some((e) => e.type === 'tool_result' && e.name === 'pvz_state' && e.ok));
   assert.ok(events.some((e) => e.type === 'run_end'));
-  assert.ok(bodies[0].tools.length === 18);
+  assert.ok(bodies[0].tools.length === 19);
   assert.equal(bodies[0].tool_choice, 'auto');
   // 思考模型要求回传 reasoning_content，否则下一轮会 400
   const echoed = (bodies[1].messages || []).find((m) => m.role === 'assistant' && m.tool_calls);
@@ -68,6 +68,164 @@ test('agent 执行 tool_calls、回填结果、显示推理，并在收到停止
   const msgs = agent.getMessages();
   assert.ok(msgs.some((m) => m.role === 'tool' && m.name === 'pvz_health'));
   assert.ok(msgs.some((m) => m.role === 'assistant' && Array.isArray(m.tool_calls)));
+});
+
+test('省 token：pvz_state 只给决策字段，旧状态自动归档', async () => {
+  const bigState = {
+    ok: true, phase: 'running', sun: 100, plantFood: 1,
+    level: { wave: 3, waves: 8 }, cards: [{ index: 0, type: 'peashooter', cost: 100, cd: 0, ready: true, affordable: true, foodKind: 'barrage' }],
+    plants: [{ lane: 0, column: 1, type: 'peashooter', hp: 300, maxHp: 300, family: 'Peashooter', atk: { dps: 13.3 }, foodable: true }],
+    zombies: [{ lane: 0, column: 5, type: 'tutorial', hp: 190, ehp: 190, speed: 0.185, etaToHouse: 27, eatDps: 100 }],
+    lanes: [{ lane: 0, zombies: 1, nearestZombie: 5, dps: 13.3, dpsOnFront: 13.3, gap: 0, lossIn: 27, frontPlant: null }],
+    tasks: [], deck: ['peashooter'], changesSinceLast: { none: true },
+    brief: {
+      leadSec: 5, totalDps: 13.3, sunRate: 1, wave: { now: 3 }, incoming: [{ wave: 4 }],
+      pressure: [{ lane: 0, gap: 0 }], safeLanes: [0], rescuePlan: [{ lane: 0 }],
+      plantFoodPlan: [], activatePlan: [], wallPlan: [], minePlan: [], wallRebuildPlan: [],
+      // 这些是静态大字段，不该每轮发给模型
+      coverageGaps: { missing: Array.from({ length: 80 }, (_, i) => ({ capability: `cap${i}` })) },
+      counterMatrix: Array.from({ length: 80 }, (_, i) => ({ type: `z${i}` })),
+      laneMath: Array.from({ length: 80 }, (_, i) => ({ lane: i })),
+      deckCapabilities: { x: Array.from({ length: 80 }, (_, i) => i) },
+    },
+    board: Array.from({ length: 80 }, (_, i) => ({ i })),
+    levelScript: { huge: Array.from({ length: 80 }, (_, i) => i) },
+  };
+  const router = { call: async () => bigState };
+  const replies = [0, 1, 2].map((i) => reply({ content: '', tool_calls: [toolCall(`c${i}`, 'pvz_state', {})] }));
+  let i = 0;
+  const bodies = [];
+  const fetchImpl = async (url, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    return replies[Math.min(i++, replies.length - 1)];
+  };
+  const events = [];
+  const agent = createLlmAgent({
+    fetchImpl, router, sleep: async () => {},
+    cfg: { baseUrl: 'https://example.test/v1', model: 'mock', apiKey: 'sk-test', stream: false, maxSteps: 10, keepStateResults: 2 },
+    onEvent: (ev) => {
+      events.push(ev);
+      if (ev.type === 'tool_result') {
+        const n = events.filter((x) => x.type === 'tool_result').length;
+        if (n >= 3) agent.stop('测试停止');
+      }
+    },
+  });
+  const r = await agent.start();
+  await r.done;
+
+  const toolStates = agent.getMessages().filter((m) => m.role === 'tool' && m.name === 'pvz_state');
+  assert.equal(toolStates.length, 3);
+  assert.match(toolStates[0].content, /archived/, '旧状态应归档');
+  assert.ok(!toolStates[0].content.includes('coverageGaps'), '归档里不应保留大字段');
+  assert.ok(!toolStates[2].content.includes('coverageGaps'), '当前状态也不应重复静态 coverageGaps');
+  assert.ok(!toolStates[2].content.includes('"board"'), '当前状态不应带棋盘');
+  assert.ok(toolStates[2].content.includes('"lanes"'), '当前状态要保留决策用的 lanes');
+  assert.ok(toolStates[2].content.includes('rescuePlan'), '当前状态要保留救场事实');
+  assert.ok(toolStates[2].content.length < toolStates[0].content.length + 2000);
+});
+
+test('预算告警：超过 tokenBudget 时发 log；run_end 带总 token/预算百分比', async () => {
+  const router = { call: async () => ({ ok: true, phase: 'running', sun: 1, cards: [], plants: [], zombies: [], tasks: [], lanes: [] }) };
+  const replies = [0, 1].map((i) => reply({ content: '', tool_calls: [toolCall(`c${i}`, 'pvz_state', {})] }));
+  let i = 0;
+  const fetchImpl = async () => replies[Math.min(i++, replies.length - 1)];
+  const events = [];
+  const agent = createLlmAgent({
+    fetchImpl, router, sleep: async () => {},
+    cfg: { baseUrl: 'https://example.test/v1', model: 'mock', apiKey: 'sk-test', stream: false, maxSteps: 5, tokenBudget: 20 },
+    onEvent: (ev) => {
+      events.push(ev);
+      if (ev.type === 'tool_result') {
+        const n = events.filter((x) => x.type === 'tool_result').length;
+        if (n >= 2) agent.stop('测试停止');
+      }
+    },
+  });
+  const r = await agent.start();
+  await r.done;
+  assert.ok(events.some((e) => e.type === 'log' && /预算/.test(e.text)), '应发预算提醒/告警');
+  const end = events.find((e) => e.type === 'run_end');
+  assert.ok(end && end.stats.totalTokens >= 30, JSON.stringify(end && end.stats));
+  assert.ok(end.stats.budgetUsedPct >= 100);
+});
+
+test('批量提醒：连续两轮只发 1 个动作后，下一轮提示 2–4 个动作', async () => {
+  const state = { ok: true, phase: 'running', sun: 50, cards: [], plants: [], zombies: [], tasks: [], lanes: [] };
+  const router = {
+    call: async (name, args) => (name === 'pvz_act'
+      ? { ok: true, results: [{ ok: true, action: 'plant' }], state }
+      : state),
+  };
+  const replies = [0, 1, 2].map((i) => reply({ content: '', tool_calls: [toolCall(`c${i}`, 'pvz_act', { actions: [{ type: 'plant', lane: 0, column: 0 }] })] }));
+  let i = 0;
+  const bodies = [];
+  const fetchImpl = async (url, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    return replies[Math.min(i++, replies.length - 1)];
+  };
+  const events = [];
+  const agent = createLlmAgent({
+    fetchImpl, router, sleep: async () => {},
+    cfg: { baseUrl: 'https://example.test/v1', model: 'mock', apiKey: 'sk-test', stream: false, maxSteps: 10 },
+    onEvent: (ev) => {
+      events.push(ev);
+      if (ev.type === 'tool_result') {
+        const n = events.filter((x) => x.type === 'tool_result').length;
+        if (n >= 3) agent.stop('测试停止');
+      }
+    },
+  });
+  const r = await agent.start();
+  await r.done;
+  assert.ok((bodies[2].messages || []).some((m) => m.role === 'user' && /2–4 个可并行动作/.test(String(m.content || ''))));
+});
+
+test('队列 coast：队列有任务时先本地刷新两拍，再请求模型', async () => {
+  let stateCalls = 0;
+  const baseState = { ok: true, phase: 'running', sun: 50, cards: [], plants: [], zombies: [], tasks: [], lanes: [] };
+  const router = {
+    call: async (name) => {
+      if (name === 'pvz_act') {
+        return {
+          ok: true, results: [{ ok: true, action: 'plant' }],
+          state: { ...baseState, queue: { pending: 2, enabled: true, stats: {} } },
+        };
+      }
+      if (name === 'pvz_state') {
+        stateCalls += 1;
+        return {
+          ...baseState,
+          queue: { pending: stateCalls === 1 ? 1 : 0, enabled: stateCalls === 1, stats: {} },
+        };
+      }
+      return { ok: true };
+    },
+  };
+  const replies = [0, 1].map((i) => reply({ content: '', tool_calls: [toolCall(`c${i}`, 'pvz_act', { actions: [{ type: 'plant', lane: 0, column: 0 }] })] }));
+  let fetchCount = 0;
+  const fetchImpl = async () => {
+    fetchCount += 1;
+    // 第二次模型请求必须发生在本地的两次 queue coast 之后。
+    if (fetchCount === 2) assert.ok(stateCalls >= 2, `coast 后 stateCalls=${stateCalls}`);
+    return replies[Math.min(fetchCount - 1, replies.length - 1)];
+  };
+  const events = [];
+  const agent = createLlmAgent({
+    fetchImpl, router, sleep: async () => {},
+    cfg: { baseUrl: 'https://example.test/v1', model: 'mock', apiKey: 'sk-test', stream: false, maxSteps: 10, queueCoastRounds: 2, queueCoastMs: 1 },
+    onEvent: (ev) => {
+      events.push(ev);
+      if (ev.type === 'tool_result') {
+        const n = events.filter((x) => x.type === 'tool_result').length;
+        if (n >= 2) agent.stop('测试停止');
+      }
+    },
+  });
+  const r = await agent.start();
+  await r.done;
+  assert.ok(stateCalls >= 2, 'coast 应调用本地 pvz_state');
+  assert.ok(events.some((e) => e.type === 'log' && /队列 coast/.test(e.text)));
 });
 
 test('agent 对非法工具参数返回 BAD_TOOL_ARGS，不抛异常', async () => {

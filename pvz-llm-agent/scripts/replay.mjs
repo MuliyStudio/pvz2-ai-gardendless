@@ -59,6 +59,7 @@ const summary = {
   file,
   samples: (report.samples || []).length,
   phases: report.phases || [...new Set((report.samples || []).map((s) => s.phase).filter(Boolean))],
+  metrics: report.metrics || null,
   ok: report.ok,
   errors: report.errors || [],
   guardCodes: report.codes || null,

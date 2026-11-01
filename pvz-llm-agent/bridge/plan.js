@@ -34,10 +34,14 @@ export function normalizeCoverageGaps(gaps) {
   return [];
 }
 
-function counterCovers(counter, gap) {
+function counterCovers(counter, gap, deckSet) {
   if (!counter || typeof counter !== 'object') return false;
+  // counter 里写的卡必须真的在当前卡组里，否则“计划有克制”只是纸面覆盖。
+  if (counter.card && deckSet && deckSet.size && !deckSet.has(String(counter.card))) return false;
   const tags = Array.isArray(gap.tags) ? gap.tags : [];
-  if (counter.tag && tags.includes(String(counter.tag))) return true;
+  const counterTags = Array.isArray(counter.tags) ? counter.tags.map(String)
+    : (counter.tag ? [String(counter.tag)] : []);
+  if (counterTags.some((t) => tags.includes(t))) return true;
   if (counter.threat && tags.includes(String(counter.threat))) return true;
   const alts = Array.isArray(gap.alternatives) && gap.alternatives.length
     ? gap.alternatives.map(String)
@@ -63,7 +67,7 @@ export function auditPlan(plan, ctx = {}) {
   if (!p.text) {
     warnings.push({ code: 'PLAN_NO_TEXT', reason: '计划缺少 text（给玩家看的中文摘要）' });
   }
-  const structuredKeys = ['lanes', 'counters', 'phases', 'triggers', 'emergency'];
+  const structuredKeys = ['lanes', 'counters', 'phases', 'triggers', 'emergency', 'queue', 'rules'];
   const structured = structuredKeys.filter((k) => {
     const v = p[k];
     if (Array.isArray(v)) return v.length > 0;
@@ -74,6 +78,27 @@ export function auditPlan(plan, ctx = {}) {
       code: 'PLAN_TEXT_ONLY',
       reason: '计划只有文字：补 lanes（每行职责）、counters（机制→卡）、phases/triggers（波次条件），快模型才能直接执行',
     });
+  }
+
+  // 开局计划不建议写死具体行/列：僵尸生成和波次是动态的。
+  // 只提示，不阻止保存；running 时再写 queue 是允许的。
+  if (ctx.phase === 'preparing') {
+    const lanes = Array.isArray(p.lanes) ? p.lanes : [];
+    const positional = lanes.filter((l) => l && typeof l === 'object' && (
+      (l.wall != null && Number.isFinite(Number(l.wall)))
+      || (Array.isArray(l.output) && l.output.some((c) => Number.isFinite(Number(c))))
+      || (Array.isArray(l.econ) && l.econ.some((c) => Number.isFinite(Number(c))))
+    ));
+    const queue = Array.isArray(p.queue) ? p.queue : [];
+    const fixedQueue = queue.filter((t) => t && t.column != null && /^\d+$/.test(String(t.column)));
+    if (positional.length || fixedQueue.length) {
+      warnings.push({
+        code: 'PLAN_POSITIONAL_AT_START',
+        lanes: positional.map((l) => l.lane).filter((x) => x != null),
+        fixedTasks: fixedQueue.map((t) => t.id).filter(Boolean).slice(0, 6),
+        reason: '开局计划里出现了具体行/列/固定格。僵尸生成和波次是动态的，建议开局只写 counters/usage/phases 这类“什么克制什么、怎么用”的建议；位置留到 running 时由 capacityGaps/wallPlan/minePlan/lastResortPlan 现算。',
+      });
+    }
   }
 
   if (Array.isArray(p.lanes)) {
@@ -102,9 +127,10 @@ export function auditPlan(plan, ctx = {}) {
 
   const gaps = normalizeCoverageGaps(ctx.coverageGaps);
   const counters = Array.isArray(p.counters) ? p.counters : [];
+  const deckSet = new Set((Array.isArray(ctx.deck) ? ctx.deck : []).map(String));
   for (const gap of gaps) {
     // 只认 counters 里的显式对应；卡组里带了某张卡不等于写了“用它处理这个机制”。
-    const covered = counters.some((c) => counterCovers(c, gap));
+    const covered = counters.some((c) => counterCovers(c, gap, deckSet));
     if (covered) continue;
     const alts = Array.isArray(gap.alternatives) && gap.alternatives.length ? gap.alternatives : [gap.capability];
     warnings.push({
@@ -116,6 +142,25 @@ export function auditPlan(plan, ctx = {}) {
       reason: `本关需要能力 ${alts.join('/')}${gap.tags && gap.tags.length ? `（tag: ${gap.tags.join('/')}）` : ''}，计划里没有对应 counter${gap.candidates && gap.candidates.length ? `；卡池里能满足的是 ${gap.candidates.join('/')}` : ''}。补一条 counters 或写清替代方案。`,
     });
   }
+
+  // 时间敏感任务写死列：墙/雷到执行时僵尸可能已经越过，固定 c 列会变成
+  // WALL_TOO_LATE / MINE_TOO_LATE。只提示改列写法，不替模型改任务。
+  const queue = Array.isArray(p.queue) ? p.queue : [];
+  const fixedColumnWarn = (types, code, label, fix) => {
+    if (!Array.isArray(types) || !types.length) return;
+    const hits = queue.filter((t) => t && t.type !== 'shovel'
+      && types.includes(String(t.plant || ''))
+      && t.column != null && /^\d+$/.test(String(t.column)));
+    if (!hits.length) return;
+    warnings.push({
+      code,
+      ids: hits.map((t) => t.id).filter(Boolean).slice(0, 6),
+      columns: [...new Set(hits.map((t) => Number(t.column)))].sort((a, b) => a - b),
+      reason: `queue 里 ${label} 写死了列 c${[...new Set(hits.map((t) => Number(t.column)))].sort((a, b) => a - b).join('/c')}；僵尸越过这一列后任务会变成 ${code === 'PLAN_FIXED_WALL_COLUMN' ? 'WALL_TOO_LATE' : 'MINE_TOO_LATE'}。改用 column:'${fix}'（本地按最前僵尸/出土时间算），或至少带 cond.zombieColumnLt。`,
+    });
+  };
+  fixedColumnWarn(ctx.wallTypes, 'PLAN_FIXED_WALL_COLUMN', '坚果墙', 'ahead');
+  fixedColumnWarn(ctx.mineTypes, 'PLAN_FIXED_MINE_COLUMN', '土豆雷/地雷', 'safe');
 
   return { ok: warnings.length === 0, warnings };
 }

@@ -58,7 +58,7 @@ try {
   check('无本地决策 API', !!(health && health.features
     && health.features.localStrategy === false
     && health.features.autoDeck === false
-    && health.features.queue === false),
+    && health.features.queue === true),
   health && health.features ? JSON.stringify(health.features) : null);
   check('工具清单完整', health && Array.isArray(health.tools) && health.tools.length === 15, health && health.tools && health.tools.length);
 

@@ -63,7 +63,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, latency = null }) {
+export function createToolRouter({ bridge, version = '0.4.16', sleep = routerSleep, latency = null }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -133,12 +133,12 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
       plantFoodMax: s.plantFoodMax, plantFoodFull: s.plantFoodFull,
       level: s.level, levelKey: s.levelKey, prep: s.prep,
       tasks: s.tasks, objective: s.objective, missionHints: s.missionHints,
-      cards: s.cards, deck: s.deck, seedSelection: s.seedSelection,
+      cards: s.cards, deck: s.deck, seedSelection: s.seedSelection, conveyor: s.conveyor,
       plants: s.plants, zombies: s.zombies, lanes: s.lanes,
       protectCells: s.protectCells, brief: s.brief, limits: s.limits,
       plan: s.plan, planSavedAt: s.planSavedAt,
       changesSinceLast: s.changesSinceLast, events: s.events,
-      forecast: s.forecast, mechanics: s.mechanics, carts: s.carts,
+      forecast: s.forecast, mechanics: s.mechanics, carts: s.carts, queue: s.queue,
       startingSun: s.startingSun, collect: s.collect,
     };
   }
@@ -171,16 +171,29 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
         }
         case 'pvz_set_plan': {
           if (!args || !('plan' in args)) return normalizeError('BAD_PLAN', {}, '需要 plan 字段');
-          const r = await bridge.setPlan(args.plan);
+          let s = null;
+          try { s = await bridge.snapshot(); } catch { s = null; }
+          let planArg = args.plan;
+          // 计划绑定到当前关卡：下一关沿用旧计划时，给定卡组/提前布阵的开局拦截不会误放行。
+          if (planArg && typeof planArg === 'object' && !Array.isArray(planArg)
+            && !planArg.levelKey && s && s.levelKey) {
+            planArg = { ...planArg, levelKey: s.levelKey };
+          }
+          const r = await bridge.setPlan(planArg);
           if (!r || r.ok === false || !r.plan) return r;
           // 保存后立刻用本关事实审计：缺能力没写 counter、卡组不一致、只有一段文本都会给 warning。
           // 仍然保存计划（模型能看到 warning 再重写），不做本地修正。
           let ctx = {};
           try {
-            const s = await bridge.snapshot();
+            const prep = s && s.prep;
+            // 选卡页还在、且还没开局：deck 可能马上被换，先不判 PLAN_DECK_MISMATCH。
+            const deckFinal = !prep || prep.gameStarted || prep.deckLocked
+              || prep.mode === 'conveyor' || !prep.hasSeedChooser;
             ctx = {
               coverageGaps: s && s.brief ? s.brief.coverageGaps : null,
-              deck: (s && s.seedSelection && s.seedSelection.current) || (s && s.deck) || [],
+              deck: deckFinal
+                ? ((s && s.seedSelection && s.seedSelection.current) || (s && s.deck) || [])
+                : null,
             };
           } catch { ctx = {}; }
           const audit = auditPlan(r.plan, ctx);
@@ -189,6 +202,12 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
         case 'pvz_choose_deck': return await chooseDeck(args);
         case 'pvz_start_level': return await startLevel(args);
         case 'pvz_act': return await act(args);
+        case 'pvz_decide': {
+          if (!args || !args.id || !args.choice) {
+            return normalizeError('BAD_DECISION', {}, '需要 id 和 choice（yes/no/other）');
+          }
+          return await bridge.decide(String(args.id), String(args.choice), args.reason);
+        }
         case 'pvz_wait_until': return await waitUntil(args);        case 'pvz_collect': {
           const r = await bridge.collect();
           return r && r.ok === false ? r : { ok: true, ...r };
@@ -205,6 +224,10 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
           return await bridge.moveCart(Number(args.cart), dir);
         }
         case 'pvz_resume': return await bridge.resume();
+        // 内部/停止时使用：清掉模型授权的本地执行队列。
+        case 'pvz_clear_queue': return typeof bridge.clearQueue === 'function'
+          ? await bridge.clearQueue()
+          : { ok: true, cleared: false };
         case 'pvz_restart': {
           if (typeof bridge.restartLevel !== 'function') return normalizeError('RESTART_UNSUPPORTED', {}, '当前 bridge 不支持重开');
           lastBriefing = null;
@@ -308,8 +331,9 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
       let retries = 0;
       while (r && r.ok === false && r.code === 'COOLDOWN' && retries < 3 && Date.now() < deadline) {
         const secs = Number(r.retryAfter) || 0;
-        // 长冷却（墙卡 20s 这类）干等不划算：停手，让模型换张卡补线
-        if (secs > 3.5) break;
+        // 长冷却（墙卡 20s 这类）干等不划算：停手，让模型换张卡补线。
+        // 5s 左右的常用输出/经济卡允许在同一批 cells 里排队等一次。
+        if (secs > 8) break;
         await sleep(Math.max(200, secs * 1000) + 120);
         retries += 1;
         r = await bridge.act(one);
@@ -342,16 +366,37 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
     if (!r || typeof r !== 'object') return normalizeError('BAD_RESPONSE', {}, '选卡没有返回结果');
     // 卡组变了，下一次 briefing 要重新算 counterGaps，不能命中“和上次相同”的去重。
     lastBriefing = null;
-    return r;
+    // 有的“提前布阵”关在选卡完成那一刻才进入布阵期：把新的 prep 一并带回去，
+    // 模型不用再多花一轮 pvz_state 才知道现在该布阵而不是直接开打。
+    let prep = null;
+    try { const s = await bridge.snapshot(); prep = s && s.prep ? s.prep : null; } catch { prep = null; }
+    return prep ? { ...r, prep } : r;
   }
 
   async function startLevel(args) {
     const dismiss = !args || args.dismiss_objective !== false;
     const timeout = Math.max(1, Math.min(20, Number(args && args.timeout) || 8));
     const before = await bridge.snapshot();
-    const preplant = !!(before && before.ok && before.prep && before.prep.mode === 'preplant' && !before.prep.gameStarted);
+    const prep = before && before.ok ? before.prep : null;
+    const preplant = !!(prep && prep.mode === 'preplant' && !prep.gameStarted);
     if (before && before.ok && before.phase === 'running' && !preplant) {
-      return { ok: true, started: true, phase: before.phase, elapsed: 0, detail: '已经在战斗中' };
+      return { ok: true, started: true, phase: before.phase, elapsed: 0, detail: '已经在战斗中', prep };
+    }
+    // 给定卡组 / 提前布阵：先有计划再开局。bridge.act 里也有同一道拦截，
+    // 这里提前返回更清楚，避免模型把“还没想好”当成工具坏了。
+    if (prep && prep.mustPlanBeforeStart) {
+      const p = typeof bridge.getPlan === 'function' ? bridge.getPlan() : null;
+      const stale = !!(p && p.plan && before.levelKey && p.plan.levelKey && p.plan.levelKey !== before.levelKey);
+      if (!p || !p.plan || !String(p.plan.text || '').trim() || stale) {
+        return normalizeError('NEED_PLAN', {
+          prep,
+          phase: before.phase,
+          stalePlan: stale || undefined,
+          hint: stale
+            ? '这份计划是上一关的；先针对本关重新 pvz_briefing + pvz_set_plan，再开局。'
+            : '先用 pvz_briefing 读完整关波次/卡组/克制，再用 pvz_set_plan 写下对策（text + lanes/counters/phases），然后才能 pvz_start_level。',
+        }, stale ? '计划属于上一关，需要按本关事实重写' : '还没有作战计划：先想清楚卡组对策再开局');
+      }
     }
     if (dismiss && before && before.ok && before.objective && before.objective.active) {
       const d = await bridge.dismissObjective();
@@ -366,10 +411,10 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
       last = await bridge.snapshot();
       const stillPreplant = !!(last && last.ok && last.prep && last.prep.mode === 'preplant' && !last.prep.gameStarted);
       if (last && last.ok && last.phase === 'running' && !stillPreplant) {
-        return { ok: true, started: true, phase: last.phase, elapsed: Math.round((Date.now() - startedAt) / 100) / 10, detail: (r && r.detail) || '已开局' };
+        return { ok: true, started: true, phase: last.phase, elapsed: Math.round((Date.now() - startedAt) / 100) / 10, detail: (r && r.detail) || '已开局', prep: last.prep };
       }
       if (last && last.ok && (last.phase === 'won' || last.phase === 'lost')) {
-        return { ok: true, started: true, phase: last.phase, elapsed: Math.round((Date.now() - startedAt) / 100) / 10, detail: '战斗直接结束' };
+        return { ok: true, started: true, phase: last.phase, elapsed: Math.round((Date.now() - startedAt) / 100) / 10, detail: '战斗直接结束', prep: last.prep };
       }
       await sleep(300);
     }
@@ -399,7 +444,13 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
     const results = [];
     // 批量预检（纯计算）：同卡长冷却、同格冲突、同批“先种墙再把输出种到墙右侧”。
     // 只跳过不可能成功的动作并如实返回 code，不替模型换卡/换格。
-    const pre = batchPreflight({ actions: list, cards, state });
+    // 传送带不扣阳光、不吃种子冷却：同卡多次只在“同一批”里撞索引变化，不该报 BATCH_COOLDOWN。
+    const conveyorMode = !!(state && state.conveyor && state.conveyor.enabled);
+    const pre = batchPreflight({
+      actions: list, cards, state,
+      cooldownLimitSec: conveyorMode ? Number.POSITIVE_INFINITY : 3.5,
+      autoWaitSec: conveyorMode ? 0 : 8,
+    });
     const preIssues = new Map();
     for (const issue of (pre && pre.issues) || []) {
       if (!preIssues.has(issue.index)) preIssues.set(issue.index, issue);
@@ -412,7 +463,9 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
         continue;
       }
       const issue = preIssues.get(i);
-      if (issue) {
+      // defer=true 的同卡重复动作不判死：先执行，遇到 COOLDOWN 时在下面
+      // 统一等一次冷却再重试（上限 8s）。20s 墙仍然直接返回 BATCH_COOLDOWN。
+      if (issue && !issue.defer) {
         results.push({ index: i, action: type, type, ok: false, ...issue });
         continue;
       }
@@ -478,18 +531,20 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
       } catch (e) {
         r = normalizeError('ACT_THREW', {}, String(e && e.message || e));
       }
-      // 同一张卡在一批动作里会出现两次：短冷却（≤3.5s）自动等，长冷却直接返回让模型换卡。
-      // 20 秒的墙卡在这里干等，等于把整轮节奏晾死。
+      // 同一张卡在一批动作里会出现两次：≤8s 的冷却自动排队等一次，
+      // 20 秒的墙卡仍然直接返回，避免把整轮节奏晾死。
       if (r && r.ok === false && r.code === 'COOLDOWN') {
         const budget = Date.now() + 20000;
         for (let retry = 0; retry < 2 && r && r.code === 'COOLDOWN' && Date.now() < budget; retry++) {
           const secs = Number(r.retryAfter) || 0;
-          if (secs > 3.5) break;
+          if (secs > 8) break;
           await sleep(Math.max(200, secs * 1000) + 120);
           try { r = await bridge.act(a, { deferSettle }); } catch (e) { r = normalizeError('ACT_THREW', {}, String(e && e.message || e)); }
         }
       }
-      results.push({ index: i, action: type, ...(r || normalizeError('ACT_THREW', {}, '没有返回')) });
+      const item = { index: i, action: type, ...(r || normalizeError('ACT_THREW', {}, '没有返回')) };
+      if (issue && issue.defer) item.batchDeferred = true;
+      results.push(item);
     }
     // 批量种植统一等一次落地；单动作仍由动作自己等，保持原来的真实返回。
     if (deferSettle) await settlePendingPlants(results);
@@ -572,5 +627,9 @@ export function createToolRouter({ bridge, version = '0.4.15', sleep = routerSle
     }, `等待 ${timeout}s 后条件仍未满足`);
   }
 
-  return { call, names: TOOL_NAMES };
+  return {
+    call,
+    names: TOOL_NAMES,
+    clearQueue: () => (typeof bridge.clearQueue === 'function' ? bridge.clearQueue() : { ok: true, cleared: false }),
+  };
 }

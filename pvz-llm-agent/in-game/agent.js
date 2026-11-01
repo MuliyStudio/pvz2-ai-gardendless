@@ -99,7 +99,7 @@ function getOpenCodeSession() {
   return openCodeSession;
 }
 
-export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep = sleepDefault, version = '0.4.15', latency = null }) {
+export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep = sleepDefault, version = '0.4.17', latency = null, onModelRequestStart = null, onModelRequestEnd = null }) {
   const config = {
     baseUrl: DEFAULT_LLM.baseUrl,
     model: DEFAULT_LLM.model,
@@ -117,25 +117,62 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     apiKey: '',
     temperature: 0.3,
     stream: true,
-    maxSteps: 80,
+    // 思考模式：'auto'（默认）= 战斗中/后台关闭，开局规划保留低强度思考；'off' 全程关闭；'on' 全程开启。
+    thinkingMode: 'auto',
+    reasoningEffort: 'low',
+    // 战斗中单次回复上限；动作回复很短，但要留足一次 4–6 个动作 + queue 的 JSON。
+    battleMaxTokens: 800,
+    // 16 波的长关 80 步不够（约 5 步/波）；给足步数，避免打到一半 STEP_LIMIT 直接停。
+    maxSteps: 240,
     loopDelayMs: 200,
+    // 省 token 的上下文策略：每轮只把“当前局面摘要”发给模型，旧状态自动归档。
+    // 需要完整 brief/coverageGaps/laneMath 时仍可显式调 pvz_briefing 或 pvz_state full=true。
+    leanContext: true,
+    // 不重写旧消息（会破坏 DeepSeek 前缀缓存）；只靠 historyMaxMessages 从前端整段丢弃。
+    keepStateResults: 99,
+    // 连续 N 轮只发 1 个动作后提醒批量提交；0 = 关闭。
+    batchNudgeAfter: 2,
+    // 历史窗口上限；配合 trimMessages 的批量裁剪，前缀稳定才能吃到缓存。
+    historyMaxMessages: 16,
+    // 队列 coast：队列还有任务时，先让本地执行 1-2 拍再请求模型。
+    queueCoastRounds: 2,
+    queueCoastMs: 700,
+    // 预算告警：0=关闭；默认 120 万 tokens 提醒一次。
+    tokenBudget: 1200000,
+    // 可选：按每百万 tokens 的单价估算金额（不填就只显示 token）。
+    inputPricePerM: 0,
+    outputPricePerM: 0,
+    currency: '¥',
     ...cfg,
   };
   let messages = [];
   let running = false;
   let stopRequested = false;
   let controller = null;
-  let stats = { requests: 0, promptTokens: 0, completionTokens: 0, toolCalls: 0, modelSwitches: 0, modelMs: 0, toolMs: 0 };
+  let stats = { requests: 0, promptTokens: 0, promptCacheHit: 0, promptCacheMiss: 0, completionTokens: 0, toolCalls: 0, modelSwitches: 0, modelMs: 0, toolMs: 0 };
   let lastPlan = null;
   let lastPlanAt = null;
   let lastPhase = null;
   let everRunning = false;
   let lastError = null;
   let lastState = null;
+  // 当前准备模式：提前布阵/给定卡组没开打前，仍算“开局思考”，应该用主模型。
+  let prepNow = null;
   let forceStrongRounds = 0;
   let usedModel = '';
   let runStartedAt = 0;
   let recentActions = [];
+  let singleActionRounds = 0;
+  let batchNudgePending = false;
+  let lastPlanAuditNudgedFor = null;
+  let queueEmptyNudgedAt = 0;
+  let threatGapNudgedAt = 0;
+  let decisionNudgedAt = 0;
+  let deckNudgeKey = '';
+  let queueCoastBudget = 0;
+  let queueCoastNoted = false;
+  let budgetWarn80 = false;
+  let budgetWarn100 = false;
   let advisorBusy = false;
   let advisorNote = null;
   let advisorLastWave = null;
@@ -219,10 +256,37 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     }
   }
 
+  function totalTokens() {
+    return Number(stats.promptTokens || 0) + Number(stats.completionTokens || 0);
+  }
+
+  function estimatedCost() {
+    const pin = Number(config.inputPricePerM) || 0;
+    const pout = Number(config.outputPricePerM) || 0;
+    if (!pin && !pout) return null;
+    const cost = (Number(stats.promptTokens || 0) / 1e6) * pin
+      + (Number(stats.completionTokens || 0) / 1e6) * pout;
+    return Math.round(cost * 1000) / 1000;
+  }
+
   function addUsage(usage) {
     if (!usage) return;
     stats.promptTokens += Number(usage.prompt_tokens || 0);
     stats.completionTokens += Number(usage.completion_tokens || 0);
+    // DeepSeek 硬盘缓存：命中部分只按缓存价计费，也更快。统计出来才能判断前缀是否稳定。
+    stats.promptCacheHit += Number(usage.prompt_cache_hit_tokens
+      || (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens) || 0);
+    stats.promptCacheMiss += Number(usage.prompt_cache_miss_tokens || 0);
+    const total = totalTokens();
+    const budget = Number(config.tokenBudget) || 0;
+    if (budget > 0 && !budgetWarn80 && total >= budget * 0.8) {
+      budgetWarn80 = true;
+      emit({ type: 'log', text: `预算提醒：本局已用 ${total} tokens（预算 ${budget} 的 80%）。` });
+    }
+    if (budget > 0 && !budgetWarn100 && total >= budget) {
+      budgetWarn100 = true;
+      emit({ type: 'log', text: `预算告警：本局已用 ${total} tokens，超过预算 ${budget}。` });
+    }
   }
 
   function fastModelOn() {
@@ -230,11 +294,21 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     return f && f !== config.model ? f : '';
   }
 
+  function isPreBattle() {
+    return !!(prepNow && !prepNow.gameStarted && (prepNow.mode === 'preplant' || prepNow.mode === 'forced_deck'));
+  }
+
+  function isConveyorMode() {
+    return !!(prepNow && prepNow.mode === 'conveyor' && prepNow.gameStarted);
+  }
+
   // 开局/选卡/复盘用主模型（想清楚），进入 running 后默认换快模型；
+  // 提前布阵/给定卡组还没开打时仍算开局思考，必须用主模型把整关波次想清楚。
   // 每 escalateEvery 步、以及局内出现紧急任务/多行压力时，临时升级回主模型。
   function pickModel(phase, steps) {
     const fast = fastModelOn();
     if (!fast || phase !== 'running') return config.model;
+    if (isPreBattle()) return config.model;
     if (forceStrongRounds > 0) return config.model;
     const every = Number(config.escalateEvery) || 0;
     if (every > 0 && steps > 1 && steps % every === 0) {
@@ -264,6 +338,19 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
       temperature: Number(config.temperature) || 0,
       stream: !!stream,
     };
+    // 思考模式默认是开的（effort=high），会在动作循环里多花 1–3s，还会让缓存命中变差。
+    // auto：战斗中/后台调用关闭，开局规划保留低强度思考。
+    const phaseNow = (typeof getPhase === 'function' ? getPhase() : lastPhase) || '';
+    const inBattle = phaseNow === 'running' || !!background;
+    const thinking = config.thinkingMode === 'on' ? true
+      : config.thinkingMode === 'off' ? false
+        : !inBattle;
+    // 只对 DeepSeek 系模型发这两个字段，避免自定义/其他 provider 直接 400。
+    const deepseekLike = /deepseek/i.test(String(body.model || '')) || /deepseek\.com/i.test(String(config.baseUrl || ''));
+    if (deepseekLike) {
+      body.thinking = { type: thinking ? 'enabled' : 'disabled' };
+      if (thinking) body.reasoning_effort = String(config.reasoningEffort || 'low');
+    }
     if (!noTools) {
       body.tools = openAiTools();
       body.tool_choice = 'auto';
@@ -276,6 +363,22 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
       abortTimer = setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, Number(timeoutMs));
     }
     let res;
+    // 模型思考期间暂停普通本地队列，避免队列先花掉阳光、模型按旧状态决策；
+    // urgent 规则（三叶草这类短窗口救场）仍然由队列执行。
+    let requestNotified = false;
+    const notifyStart = () => {
+      if (requestNotified) return;
+      requestNotified = true;
+      if (typeof onModelRequestStart !== 'function') return;
+      try { onModelRequestStart({ model: body.model, background }); } catch { /* ignore */ }
+    };
+    const notifyEnd = () => {
+      if (!requestNotified) return;
+      requestNotified = false;
+      if (typeof onModelRequestEnd !== 'function') return;
+      try { onModelRequestEnd({ model: body.model, background }); } catch { /* ignore */ }
+    };
+    notifyStart();
     try {
       res = await fetchAny(url, {
         method: 'POST',
@@ -285,11 +388,13 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
       });
     } catch (e) {
       if (abortTimer) clearTimeout(abortTimer);
+      notifyEnd();
       if (e && e.name === 'AbortError') throw makeError('STOPPED', '已停止');
       throw makeError('LLM_REQUEST_FAILED', String(e && e.message || e));
     }
     if (!res.ok) {
       if (abortTimer) clearTimeout(abortTimer);
+      notifyEnd();
       const text = await res.text().catch(() => '');
       const ra = Number(res.headers && res.headers.get ? res.headers.get('retry-after') : NaN);
       throw makeError('LLM_HTTP', `模型接口 ${res.status}: ${text.slice(0, 500)}`, {
@@ -300,6 +405,7 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     stats.requests++;
     const done = (v) => {
       if (abortTimer) clearTimeout(abortTimer);
+      notifyEnd();
       if (latency && !background) { try { latency.recordModel(Date.now() - startedAt); } catch { /* ignore */ } }
       return v;
     };
@@ -347,6 +453,11 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
         args: parseToolArgs(c.args),
         rawArgs: c.args,
       }));
+      // max_tokens 截断会让 tool args 变成半截 JSON；这种情况直接重试一次更大的预算，
+      // 不要把 "工具参数不是合法 JSON" 丢回模型让它自己猜。
+      if (out.finishReason === 'length' && out.toolCalls.some((c) => c.args && c.args.__parseError)) {
+        throw makeError('LLM_TRUNCATED', '工具参数被 max_tokens 截断', { retryable: true, needMoreTokens: true });
+      }
       addUsage(out.usage);
       return done(out);
     }
@@ -360,6 +471,11 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
       args: parseToolArgs(tc.function && tc.function.arguments),
       rawArgs: (tc.function && tc.function.arguments) || '',
     }));
+    const finish0 = data.choices[0].finish_reason || null;
+    if (finish0 === 'length' && toolCalls.some((c) => c.args && c.args.__parseError)) {
+      addUsage(data.usage);
+      throw makeError('LLM_TRUNCATED', '工具参数被 max_tokens 截断', { retryable: true, needMoreTokens: true });
+    }
     addUsage(data.usage);
     return done({
       content: msg.content || '',
@@ -400,7 +516,7 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     }
   }
 
-  async function callWithFallback(model) {
+  async function callWithFallback(model, opts = {}) {
     const backoff = [1500, 4000, 9000];
     let lastErr = null;
     let triedNonStream = false;
@@ -408,11 +524,19 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
       if (stopRequested) throw makeError('STOPPED', '已停止');
       const stream = attempt === 0 && !triedNonStream ? !!config.stream : false;
       try {
-        return await callModel({ stream, model });
+        return await callModel({ stream, model, ...opts });
       } catch (e) {
         if (e && (e.name === 'AbortError' || e.code === 'STOPPED')) throw e;
         lastErr = e;
         // 流式不支持 / 流式被截断：先降级成非流式重试一次
+        // 工具参数被 max_tokens 截断：直接翻倍重试，别把半截 JSON 丢给模型。
+        if (e && e.needMoreTokens) {
+          const cur = Number(opts.maxTokens) || 0;
+          opts = { ...opts, maxTokens: Math.min(2000, Math.max(800, cur * 2)) };
+          lastErr = e;
+          emit({ type: 'log', text: `工具 JSON 被截断，max_tokens 提高到 ${opts.maxTokens} 重试` });
+          continue;
+        }
         if (attempt === 0 && config.stream && !triedNonStream && e && e.code !== 'LLM_HTTP') {
           triedNonStream = true;
           emit({ type: 'log', text: '流式失败，改用非流式重试：' + (e.message || e.code) });
@@ -434,11 +558,49 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     throw err;
   }
 
+  function archiveOldStateResults() {
+    if (!config.leanContext) return;
+    const keep = Math.max(1, Number(config.keepStateResults) || 2);
+    const hits = [];
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (!m || m.role !== 'tool') continue;
+      if (m.name !== 'pvz_state' && m.name !== 'pvz_act') continue;
+      hits.push(i);
+    }
+    const cut = Math.max(0, hits.length - keep);
+    for (let n = 0; n < cut; n++) {
+      const m = messages[hits[n]];
+      let o = null;
+      try { o = JSON.parse(m.content); } catch { o = null; }
+      if (!o || o.archived) continue;
+      if (m.name === 'pvz_act') {
+        const results = Array.isArray(o.results) ? o.results.slice(0, 8).map((r) => ({
+          action: r.action || r.type || null, ok: !!r.ok, code: r.code || null,
+          lane: r.lane, column: r.column, type: r.type || null, retryAfter: r.retryAfter,
+        })) : undefined;
+        m.content = JSON.stringify({
+          ok: o.ok, archived: true, results,
+          note: '旧轮次动作结果已压缩；当前局面看最新 pvz_act / pvz_state 的 state。',
+        });
+      } else {
+        m.content = JSON.stringify({
+          ok: true, archived: true,
+          note: '旧状态已压缩；当前局面看最新 pvz_act / pvz_state 的 state。',
+        });
+      }
+    }
+  }
+
   function trimMessages() {
     // 只做“整段丢弃”，不改写旧消息：每轮原地压缩工具结果会让 prompt 前缀每轮都变，
     // 上游的上下文缓存全部失效。保留最近的完整轮次，前缀保持字节稳定才能命中缓存。
-    const MAX = 20;
-    if (messages.length > MAX) {
+    archiveOldStateResults();
+    const MAX = Math.max(8, Math.min(24, Number(config.historyMaxMessages) || 16));
+    // 批量裁剪：只在超过 MAX+BATCH 时一次性丢回 MAX，避免每轮都从头部删一条
+    // 导致整个消息前缀每轮都位移、缓存每轮都失效。
+    const BATCH = 8;
+    if (messages.length > MAX + BATCH) {
       const system = messages[0];
       let rest = messages.slice(1).slice(-(MAX - 1));
       // 不能从孤立的 tool 结果开始；也不能从带 tool_calls 的 assistant 开始（它的 tool 结果已被丢掉）。
@@ -469,12 +631,35 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     return hit;
   }
 
+  function notePrep(obj) {
+    if (obj && obj.prep && typeof obj.prep === 'object') prepNow = obj.prep;
+  }
+
+  // bridge 在重开/换关/换模式时会清空 plan；agent 的 lastPlan 缓存必须跟着清，
+  // 否则 handoff/参谋还会把旧计划当成当前计划。
+  function notePlanFromState(state) {
+    if (!state || typeof state !== 'object' || !('plan' in state)) return;
+    lastPlan = state.plan || null;
+    if (!lastPlan) {
+      lastPlanAt = null;
+      lastPlanAuditNudgedFor = null;
+      return;
+    }
+    if (state.planSavedAt && state.planSavedAt !== lastPlanAt) {
+      lastPlanAt = state.planSavedAt;
+      emit({ type: 'plan', plan: lastPlan, savedAt: lastPlanAt });
+    }
+  }
+
   function notePhase(phase) {
     if (!phase) return;
     const wasRunning = everRunning;
     lastPhase = phase;
-    if (phase === 'running') everRunning = true;
-    if (phase === 'running' && !wasRunning) archiveBriefing();
+    // 提前布阵/给定卡组在 phase=running 但还没点开始时，不算真正开战：
+    // 简报要留到想清楚、点开始之后再归档。
+    const preBattle = isPreBattle();
+    if (phase === 'running' && !preBattle) everRunning = true;
+    if (phase === 'running' && !wasRunning && !preBattle) archiveBriefing();
     // 关卡结束：胜负，或真正打过 running 后回到主菜单/世界地图。
     // 不能只靠 won/lost —— 有的关卡先回地图再结算，AI 会一直空转调工具。
     const ended = phase === 'won' || phase === 'lost'
@@ -492,9 +677,9 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     if (!fresh.length) return;
     for (const lane of fresh) lostMowerLanes.add(Number(lane));
     const wave = state.level && state.level.wave;
-    const laneText = fresh.map((l) => `第${Number(l) + 1}行`).join('/');
     // 只记录事实，供关卡结束后的复盘合并；不在中途写记忆/不提前总结。
-    const lesson = `第${wave || '?'}波 ${laneText} 丢了推车：该行防线已被打穿；下局提前 1–2 波补墙/输出，别等僵尸压到房子。`;
+    // 经验写成机制/能力层面，不写具体行/列。
+    const lesson = `第${wave || '?'}波丢了推车：说明防线在峰值波被打穿；下次建议优先补峰值波的墙/输出余量，并用 capacityGaps 在波间补。`;
     incidentLessons = [...new Set([lesson, ...incidentLessons])].slice(0, 4);
   }
 
@@ -517,9 +702,12 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
         result = { ok: false, code: 'TOOL_FAILED', reason: String(e && e.message || e) };
       }
     }
+    notePrep(result);
+    if (result && result.state) notePrep(result.state);
     emit({ type: 'tool_result', name: tc.name, result, ok: !(result && result.ok === false) });
     if (tc.name === 'pvz_set_plan' && result && result.ok) {
       lastPlan = result.plan;
+      if (result.savedAt) lastPlanAt = result.savedAt;
       emit({ type: 'plan', plan: result.plan, savedAt: result.savedAt });
       const warns = (result.audit && result.audit.warnings) || result.warnings || [];
       if (warns.length) {
@@ -527,16 +715,9 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
         emit({ type: 'log', text: `计划审计：${warns.length} 条提示（计划已保存，但需要按事实重写）：${warns.map((w) => w.reason).join('；').slice(0, 260)}` });
       }
     }
-    if (result && result.plan && tc.name === 'pvz_state') {
-      lastPlan = result.plan;
-      // 计划没变就不重复播报，避免每回合刷一条「计划已更新」
-      if (result.planSavedAt && result.planSavedAt !== lastPlanAt) {
-        lastPlanAt = result.planSavedAt;
-        emit({ type: 'plan', plan: result.plan, savedAt: result.planSavedAt });
-      }
-    }
     if (tc.name === 'pvz_state' && result && result.ok) {
       lastState = result;
+      notePlanFromState(result);
       // 紧急任务 / 多行同时漏压：接下来 2 轮改用主模型想，避免快模型在关键局面犯傻。
       let urgent = 0;
       try {
@@ -552,6 +733,7 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     if (tc.name === 'pvz_act' && result && result.state && result.state.ok !== false) {
       // pvz_act 已经带回动作后的状态：模型和本地都直接用它，不再额外多一轮 pvz_state。
       lastState = result.state;
+      notePlanFromState(result.state);
       let urgent = 0;
       try {
         urgent += (result.state.tasks || []).filter((t) => t && (t.urgent || t.timeLeft != null && Number(t.timeLeft) <= 10)).length;
@@ -583,6 +765,18 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
         results: acts,
       });
       if (recentActions.length > 14) recentActions.shift();
+      // 连续两轮只发 1 个非 wait 动作：下一轮提醒批量提交，减少模型往返次数。
+      if (tc.name === 'pvz_act' && result && Array.isArray(result.results)) {
+        const acts = Array.isArray(tc.args && tc.args.actions) ? tc.args.actions : [];
+        const onlyWait = acts.length > 0 && acts.every((a) => a && a.type === 'wait');
+        if (acts.length <= 1 && !onlyWait) singleActionRounds += 1;
+        else singleActionRounds = 0;
+        const after = Number(config.batchNudgeAfter);
+        if ((after > 0 || after === undefined) && singleActionRounds >= (after > 0 ? after : 2)) {
+          batchNudgePending = true;
+          singleActionRounds = 0;
+        }
+      }
     }
     // 后台参谋的结论附在下一份状态/动作结果里，既有上下文、又不需要额外一轮。
     if (advisorNote && advisorNote.text && (tc.name === 'pvz_state' || tc.name === 'pvz_act') && result && typeof result === 'object') {
@@ -593,8 +787,152 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
       role: 'tool',
       tool_call_id: tc.id || `call_${index + 1}`,
       name: tc.name,
-      content: JSON.stringify(result),
+      content: JSON.stringify(compactToolForModel(tc.name, result, tc.args)),
     });
+    return result;
+  }
+
+  // 给模型的“本轮状态”只保留决策必要字段。完整 facts（coverageGaps /
+  // counterMatrix / laneMath / 全卡池数值）在 pvz_briefing 里给一次，不每轮重复。
+  function leanBrief(b) {
+    if (!b || typeof b !== 'object') return null;
+    const wall = (b.wallPlan || []).filter((w) => w && w.risk && w.risk !== 'ok').slice(0, 3).map((w) => ({
+      lane: w.lane, risk: w.risk, frontType: w.frontType || null, frontColumn: w.frontColumn,
+      frontEta: w.frontEta, wallEta: w.wallEta, wallHp: w.wallHp, wallType: w.wallType || null,
+      eatDps: w.eatDps, eaters: w.eaters, wallSurviveSec: w.wallSurviveSec, killSec: w.killSec,
+      wallCd: w.wallCd, wallBehind: w.wallBehind || undefined,
+    }));
+    return {
+      leadSec: b.leadSec,
+      totalDps: b.totalDps,
+      sunRate: b.sunRate,
+      wave: b.wave,
+      activeLanes: b.activeLanes,
+      idleLanes: b.idleLanes,
+      residual: b.residual ? {
+        count: b.residual.count, lanes: b.residual.lanes, ehp: b.residual.ehp,
+        front: b.residual.front ? {
+          lane: b.residual.front.lane, column: b.residual.front.column,
+          type: b.residual.front.type, ehp: b.residual.front.ehp,
+          speed: b.residual.front.speed, eatDps: b.residual.front.eatDps,
+        } : null,
+      } : null,
+      incoming: (b.incoming || []).slice(0, 2),
+      pressure: (b.pressure || []).slice(0, 3),
+      safeLanes: b.safeLanes,
+      airRaid: b.airRaid || null,
+      // 每个有僵尸的行都要给（最多 5 行）；只截 2 条会让 3–5 行看不到
+      // latestSafeColumn/tiles，模型就只能凭记忆写死列，容易出现 MINE_TOO_LATE。
+      minePlan: (b.minePlan || []).slice(0, 5),
+      rescuePlan: (b.rescuePlan || []).slice(0, 2),
+      plantFoodPlan: (b.plantFoodPlan || []).slice(0, 3),
+      activatePlan: (b.activatePlan || []).slice(0, 3),
+      // 同线多只时“单体 vs 多目标”的收益差：只给事实，模型自己决定换不换。
+      cardEfficiency: (b.cardEfficiency || []).slice(0, 4),
+      upgradePlan: (b.upgradePlan || []).slice(0, 3),
+      capacityGaps: (b.capacityGaps || []).slice(0, 3),
+      lastResortPlan: (b.lastResortPlan || []).slice(0, 2),
+      dataChecks: b.dataChecks || undefined,
+      matchups: (b.matchups || []).slice(0, 8),
+      // 落点事实按 卡→行→列 的固定顺序截断，不按收益排序；完整表用 pvz_state full=true。
+      aimOptions: (b.aimOptions || []).slice(0, 12),
+      aimOptionsMore: (b.aimOptions || []).length > 12 ? (b.aimOptions.length - 12) : undefined,
+      wallPlan: wall,
+      wallRebuildPlan: (b.wallRebuildPlan || []).slice(0, 2),
+      protect: b.protect ? {
+        count: b.protect.count, dead: b.protect.dead,
+        unguardedLanes: b.protect.unguardedLanes,
+        cells: (b.protect.cells || []).slice(0, 6).map((c) => ({
+          lane: c.lane, column: c.column, dead: c.dead, wall: c.wall, melee: c.melee,
+          frontColumn: c.frontColumn, groundGuarded: c.groundGuarded,
+          type: c.type || (c.plant && c.plant.type) || null,
+          plant: c.plant || null,
+        })),
+      } : null,
+    };
+  }
+
+  function leanState(s) {
+    if (!s || s.ok === false) return s;
+    const running = s.phase === 'running';
+    return {
+      ok: true, version: s.version, phase: s.phase, paused: s.paused, stateVersion: s.stateVersion,
+      sun: s.sun, plantFood: s.plantFood, plantFoodMax: s.plantFoodMax, plantFoodFull: s.plantFoodFull,
+      level: s.level, levelKey: s.levelKey, prep: running ? undefined : s.prep,
+      tasks: s.tasks, objective: s.objective, missionHints: s.missionHints,
+      limits: s.limits,
+      // 局内每轮只回计划摘要；完整 lanes/counters/phases 用 pvz_state full=true。
+      plan: s.plan ? {
+        text: s.plan.text,
+        goal: s.plan.goal,
+        queue: Array.isArray(s.plan.queue) ? s.plan.queue.slice(0, 12) : s.plan.queue,
+        rules: Array.isArray(s.plan.rules) ? s.plan.rules.slice(0, 8) : s.plan.rules,
+        emergency: s.plan.emergency,
+        thresholds: s.plan.thresholds,
+      } : null,
+      planSavedAt: s.planSavedAt,
+      planAudit: s.planAudit,
+      changesSinceLast: s.changesSinceLast, events: s.events,
+      deck: s.deck, seedSelection: running ? undefined : s.seedSelection, carts: s.carts,
+      startingSun: s.startingSun, collect: s.collect,
+      cards: (s.cards || []).map((c) => ({
+        index: c.index, type: c.type, cost: c.cost, cd: c.cd, cdReady: c.cdReady,
+        affordable: c.affordable, sunShort: c.sunShort, ready: c.ready,
+        baseCd: c.baseCd, dps: c.dps, burstDmg: c.burstDmg,
+        foodKind: c.foodKind, activation: c.activation,
+      })),
+      plants: (s.plants || []).slice(0, 80).map((p) => ({
+        lane: p.lane, column: p.column, type: p.type, name: p.name,
+        hp: p.hp, maxHp: p.maxHp, family: p.family, dps: (p.atk && p.atk.dps) || null,
+        reach: p.reach, underAttack: p.underAttack || undefined, eatDps: p.eatDps || null,
+        holdSec: p.holdSec != null ? p.holdSec : null, foodable: p.foodable,
+        food: p.food ? {
+          kind: p.food.kind, area: p.food.area, targets: p.food.targets,
+          whiff: p.food.whiff, cells: (p.food.cells || []).slice(0, 2),
+          count: p.food.count, projectileDamage: p.food.projectileDamage,
+          totalPerTarget: p.food.totalPerTarget, maxTotal: p.food.maxTotal,
+          sunTotal: p.food.sunTotal, armorHp: p.food.armorHp,
+        } : undefined,
+      })),
+      zombies: (s.zombies || []).slice(0, 40).map((z) => ({
+        lane: z.lane, column: z.column, type: z.type, name: z.name,
+        hp: z.hp, ehp: z.ehp, armorHp: z.armorHp, speed: z.speed,
+        etaToHouse: z.etaToHouse, eatDps: z.eatDps, eating: z.eating,
+        airborne: !!z.airborne, tags: z.tags || [],
+      })),
+      lanes: (s.lanes || []).map((l) => ({
+        lane: l.lane, zombies: l.zombies, nearestZombie: l.nearestZombie, front: l.front,
+        dps: l.dps, dpsOnFront: l.dpsOnFront, gap: l.gap, lossIn: l.lossIn, actBy: l.actBy,
+        wallHp: l.wallHp, wallCells: l.wallCells, mower: l.mower,
+        plants: l.plants, shooters: l.shooters, walls: l.walls, sunProducers: l.sunProducers,
+        tombColumns: l.tombColumns,
+        frontPlant: l.frontPlant, contactInSec: l.contactInSec, holdSec: l.holdSec,
+        killWindowSec: l.killWindowSec, killBeforeWindow: l.killBeforeWindow,
+        killBeforeHouse: l.killBeforeHouse, projectedHouseSec: l.projectedHouseSec,
+      })),
+      protectCells: s.protectCells,
+      instantAim: (s.instantAim || []).slice(0, 4),
+      decisions: (s.decisions || []).slice(0, 6),
+      threatGaps: (s.threatGaps || []).slice(0, 8),
+      forecast: running ? undefined : s.forecast,
+      queue: s.queue ? {
+        enabled: s.queue.enabled, pending: s.queue.pending, paused: s.queue.paused, thinking: s.queue.thinking,
+        tickMs: s.queue.tickMs, lastResult: s.queue.lastResult, recentSunSpent: s.queue.recentSunSpent,
+        tasks: (s.queue.tasks || []).slice(0, 5),
+        history: (s.queue.history || []).slice(-4),
+      } : undefined,
+      brief: leanBrief(s.brief),
+    };
+  }
+
+  function compactToolForModel(name, result, args) {
+    if (!config.leanContext || !result || typeof result !== 'object') return result;
+    // 模型显式要 full=true 时不要偷偷压回 lean。
+    if (name === 'pvz_state' && result.ok !== false && !(args && args.full)) return leanState(result);
+    if (name === 'pvz_act') {
+      if (result.state && result.state.ok !== false) return { ...result, state: leanState(result.state) };
+      return result;
+    }
     return result;
   }
 
@@ -751,6 +1089,9 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     const flyerNames = [...new Set(flyers.map((z) => z.name || z.type).filter(Boolean))];
     const dead = flowers ? (flowers.dead || 0) : 0;
     const total = flowers ? (flowers.total || 0) : 0;
+    const lossTriggered = !!(flowers && flowers.lossTriggered);
+    const protectNames = [...new Set(deadCells.map((c) => c.name || c.plant).filter(Boolean))];
+    const protectLabel = protectNames.length ? `${protectNames.join('/')} ` : '';
     const plantsLost = review.plantsLost || 0;
     const mowersLost = review.mowersLost || 0;
     const lessons = [];
@@ -762,43 +1103,46 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
       note = `第 ${wave || '?'}${waveCount ? `/${waveCount}` : ''} 波过关` + (imperfect
         ? `（推车 ${mowersLost}${dead ? `，保护格 ${dead}/${total} 死亡` : ''}${tasksFailed ? '，任务失败' : ''}）`
         : '，完美通关');
-      if (mowersLost > 0) lessons.push(`本局丢了 ${mowersLost} 个推车：下局在丢车行提前 1–2 波补墙/输出，别等僵尸压到房子。`);
-      if (dead > 0) lessons.push(`保护格死了 ${dead}/${total}：下局按 unguardedLanes 提前布防，飞行波前留三叶草/近战。`);
-      if (tasksFailed) lessons.push('本局有关卡任务失败：下局把 tasks 的 tip/hint/timeLeft 当硬约束，先保任务再铺输出。');
-      if (!imperfect) lessons.push('本局完美通关：没有丢车、保护格全活、任务全完成（植物损失是正常战术代价）；下局沿用这套卡组和布防节奏。');
+      if (mowersLost > 0) lessons.push(`本局丢了 ${mowersLost} 个推车：说明有防线被峰值波打穿；下次建议优先准备能扛住峰值的墙/输出余量，并用 capacityGaps 在波间补，而不是只补单点。`);
+      if (dead > 0) lessons.push(`保护格压力（${dead}/${total}）：下次建议优先准备对空/近身防守和波间控场，不要只靠单点墙。`);
+      if (tasksFailed) lessons.push('本局有关卡任务失败：下次建议把 tasks 的 tip/timeLeft 当优先约束，先保任务再铺输出。');
+      if (!imperfect) lessons.push('本局完美通关：可参考这套卡组和“波间补余量”的节奏；具体位置每局按本地 facts 重算，不建议照搬。');
       return { note: note.slice(0, 200), lessons: lessons.slice(0, 4) };
     }
 
     if (result === 'left' || result === 'restart') {
       note = `第 ${wave || '?'}${waveCount ? `/${waveCount}` : ''} 波${result === 'restart' ? '重开' : '离开'}（${plantsLost} 株植物损失，${mowersLost} 个推车）`;
-      if (mowersLost > 0) lessons.push(`离开前已丢 ${mowersLost} 个推车：这些行防线已被打穿，下局优先补墙/输出。`);
-      if (plantsLost > 0) lessons.push(`离开前已损失 ${plantsLost} 株植物：下局别在同一个缺口继续堆经济。`);
-      if (!lessons.length) lessons.push('本局没有完美通关；下局先读这条记录再决定卡组。');
+      if (mowersLost > 0) lessons.push(`离开前已丢 ${mowersLost} 个推车：说明防线在峰值波被压穿；下次建议优先补峰值波的墙/输出余量，而不是只堆经济。`);
+      if (plantsLost > 0) lessons.push(`离开前已损失 ${plantsLost} 株植物：下次建议先补被压穿的防线能力，再继续扩经济。`);
+      if (!lessons.length) lessons.push('本局没有完美通关；下次先读这条记录再决定卡组和优先能力。');
       return { note: note.slice(0, 200), lessons: lessons.slice(0, 4) };
     }
 
     note = `第 ${wave || '?'}${waveCount ? `/${waveCount}` : ''} 波失败`;
     if (dead > 0) {
-      note += `，保护植物 ${dead}/${total} 死亡${deadLanes.length ? `（第 ${deadLanes.map((l) => l + 1).join('/')} 行）` : ''}`;
-      if (dead >= total && total > 1) note += '（关卡判负时会把所有保护格同时标记 dead）';
+      // 判负那一帧游戏会把保护格清场，不能写成“5/5 全死”。
+      note += lossTriggered
+        ? (flowers.mode === 'contact' ? '，保护植物被踩坏（判负）' : '，保护植物被突破（判负）')
+        : `，保护植物 ${protectLabel}${dead}/${total} 死亡`;
       if (plantsLost === 0) {
         const who = flyerNames.length ? `${flyerNames.join('、')} ` : '';
-        lessons.push(`植物损失为 0，花不是被啃穿的：${who}越过防线直接落到花上。下局在这几行花旁边（c2 或 c4，射程 1 格内）放菜问/近战，并带三叶草等对空；只堆 c4 墙无效。`);
+        lessons.push(`植物损失为 0，保护植物不是被啃穿的：${who}可能越过防线直接落到保护格。下次建议优先准备对空/近身防守，并在波间留控场；只堆单点墙通常不够。`);
       } else {
-        lessons.push(`花所在行被啃穿（植物损失 ${plantsLost}，推车 ${mowersLost}）：下局在这些行提前 1–2 波补墙+输出，别把短手放在花后方。`);
+        lessons.push(`保护目标 ${protectLabel}被压穿（植物损失 ${plantsLost}，推车 ${mowersLost}）：下次建议优先补峰值波的墙/输出余量，不要只扩经济或只放短手。`);
       }
       if (deadLanes.length) {
-        lessons.push(`第 ${deadLanes.map((l) => l + 1).join('/')} 行重点：花旁必须有能打到 c${(deadCells[0] && deadCells[0].column) || 3} 的植物；飞行单位入场时先用三叶草/秒杀，别等落地。`);
+        lessons.push('保护格压力：建议让保护格旁边始终有能覆盖它的输出/控场；飞行单位入场时优先对空。');
       }
+    } else if (flowers) {
+      lessons.push('本局失败但没有保护植物死亡：建议先看 capacityGaps/pressure，补输出/墙的余量。');
     } else {
-      lessons.push('本局失败但没有保护植物死亡：看 pressure 行，先补该行输出/墙。');
+      lessons.push('本局失败，且这一关没有保护植物目标：建议先看 capacityGaps/pressure，补输出/墙的余量。');
     }
     if (Array.isArray(review.pressure) && review.pressure.length) {
-      const lanes = review.pressure.map((p) => `第${p.lane + 1}行(gap ${p.gap})`).join('、');
-      lessons.push(`压力最大的是 ${lanes}：下局提前 1–2 波在这些行补输出/墙。`);
+      lessons.push('压力集中在若干行：下次建议按 capacityGaps 在波间补输出/墙，不要等贴脸再补。');
     }
-    if (mowersLost > 0) lessons.push(`丢了 ${mowersLost} 个推车，说明有行被打穿；下局优先保这些行的墙。`);
-    if (!lessons.length) lessons.push('本局失败；下局先读这条记录，换一套针对本关波次的卡组。');
+    if (mowersLost > 0) lessons.push(`丢了 ${mowersLost} 个推车：说明防线在峰值波被打穿；下次建议优先保峰值波的墙/输出余量。`);
+    if (!lessons.length) lessons.push('本局失败；下次建议先读这条记录，按机制/能力换一套更有针对性的卡组。');
     return { note: note.slice(0, 200), lessons: lessons.slice(0, 4) };
   }
 
@@ -994,6 +1338,46 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     }
   }
 
+  /**
+   * 队列 coast：模型刚把任务交给本地队列后，不立刻再发一次模型请求，
+   * 先让 queue 执行 1-2 拍并刷新本地 state。遇到丢车/任务紧急/换波/胜负
+   * 立刻结束 coast，交给模型处理。
+   */
+  async function tryQueueCoast() {
+    const maxRounds = Math.max(0, Number(config.queueCoastRounds) || 0);
+    const waitMs = Math.max(0, Number(config.queueCoastMs) || 0);
+    if (!maxRounds || !waitMs) return false;
+    if (!running || stopRequested || pendingInstructions.length) return false;
+    if (!lastState || lastPhase !== 'running') return false;
+    if (!(lastState.queue && Number(lastState.queue.pending) > 0)) return false;
+    if (queueCoastBudget <= 0) return false;
+
+    if (!queueCoastNoted) {
+      emit({ type: 'log', text: `队列 coast：本地队列还有任务，先执行 ${maxRounds} 拍再请求模型。` });
+      queueCoastNoted = true;
+    }
+    queueCoastBudget -= 1;
+    await sleep(waitMs);
+
+    let s = null;
+    try { s = await router.call('pvz_state', { force: true }); } catch { s = null; }
+    if (!s || s.ok === false) return false;
+    lastState = s;
+    lastPhase = s.phase || lastPhase;
+    try { notePhase(lastPhase); noteMowerLoss(s); } catch { /* ignore */ }
+    emit({ type: 'state', state: s });
+
+    const events = Array.isArray(s.events) ? s.events : [];
+    const urgentEvent = events.some((e) => e && ['mower_lost', 'task_urgent', 'level_lost', 'level_won', 'wave_started'].includes(e.t));
+    if (urgentEvent || s.phase !== 'running') {
+      queueCoastBudget = 0;
+      return false;
+    }
+    if (s.queue && Number(s.queue.pending) > 0 && queueCoastBudget > 0) return true;
+    queueCoastBudget = 0;
+    return false;
+  }
+
   async function runLoop() {
     let steps = 0;
     let idleNudges = 0;
@@ -1001,6 +1385,8 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     lastError = null;
     emit({ type: 'run_start', version, model: config.model, fastModel: fastModelOn() || null, autoReview: config.autoReview });
     while (running && !stopRequested) {
+      // 队列还有活时，先让本地执行，不推进模型步数、不烧 token。
+      if (await tryQueueCoast()) continue;
       steps++;
       if (steps > Number(config.maxSteps || 80)) {
         emit({ type: 'error', code: 'STEP_LIMIT', reason: `连续 ${steps - 1} 步没有结束；已停止（不会本地接管）` });
@@ -1012,6 +1398,84 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
         for (const s of pendingInstructions.splice(0)) {
           messages.push({ role: 'user', content: `玩家指示：${s}\n按指示调整，但不要违反关卡事实和工具返回。` });
         }
+      }
+      // 选卡阶段：如果 briefing 的 coverageGaps 显示卡组缺能力，提醒模型比较卡池；
+      // 历史/预填卡组只作参考，不要求沿用。只提示，不自动换卡。
+      if (lastPhase === 'preparing' && lastState && lastState.prep
+        && lastState.prep.mode === 'normal' && !lastState.prep.gameStarted) {
+        const gaps = (lastState.coverageGaps && Array.isArray(lastState.coverageGaps.missing))
+          ? lastState.coverageGaps.missing : [];
+        const miss = [...new Set(gaps.map((g) => g && (g.capability || g.name)).filter(Boolean))];
+        const key = `${lastState.levelKey || ''}:${(lastState.deck || []).join(',')}:${miss.join(',')}`;
+        if (miss.length && deckNudgeKey !== key) {
+          const cands = [...new Set(gaps.flatMap((g) => (g && g.candidates) || []))].slice(0, 8);
+          messages.push({
+            role: 'user',
+            content: `当前卡组缺少能力 ${miss.join('/')}${cands.length ? `；卡池候选 ${cands.join('/')}` : ''}。建议先比较是否用 pvz_choose_deck（replace=true）换 1–2 张，再写计划/开局；历史/预填卡组只作参考，不建议直接沿用。`,
+          });
+          deckNudgeKey = key;
+        }
+      }
+      // 计划里的 deck 和实际卡组不一致时，旧计划会一直误导快模型；
+      // 每份 plan 只提醒一次，要求先重写 plan 再继续动作。
+      if (lastState && lastState.planAudit && lastState.planAudit.ok === false
+        && lastPlanAt !== lastPlanAuditNudgedFor) {
+        const deckWarn = (lastState.planAudit.warnings || [])
+          .find((w) => w && w.code === 'PLAN_DECK_MISMATCH');
+        if (deckWarn) {
+          messages.push({
+            role: 'user',
+            content: `计划审计未通过：${deckWarn.reason}\n本轮先按实际卡组重写 pvz_set_plan（deck 用实际 codename，不要写 conveyor 这类模式名），再执行其他动作。`,
+          });
+          lastPlanAuditNudgedFor = lastPlanAt;
+        }
+      }
+      // 墙/救场缺口：即使 queue 还有别的任务，只要对应行没有任务，也提醒模型补。
+      if (lastPhase === 'running' && lastState && Array.isArray(lastState.threatGaps)
+        && lastState.threatGaps.length
+        && Date.now() - threatGapNudgedAt > 12000) {
+        const kindCN = { wall: '缺墙', output: '缺输出', rescue: '缺救场', mine: '地雷来不及', protect: '保护行无人', capability: '卡组缺能力' };
+        const text = lastState.threatGaps.slice(0, 5)
+          .map((g) => `${g.lane == null ? '' : `${Number(g.lane) + 1}行`}${kindCN[g.kind] || g.kind}`)
+          .join('；');
+        messages.push({
+          role: 'user',
+          content: `threatGaps：${text}。本轮先用 pvz_set_plan 补对应 lane/能力的 queue 任务或 counters（带 id/validForSec），再继续；不要只看 queue.pending。`,
+        });
+        threatGapNudgedAt = Date.now();
+      }
+      // 本地已经算出 last_resort / upgrade 决策，但模型一直没回：给一次轻提醒。
+      // 只提示，不替模型执行；是否 yes 仍由模型判断。
+      if (lastPhase === 'running' && lastState && Array.isArray(lastState.decisions)
+        && Date.now() - decisionNudgedAt > 8000) {
+        const pending = lastState.decisions.filter((d) => d && ['last_resort', 'upgrade', 'wall'].includes(d.kind));
+        if (pending.length) {
+          const label = { last_resort: '最后防线', upgrade: '波间升级', wall: '补墙' };
+          const text = pending.slice(0, 3).map((d) => `${label[d.kind] || d.kind}：${d.question || d.id}`).join('；');
+          messages.push({
+            role: 'user',
+            content: `本地 decisions 有待处理：${text}。若局面仍适合，建议优先用 pvz_decide {id, choice:yes} 处理；last_resort 是守不住行的最后防线，不建议一直放着。`,
+          });
+          decisionNudgedAt = Date.now();
+        }
+      }
+      // 队列空了但计划里还有建造任务：提醒模型补 queue，而不是每轮只发一个 pvz_act。
+      if (lastPhase === 'running' && lastState && lastState.queue
+        && Number(lastState.queue.pending) === 0
+        && lastState.plan
+        && Date.now() - queueEmptyNudgedAt > 20000) {
+        messages.push({
+          role: 'user',
+          content: '本地 queue 已空，但计划里还有建造任务。若还有补经济/补墙/补输出，本轮先用 pvz_set_plan 写 4–8 条当前能执行的 queue 任务（带 id/validForSec/stateVersion），不要每轮只靠一个 pvz_act。',
+        });
+        queueEmptyNudgedAt = Date.now();
+      }
+      if (batchNudgePending) {
+        messages.push({
+          role: 'user',
+          content: '上一轮只发了 1 个动作。若没有必须等待的落地/冷却，本轮请把 2–4 个可并行动作放进同一个 pvz_act；只有等落地或冷却才单发。',
+        });
+        batchNudgePending = false;
       }
       let reply;
       let modelMs = 0;
@@ -1045,7 +1509,12 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
         }
         emit({ type: 'request', step: steps, messageCount: messages.length });
         const modelStartedAt = Date.now();
-        reply = await callWithFallback(modelNow);
+        reply = await callWithFallback(modelNow, {
+          // 动作回复很短；限住 max_tokens 能明显压低尾延迟。
+          maxTokens: phaseNow === 'running' ? (Number(config.battleMaxTokens) || 256) : 0,
+        });
+        queueCoastBudget = Number(config.queueCoastRounds) || 0;
+        queueCoastNoted = false;
         modelMs = Date.now() - modelStartedAt;
         stats.modelMs += modelMs;
       } catch (e) {
@@ -1109,7 +1578,9 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
           emit({ type: 'log', text: `轮 ${steps} 耗时：模型 ${modelMs}ms · 工具 ${toolMs}ms · ${reply.toolCalls.length} 个调用` });
         }
         trimMessages();
-        await sleep(Number(config.loopDelayMs) || 0);
+        // 传送带实时性最高，卡会随带子变化：不额外等，拿到新一轮状态就继续。
+        const delayMs = Number(config.loopDelayMs) || 0;
+        await sleep(isConveyorMode() ? Math.min(delayMs, 120) : delayMs);
         continue;
       }
 
@@ -1138,8 +1609,15 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
       phase: lastPhase,
       stats: {
         ...stats,
+        totalTokens: totalTokens(),
         avgPromptTokens: stats.requests ? Math.round(stats.promptTokens / stats.requests) : 0,
         avgCompletionTokens: stats.requests ? Math.round(stats.completionTokens / stats.requests) : 0,
+        cacheHitPct: stats.promptTokens ? Math.round((stats.promptCacheHit / stats.promptTokens) * 100) : 0,
+        tokenBudget: Number(config.tokenBudget) || 0,
+        budgetUsedPct: Number(config.tokenBudget) > 0
+          ? Math.round((totalTokens() / Number(config.tokenBudget)) * 100) : null,
+        estimatedCost: estimatedCost(),
+        currency: config.currency || '¥',
       },
       plan: lastPlan,
       error: lastError ? { code: lastError.code, reason: lastError.message } : null,
@@ -1154,15 +1632,22 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     }
     running = true;
     stopRequested = false;
-    stats = { requests: 0, promptTokens: 0, completionTokens: 0, toolCalls: 0, modelSwitches: 0, modelMs: 0, toolMs: 0 };
+    stats = { requests: 0, promptTokens: 0, promptCacheHit: 0, promptCacheMiss: 0, completionTokens: 0, toolCalls: 0, modelSwitches: 0, modelMs: 0, toolMs: 0 };
     lastPhase = null;
     everRunning = false;
     lastError = null;
     lastState = null;
+    prepNow = null;
     forceStrongRounds = 0;
     usedModel = '';
     runStartedAt = Date.now();
     recentActions = [];
+    singleActionRounds = 0;
+    batchNudgePending = false;
+    queueCoastBudget = Number(config.queueCoastRounds) || 0;
+    queueCoastNoted = false;
+    budgetWarn80 = false;
+    budgetWarn100 = false;
     advisorBusy = false;
     advisorNote = null;
     advisorLastWave = null;
@@ -1187,6 +1672,13 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     stopRequested = true;
     running = false;
     try { if (controller) controller.abort(); } catch { /* ignore */ }
+    // 停止 AI 也要停掉本地任务队列，避免“人已停手、队列还在种”。
+    try {
+      if (typeof router.clearQueue === 'function') {
+        const p = router.clearQueue();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      }
+    } catch { /* ignore */ }
     emit({ type: 'stopped', reason: reason || '手动停止' });
     return { ok: true, running: false };
   }
@@ -1206,7 +1698,7 @@ export function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}
     setConfig, getConfig, setEventHandler,
     isRunning: () => running,
     getMessages: () => messages.slice(),
-    getStats: () => ({ ...stats }),
+    getStats: () => ({ ...stats, totalTokens: totalTokens(), estimatedCost: estimatedCost() }),
     getPlan: () => lastPlan,
     getPhase: () => lastPhase,
     version,

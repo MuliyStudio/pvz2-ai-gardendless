@@ -235,16 +235,37 @@ function damageModel(props, ctx = {}) {
 // ─────────────────────────────────────────────────────────────
 
 /** 出现任意一个就算「这株有专属能量豆效果」。 */
-const PLANTFOOD_ANY_RE = /plantfood/i;
+const PLANTFOOD_ANY_RE = /plantfood|ArmorToughness/i;
 
 const PF_NUM = {
-  dmgPerHit: ['DamagePlantfood', 'PlantfoodDamage', 'PlantfoodDamagePerHit', 'DamagePerHitPlantfood', 'StabDamagePlantfood', 'ButterDamagePlantfood'],
+  // 伤害字段可能有“近/远”“植物/僵尸”“重击”等多种写法；ZombieDamagePlantfood
+  // 必须排在 PlantDamagePlantfood 前，否则月豆会被 0 伤害字段截胡。
+  dmgPerHit: [
+    'DamagePlantfood', 'PlantfoodDamage', 'PlantfoodDamagePerHit', 'DamagePerHitPlantfood',
+    'StabDamagePlantfood', 'ButterDamagePlantfood', 'PlantfoodDamageNear', 'PlantfoodDamageFar',
+    'ZombieDamagePlantfood', 'PlantDamagePlantfood', 'SmashDamage', 'TongueSlapDamagePF',
+    'TongueSlapDamage',
+  ],
   hits: ['PlantfoodHitCount', 'ShootCountPlantfood', 'ShootCount', 'PlantFoodPeaCount', 'PlantfoodPeaCount'],
   dps: ['PlantfoodDPS', 'PlantFoodDPS', 'DPSPlantfood', 'PlantfoodSideDPS', 'PlantFoodSplashDPS', 'PFDPS', 'PlantfoodRayDamage'],
   duration: ['PlantfoodDuration', 'PlantfoodTime', 'PlantFoodDurationSeconds', 'PFDuration', 'AttackDurationPlantfood', 'PlantfoodLastingTime'],
   chance: ['ChanceToPlantfood'],
   heal: ['HealthPlantfoodHeal', 'HealHPSPlantfood', 'HealthPerHeal'],
-  armor: ['ToughnessPlantfooded'],
+  armor: ['ToughnessPlantfooded', 'ArmorToughness'],
+  // 非弹幕效果的数量：召唤数、处决数、阳光脉冲数等。
+  effectCount: [
+    'PlantfoodEnlightenCount', 'PlantfoodChildrenCount', 'PlantfoodSummonCount',
+    'ExplodeSeedlingCount', 'PlantfoodSwallowCount', 'ZombieCountPerSwallow',
+    'PlantfoodGumProjectileCount', 'PlantfoodFireCount',
+  ],
+  sun: ['EnlightenSunValue', 'SunProducePerZombiePF', 'SunProducePerZombie', 'SunValue'],
+  // 弹幕型能量豆的“发数”。注意：这些是弹丸数，不是伤害；伤害要取
+  // PeaTypePlantfood / CabbageTypePlantfood / BoomerangType 指向的 ProjectileProps。
+  projectileCount: [
+    'PlantfoodBoomerangCount', 'PlantfoodPeaCount', 'PlantFoodPeaCount', 'PlantfoodPeaCountBack',
+    'PlantfoodProjectilesToFire', 'PlantfoodProjectileCount', 'PlantfoodProjectilesCount',
+    'ShootCountPlantfood', 'PlantfoodSporeCount', 'PlantfoodLightningCount',
+  ],
 };
 
 const PF_RULES = [
@@ -326,14 +347,16 @@ function plantFoodFacts(props, ctx = {}) {
   // 图鉴写了能量豆短语时优先采用（它描述的是这个效果本身）
   const almKind = kindFromAlmanac(almPf);
   if (almKind && almKind !== kind && confidence !== 'high') { kind = almKind; confidence = 'medium'; }
-  if (kind === 'nuke' && !area) { area = 'full'; radius = null; }
 
   // 范围：显式字段 > 图鉴 AREA/RANGE > 家族
   // 注意：图鉴 AREA 常常描述的是「这一个效果的爆炸范围」，不等于能量豆的范围
   // （例如椰子炮 AREA=3x3 是炮弹爆炸，它的能量豆是本行连射），所以只让「全屏」优先覆盖。
   let area = rule ? rule.area : null;
   let radius = area === 'self_aoe' ? 1 : (area === 'self_tile' ? 0 : null);
-  const fromText = areaFromText(ctx.almanacArea, ctx.almanacRange);
+  const fromText = areaFromText(
+    [ctx.almanacArea, ctx.almanacPlantFood].filter(Boolean).join(' '),
+    ctx.almanacRange,
+  );
   if (fromText.area === 'full') {
     area = 'full';
     radius = null;
@@ -347,6 +370,7 @@ function plantFoodFacts(props, ctx = {}) {
     else area = 'self';
     confidence = confidence === 'high' ? 'medium' : confidence;
   }
+  if (kind === 'nuke' && !area) { area = 'full'; radius = null; }
 
   const dmgPerHit = prFirst(d, PF_NUM.dmgPerHit);
   const hits = prFirst(d, PF_NUM.hits);
@@ -355,27 +379,125 @@ function plantFoodFacts(props, ctx = {}) {
   const chance = prFirst(d, PF_NUM.chance);
   const heal = prFirst(d, PF_NUM.heal);
   const armor = prFirst(d, PF_NUM.armor);
+  const effectCount = prFirst(d, PF_NUM.effectCount);
+  const sunValue = prFirst(d, PF_NUM.sun);
+
+  // ── 弹幕型能量豆：把「发数 × 单发弹丸伤害」也算出来 ──
+  // 例：回旋镖 PlantfoodBoomerangCount=16，BoomerangType=boomerang，
+  // boomerang Damage=20，PierceCount=3，图鉴写“来回两次” → hitsPerTarget=2。
+  // 因此 totalPerTarget=16×20×2=640，maxTotal=640×3=1920。
+  // 字段缺失时保留 null，不拿单发伤害冒充整次能量豆总伤害。
+  const attack = ctx.attack || null;
+  let projectileCount = prFirst(d, PF_NUM.projectileCount);
+  if (!projectileCount) {
+    const perShot = prFirst(d, ['PeaCountPerShotPlantfood']);
+    const shootTime = prFirst(d, ['PlantfoodShootTime']);
+    if (perShot && shootTime) {
+      projectileCount = { key: `${perShot.key}*${shootTime.key}`, value: perShot.value * shootTime.value };
+    }
+  }
+  const projectiles = Array.isArray(ctx.plantFoodProjectiles) ? ctx.plantFoodProjectiles : [];
+  const proj = projectiles.find((p) => p && Number(p.damage) > 0)
+    || (Number(ctx.fallbackProjectileDamage) > 0
+      ? { type: null, damage: Number(ctx.fallbackProjectileDamage), fallback: true }
+      : null);
+  const projectileDamage = proj ? Number(proj.damage) : null;
+  // 没有显式发数但拿到了弹丸伤害：至少按 1 发记，并标 assumptions 让模型知道这是下界。
+  let count = projectileCount ? Number(projectileCount.value)
+    : (projectileDamage != null && ['barrage', 'lob_barrage'].includes(kind) ? 1 : null);
+  // 非弹幕效果的数量（召唤数/处决数/阳光脉冲数）也放到 count，避免只有 kind 没有数量。
+  if (count == null && effectCount) count = Number(effectCount.value);
+  if (count == null && kind === 'sun_burst' && duration) count = Number(duration.value);
+  const hitsPerTarget = Math.max(1, Number(attack && attack.hitsPerTarget) || 1);
+  const targetsPerHit = Math.max(1, Number(attack && attack.targets) || 1);
+  const projectileTotal = projectileDamage != null && count != null ? projectileDamage * count : null;
+  const totalPerTarget = projectileTotal != null ? projectileTotal * hitsPerTarget : null;
+  const maxTotal = totalPerTarget != null && area !== 'full'
+    ? totalPerTarget * targetsPerHit
+    : null;
 
   let total = null;
+  let sunTotal = null;
   if (dmgPerHit && hits) total = dmgPerHit.value * hits.value;
   else if (dmgPerHit && duration && kind === 'self_aoe_dot') total = dmgPerHit.value * duration.value;
   else if (dps && duration) total = Math.round(dps.value * duration.value);
   else if (dps) total = dps.value;
   else if (dmgPerHit) total = dmgPerHit.value;
+  else if (totalPerTarget != null) total = totalPerTarget;
+  // 阳光型：SunValue × 脉冲次数。没有次数字段时只给单次 sunValue，不硬乘。
+  if (kind === 'sun_burst' && sunValue) {
+    const pulses = effectCount ? Number(effectCount.value)
+      : (duration ? Number(duration.value) : null);
+    if (pulses != null && pulses > 0) sunTotal = sunValue.value * pulses;
+  }
+
+  const assumptions = [];
+  if (projectileDamage != null && !projectileCount) assumptions.push('发数字段缺失，按 1 发计算（下界）');
+  if (proj && proj.fallback) assumptions.push('PF 未指定弹丸类型，暂用普通攻击弹丸伤害作为单发伤害');
+  if (projectileDamage == null && ['barrage', 'lob_barrage'].includes(kind)) assumptions.push('未解析到弹丸伤害，total 可能不完整');
+  if (hitsPerTarget > 1) assumptions.push(`按每发命中同一目标 ${hitsPerTarget} 次计算`);
+  if (targetsPerHit > 1) assumptions.push(`按每发最多命中 ${targetsPerHit} 个目标计算`);
+  if (sunTotal != null) assumptions.push('阳光总量按 sunValue × 脉冲次数估算');
+  if (count != null && !projectileCount && effectCount) assumptions.push('count 是效果数量（召唤/处决/脉冲），不是弹丸数');
+
+  const fields = [...new Set([
+    matchedKey,
+    dmgPerHit && dmgPerHit.key,
+    hits && hits.key,
+    duration && duration.key,
+    armor && armor.key,
+    projectileCount && projectileCount.key,
+    effectCount && effectCount.key,
+    sunValue && sunValue.key,
+  ].filter(Boolean))];
+  // 未归类的 plantfood 字段原样留给 pvz_knowledge：游戏新增字段时，
+  // kind 可能暂时只能到 unknown，但模型仍然能看到原始字段名和值。
+  const used = new Set([
+    ...Object.values(PF_NUM).flat(),
+    matchedKey,
+    dmgPerHit && dmgPerHit.key,
+    hits && hits.key,
+    duration && duration.key,
+    armor && armor.key,
+  ].filter(Boolean));
+  const rawFields = {};
+  for (const [k, v] of Object.entries(d)) {
+    if (!/plantfood/i.test(k) || used.has(k) || v == null) continue;
+    if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') {
+      rawFields[k] = typeof v === 'string' ? v.slice(0, 160) : v;
+      if (Object.keys(rawFields).length >= 12) break;
+    }
+  }
 
   return {
     kind, area,
     radius,
+    // total = 所有弹丸命中“一个目标”的总伤害；maxTotal = 同时命中多个目标时的上限。
     total: total != null ? Math.round(total) : null,
-    dmgPerHit: dmgPerHit ? dmgPerHit.value : null,
-    hits: hits ? hits.value : null,
+    totalPerTarget: totalPerTarget != null ? Math.round(totalPerTarget) : null,
+    maxTotal: maxTotal != null ? Math.round(maxTotal) : null,
+    sunTotal: sunTotal != null ? Math.round(sunTotal) : null,
+    sunValue: sunValue ? sunValue.value : null,
+    count,
+    projectile: proj ? {
+      type: proj.type || null,
+      damage: projectileDamage,
+      splashDamage: proj.splashDamage != null ? proj.splashDamage : null,
+    } : null,
+    projectileDamage,
+    targetsPerHit,
+    hitsPerTarget,
+    dmgPerHit: dmgPerHit ? dmgPerHit.value : projectileDamage,
+    hits: hits ? hits.value : count,
     dps: dps ? dps.value : null,
     durationSec: duration ? duration.value : null,
     heal: heal ? heal.value : null,
     armorHp: armor ? armor.value : null,
     chance: chance ? chance.value : null,
     almanac: almPf || null,
-    fields: [matchedKey].filter(Boolean),
+    fields,
+    rawFields: Object.keys(rawFields).length ? rawFields : undefined,
+    assumptions: assumptions.length ? assumptions : undefined,
     confidence,
   };
 }
@@ -863,6 +985,200 @@ for (const [tag, rule] of Object.entries(TAG_COUNTERS)) {
 
 
 
+// ── bridge/crosscheck.js ──
+/**
+ * crosscheck：纯函数的数据交叉校验 + 植物×僵尸配对事实。
+ *
+ * 目标不是“推荐打法”，而是让同一份事实有第二个来源可以对照：
+ *  - 解析后的 stats（dps/multiDps/ehp/armor…） vs 原始 PlantProps/ZombieProps；
+ *  - 植物字段 vs 僵尸字段（护甲、免疫、射程/遮挡、出土时间）；
+ *  - 所有函数只返回事实和 issues，不决定种什么。
+ *
+ * 运行时由 bridge/stats.js 调用，结果挂在 stats.checks；
+ * 快照再把 deck/当前僵尸的 issues 和配对数汇总进 brief.dataChecks / brief.matchups。
+ */
+
+const cxNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+const r1 = (v) => (v == null ? null : Math.round(Number(v) * 10) / 10);
+const r3 = (v) => (v == null ? null : Math.round(Number(v) * 1000) / 1000);
+
+function issue(list, field, expected, actual, note) {
+  if (expected == null || actual == null) return;
+  const e = Number(expected);
+  const a = Number(actual);
+  if (!Number.isFinite(e) || !Number.isFinite(a)) return;
+  const tol = Math.max(Math.abs(e) * 0.06, 0.11);
+  if (Math.abs(e - a) <= tol) return;
+  list.push({ field, expected: r3(e), actual: r3(a), note: note || null });
+}
+
+/** 值本身是求和/原始字段，应该精确一致（只留浮点误差）。 */
+function exact(list, field, expected, actual, note) {
+  if (expected == null || actual == null) return;
+  const e = Number(expected);
+  const a = Number(actual);
+  if (!Number.isFinite(e) || !Number.isFinite(a)) return;
+  if (Math.abs(e - a) <= 0.011) return;
+  list.push({ field, expected: r3(e), actual: r3(a), note: note || null });
+}
+
+/**
+ * 校验解析后的植物 stats 和原始 objdata 是否自洽。
+ * 只比较“两边都有值”的字段；缺字段不报错（不同版本 JSON 字段不全）。
+ */
+function checkPlantStats(st, d) {
+  const issues = [];
+  if (!st || !d) return { ok: true, issues };
+  exact(issues, 'cost', cxNum(d.SunCost), st.cost, 'SunCost vs stats.cost');
+  exact(issues, 'cooldown', cxNum(d.Cooldown), st.cd, 'Cooldown vs stats.cd');
+  exact(issues, 'hp', cxNum(d.Toughness), st.hp, 'Toughness vs stats.hp');
+  const arm = cxNum(d.ChargeTime) != null ? cxNum(d.ChargeTime)
+    : (cxNum(d.ArmTime) != null ? cxNum(d.ArmTime) : cxNum(d.ExplodeDelay));
+  if (arm != null && st.armTimeSec != null) exact(issues, 'armTimeSec', arm, st.armTimeSec, 'ChargeTime vs stats.armTimeSec');
+  if (st.attack) {
+    const dmg = cxNum(st.attack.dmg);
+    const iv = cxNum(st.attack.interval);
+    if (dmg != null && iv != null && iv > 0) {
+      const dps = dmg / iv;
+      issue(issues, 'attack.dps', dps, st.attack.dps, 'dmg/interval vs stats.attack.dps');
+      const targets = cxNum(st.attack.targets) || 1;
+      const hits = cxNum(st.attack.hitsPerTarget) || 1;
+      issue(issues, 'attack.multiDps', dps * targets * hits, st.attack.multiDps,
+        'dmg/interval × targets × hitsPerTarget vs stats.attack.multiDps');
+    }
+  }
+  if (st.burst) {
+    const rawDmg = cxNum(d.Damage) != null ? cxNum(d.Damage)
+      : (cxNum(d.AttackDamage) != null ? cxNum(d.AttackDamage) : cxNum(d.StabDamage));
+    if (rawDmg != null) exact(issues, 'burst.dmg', rawDmg, st.burst.dmg, 'raw Damage vs stats.burst.dmg');
+    if (st.burst.area && /本格|Tile|3x3|3×3|1x3|1×3|全屏|三行|整行|本行/i.test(String(st.burst.area))
+      && st.burst.areaTargets !== 'all_in_area') {
+      issues.push({
+        field: 'burst.areaTargets', expected: 'all_in_area', actual: st.burst.areaTargets || null,
+        note: `area=${st.burst.area} 是范围结算，targets 不应被当成只能打一只`,
+      });
+    }
+  }
+  if (st.sun && st.sun.stages && st.sun.stages.length) {
+    const iv = cxNum(st.sun.interval);
+    const stage = cxNum(st.sun.stages[st.sun.stages.length - 1]);
+    if (iv != null && iv > 0 && stage != null && st.sun.perSecDay) {
+      const per = st.sun.perSecDay[st.sun.perSecDay.length - 1];
+      issue(issues, 'sun.perSecDay', stage / iv, per, 'SunValue/interval vs stats.sun.perSecDay');
+    }
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+/** 校验解析后的僵尸 stats 和原始 objdata 是否自洽。 */
+function checkZombieStats(z, d) {
+  const issues = [];
+  if (!z || !d) return { ok: true, issues };
+  exact(issues, 'hp', cxNum(d.Toughness), z.hp, 'Toughness vs stats.hp');
+  exact(issues, 'speed', cxNum(d.WalkSPS), z.speed, 'WalkSPS vs stats.speed');
+  exact(issues, 'eatDps', cxNum(d.EatDPS), z.eatDps, 'EatDPS vs stats.eatDps');
+  if (Array.isArray(z.armorDetail) && z.armorDetail.length) {
+    const sum = z.armorDetail.reduce((s, a) => s + (cxNum(a.hp) || 0), 0);
+    exact(issues, 'armorHp', sum, z.armorHp, 'armorDetail.hp 之和 vs stats.armorHp');
+  }
+  if (z.hp != null && z.armorHp != null && z.ehp != null) {
+    exact(issues, 'ehp', z.hp + z.armorHp + (cxNum(z.newspaperHp) || 0), z.ehp,
+      'hp + armorHp + newspaperHp vs stats.ehp');
+  }
+  if (Array.isArray(z.behaviorUnknown) && z.behaviorUnknown.length) {
+    issues.push({
+      field: 'behaviorUnknown', expected: 0, actual: z.behaviorUnknown.length,
+      note: `未识别的免疫/行为字段：${z.behaviorUnknown.slice(0, 4).join('/')}`,
+    });
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+const IMMUNITY_IDS = {
+  Cold: ['ice', 'freeze', 'cold', 'frozen'],
+  Slow: ['slow', 'ice', 'freeze'],
+  Fire: ['fire', 'burn'],
+  Poison: ['poison', 'toxic'],
+  Electricity: ['electric', 'lightning', 'shock'],
+  Shadow: ['shadow', 'magic', 'curse'],
+  Magic: ['magic', 'shadow'],
+};
+
+/**
+ * 一对植物×僵尸的可执行事实：
+ * - 单体/多目标 TTK、是否被护甲拖慢、是否被免疫/直线遮挡。
+ * 不判断“该不该种”，只把字段交叉后的结果摊开。
+ */
+function matchup(plantSt, zombieSt, ctx = {}) {
+  if (!plantSt || !zombieSt) return null;
+  const z = zombieSt;
+  const ehp = cxNum(z.ehp) != null ? cxNum(z.ehp) : cxNum(z.hp);
+  const atk = plantSt.attack || null;
+  const burst = plantSt.burst || null;
+  const dps = atk ? cxNum(atk.dps) : null;
+  const multi = atk ? (cxNum(atk.multiDps) || dps) : null;
+  const oneShot = burst ? cxNum(burst.dmg) : null;
+  const ttk = dps != null && dps > 0 && ehp != null ? r1(ehp / dps) : null;
+  const multiTtk = multi != null && multi > 0 && ehp != null ? r1(ehp / multi) : null;
+  const burstTtk = oneShot != null && oneShot >= ehp ? 0 : null;
+  const ignoresArmor = !!(plantSt.ignoresArmor || (atk && (atk.ignoresArmor || atk.trueDamage)));
+  const armorHp = cxNum(z.armorHp) || 0;
+  const family = String(plantSt.family || '');
+  const ids = IMMUNITY_IDS[family] || (plantSt.damageType === 'true' ? ['armor'] : []);
+  const immunity = (Array.isArray(z.immunities) ? z.immunities : []).find((im) => {
+    const text = `${im && im.id || ''} ${im && im.text || ''} ${im && im.key || ''}`.toLowerCase();
+    return ids.some((k) => text.includes(k));
+  }) || null;
+  const blocked = ctx.blocked === true || ctx.straightBlocked === true && !(plantSt.shot && plantSt.shot.overObstacle);
+  const canDamage = (dps != null && dps > 0) || (oneShot != null && oneShot > 0);
+  const verdict = !canDamage ? 'no_damage'
+    : immunity ? 'immune'
+      : blocked ? 'blocked'
+        : (burstTtk === 0 || (ttk != null && ttk <= (ctx.budgetSec || 999))) ? 'good' : 'ok';
+  const notes = [];
+  if (immunity) notes.push(`免疫：${immunity.text || immunity.id}`);
+  if (blocked) notes.push('直线弹道被遮挡');
+  if (armorHp > 0 && !ignoresArmor) notes.push(`需先破甲 ${armorHp}`);
+  if (multi != null && dps != null && multi > dps * 1.2) notes.push(`多目标 ${multi} dps`);
+  return {
+    plant: plantSt.type,
+    zombie: z.type,
+    ehp,
+    dps,
+    multiDps: multi,
+    burstDmg: oneShot,
+    singleTtk: ttk,
+    multiTtk,
+    burstKill: burstTtk === 0,
+    ignoresArmor,
+    armorHp: armorHp || null,
+    immune: immunity ? { id: immunity.id || null, text: immunity.text || null } : null,
+    blocked: !!blocked,
+    verdict,
+    notes,
+  };
+}
+
+/**
+ * 批量配对：plantTypes × zombieTypes。默认只取 deck 和当前场上僵尸，
+ * 避免 200×300 的笛卡尔积；调用方可以传全量。
+ */
+function buildMatchups(plantTypes, zombieTypes, plantStatsOf, zombieStatsOf, ctx = {}) {
+  const out = [];
+  for (const pt of [...new Set(plantTypes || [])]) {
+    const ps = plantStatsOf ? plantStatsOf(pt) : null;
+    if (!ps) continue;
+    for (const zt of [...new Set(zombieTypes || [])]) {
+      const zs = zombieStatsOf ? zombieStatsOf(zt) : null;
+      if (!zs) continue;
+      const m = matchup(ps, zs, ctx);
+      if (m) out.push(m);
+    }
+  }
+  return out;
+}
+
+
 // ── bridge/stats.js ──
 /**
  * stats：从游戏资源里读"事实"。
@@ -980,11 +1296,15 @@ function firstObj(bag, name, alias) {
   return list.find((o) => (o.aliases || [])[0] === alias) || list.find((o) => (o.aliases || []).includes(alias)) || null;
 }
 
-function featureName(bag, kind, codename) {
+function featureOf(bag, kind, codename) {
   const key = kind === 'plant' ? 'PlantFeatures' : 'ZombieFeatures';
   const listKey = kind === 'plant' ? 'PLANTS' : 'ZOMBIES';
   const list = (bag && bag[key] && bag[key][listKey]) || [];
-  const hit = list.find((o) => o && o.CODENAME === codename);
+  return list.find((o) => o && o.CODENAME === codename) || null;
+}
+
+function featureName(bag, kind, codename) {
+  const hit = featureOf(bag, kind, codename);
   if (!hit) return null;
   return { zh: textOf(hit.NAME), en: (hit.NAME && hit.NAME.en) || null };
 }
@@ -1064,6 +1384,39 @@ function projectilesOf(bag, d) {
 }
 
 /**
+ * 能量豆弹幕的弹丸事实：只看 PeaTypePlantfood / CabbageTypePlantfood /
+ * BoomerangType 等指向 ProjectileProps 的字段。返回单发伤害与溅射伤害，
+ * 供 knowledge/plant-rules.js 计算 count × damage × hits 的总伤害。
+ */
+function plantFoodProjectilesOf(bag, d) {
+  const map = projectileMap(bag);
+  const out = [];
+  const seen = new Set();
+  const take = (v, key) => {
+    if (typeof v !== 'string' || seen.has(v)) return;
+    const data = map.get(v);
+    if (!data) return;
+    seen.add(v);
+    const splash = Array.isArray(data.SplashDamage)
+      ? data.SplashDamage.reduce((m, x) => Math.max(m, Number(x && x.Damage) || 0), 0)
+      : null;
+    out.push({
+      type: v,
+      key,
+      damage: numOf(data.Damage),
+      splashDamage: splash || null,
+      damageType: data.DamageType || null,
+    });
+  };
+  for (const [k, v] of Object.entries(d || {})) {
+    if (!/plantfood/i.test(k) && !/BoomerangType$/i.test(k)) continue;
+    if (Array.isArray(v)) for (const x of v) take(x, k);
+    else take(v, k);
+  }
+  return out;
+}
+
+/**
  * 毒伤事实：PoisonStacked / Poison / PoisonDPS 三种写法都存在。
  * 返回每层 dps、持续时间、层数、总伤害；不做“该不该带”的判断。
  */
@@ -1123,6 +1476,53 @@ function scalarProps(d) {
   return out;
 }
 
+/**
+ * 僵尸阶段触发点：只读字段名里明确写出的阈值，不靠文案猜。
+ * 返回值按 atHpPct 从高到低排（先触发的在前）。
+ */
+function zombiePhaseFacts(d) {
+  const out = [];
+  const pct = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n > 1 ? Math.min(1, n / 100) : n;
+  };
+  const push = (atHpPct, effect, extra) => {
+    if (atHpPct == null) return;
+    const rec = { atHpPct, effect };
+    for (const [k, v] of Object.entries(extra || {})) {
+      if (v != null) rec[k] = v;
+    }
+    out.push(rec);
+  };
+  for (const [key, value] of Object.entries(d || {})) {
+    const m = /^HealthPercentThrowImp(\d+)$/.exec(key);
+    if (m) {
+      push(pct(value), 'throw_imp', { spawn: d.ImpType || d.ImpTypes || null });
+      continue;
+    }
+    if (key === 'EnrageHealthPct') {
+      push(pct(value), 'enrage', {
+        speedScale: numOf(d.EnragedSpeedScale),
+        damageScale: numOf(d.EnragedDamageScale),
+      });
+      continue;
+    }
+    if (key === 'ArmDroppingHealthPct') {
+      push(pct(value), 'drop_arm');
+      continue;
+    }
+    if (key === 'ChickeningHealthPercentage') {
+      push(pct(value), 'spawn_chickens');
+      continue;
+    }
+    if (key === 'WeaselingHealthPercentage') {
+      push(pct(value), 'spawn_weasel');
+    }
+  }
+  return out.sort((a, b) => b.atHpPct - a.atHpPct);
+}
+
 function createStatsReader(getCc) {
   const plantCache = new Map();
   const zombieCache = new Map();
@@ -1150,6 +1550,20 @@ function createStatsReader(getCc) {
     const d = rec.objdata || {};
     // 弹道里的毒伤/真伤：植物属性本身不写，只在 PeaType/SporeType 指向的 ProjectileProps 里。
     const projectiles = projectilesOf(b, d);
+    // 能量豆弹幕（PeaTypePlantfood / CabbageTypePlantfood / BoomerangType…）
+    // 的单发伤害也在 ProjectileProps 里，必须一起解析。
+    const plantFoodProjectiles = plantFoodProjectilesOf(b, d);
+    // 有些卡只写 PlantfoodPeaCount、不写 PeaTypePlantfood（例如藤蔓豌豆），
+    // 这时可以回退到普通攻击弹丸伤害。但如果 PF 指定了一个解析不到的
+    // 别名（例如女巫榛的 ShroomTypePlantfood=toadstool 是植物不是弹丸），
+    // 就不要拿普通弹丸硬套，避免给出错误总伤害。
+    const pfAliases = Object.entries(d || {})
+      .filter(([k, v]) => /plantfood/i.test(k) && typeof v === 'string')
+      .map(([, v]) => v);
+    const unresolvedPfAlias = pfAliases.some((a) => !plantFoodProjectiles.some((p) => p && p.type === a));
+    const fallbackProjectileDamage = !unresolvedPfAlias
+      ? projectiles.reduce((m, p) => Math.max(m, Number(p && p.Damage) || 0), 0) || null
+      : null;
     const poison = poisonFacts(d, projectiles);
     // 直接弹道的真伤（SupressArmorProtection）与毒伤是两件事：
     // 毒伤持续伤害打本体；普通豌豆本身仍先打护甲。
@@ -1158,7 +1572,11 @@ function createStatsReader(getCc) {
     const el = alm.elements.find((e) => e.type === 'RANGE');
     const range = (el && el.sort) || null;
     const areaEl = alm.elements.find((e) => e.type === 'AREA');
-    const area = (areaEl && areaEl.sort) || null;
+    // 本作很多植物没有单独的 AREA 元素，范围写在 RANGE.SORT（如“3x3 范围”“整行”）。
+    // 只看 AREA 会让 area=null，模型就会把 3x3 群伤当成单体。
+    const area = (areaEl && areaEl.sort)
+      || ((el && el.sort && /3x3|3×3|本格|整行|一行|多行|全屏|全场|直线/i.test(String(el.sort)))
+        ? el.sort : null);
     const dmgAlm = (() => {
       const de = alm.elements.find((e) => e.type === 'DAMAGE');
       return de && Number.isFinite(Number(de.value)) ? Number(de.value) : null;
@@ -1203,17 +1621,36 @@ function createStatsReader(getCc) {
       targets,
       hitsPerTarget,
       multiDps: Math.round(unitDps * targets * hitsPerTarget * 10) / 10,
+      // 触发方式：有 AttackInterval = 持续/重复攻击；只有 AttackDuration = 一次性触发、持续几秒。
+      trigger: Number(d.AttackInterval) > 0 ? 'repeat'
+        : (Number(dm.attack.durationSec) > 0 ? 'once' : 'instant'),
+      repeat: Number(d.AttackInterval) > 0,
       // 攻击本身是否吃护甲：drain/true 才算；毒伤是“弹道打护甲 + 毒打本体”。
       ignoresArmor: dm.damageType === 'drain' || dm.damageType === 'true',
       trueDamage: dm.damageType === 'drain' || dm.damageType === 'true',
       damageType: ['drain', 'true'].includes(dm.damageType) ? dm.damageType : 'normal',
     } : null;
+    // 范围结算的 burst（土豆雷“本格”、樱桃 3x3、辣椒整行…）不是“只打一只”：
+    // 同一范围内的每只僵尸都会被结算一次。targets 仍保留图鉴/字段给出的单发目标数，
+    // 另给 areaTargets 明确范围语义，避免模型把 1800 当成“只能秒一只”。
+    const areaTargets = area && /本格|Tile|3x3|3×3|1x3|1×3|5x5|5×5|全屏|全场|三行|多行|整行|本行|一行/i.test(String(area))
+      ? 'all_in_area'
+      : null;
+    if (attack && areaTargets) attack.areaTargets = areaTargets;
     const burst = dm.burst ? {
       ...dm.burst,
       area: area || null,
       targets,
+      areaTargets,
     } : null;
     const names = featureName(b, 'plant', type);
+    // 放置类别：PlantFeatures.TAGS 是游戏自己的标记（amphibious / fly / vine / lilypad …）。
+    // 只原样上报，不做“能种/不能种”的推断；具体地形仍由 state.plantable 给。
+    const feature = featureOf(b, 'plant', type);
+    const placementTags = Array.isArray(feature && feature.TAGS)
+      ? feature.TAGS.filter((t) => typeof t === 'string' && t)
+      : [];
+    const plantPlace = (feature && feature.ZENGARDEN && feature.ZENGARDEN.PlantPlace) || null;
     const poisonDps = poison ? Number(poison.dps) || 0 : 0;
     const effectiveDps = Math.round((unitDps + poisonDps) * 10) / 10;
     const st = {
@@ -1250,6 +1687,7 @@ function createStatsReader(getCc) {
       // 能量豆：结构化（kind/area/radius/total…）。没有专属效果才是 null。
       plantFood: plantFoodFacts(d, {
         family: d.Family, almanacArea: area, almanacRange: range, almanacPlantFood: pfAlm,
+        attack, plantFoodProjectiles, fallbackProjectileDamage,
       }),
       sun: stages.length ? {
         stages, interval: prodDay, intervalNight: prodNight,
@@ -1258,8 +1696,16 @@ function createStatsReader(getCc) {
       } : null,
     };
     st.usage = usageFactsOf({ text: fullText, family: d.Family, range, props: d });
+    st.placement = (placementTags.length || plantPlace)
+      ? { tags: placementTags, plantPlace }
+      : null;
     st.shot = shotOf(st);
     st.props = scalarProps(d);
+    // 数据交叉校验：解析值 vs 原始 objdata；只在有问题时挂 checks，避免每张卡多 token。
+    try {
+      const checks = checkPlantStats(st, d);
+      if (!checks.ok) st.checks = checks;
+    } catch { /* ignore */ }
     return st;
   }
 
@@ -1292,7 +1738,7 @@ function createStatsReader(getCc) {
     const names = featureName(b, 'zombie', type);
     // 免疫/召唤/Boss 这类“怕什么、会放什么”的事实：按字段名归类，新僵尸自动带上
     const behavior = zombieBehaviorFacts(d, { type });
-    return {
+    const z = {
       type,
       name: (names && names.zh) || type,
       nameEn: (names && names.en) || null,
@@ -1317,6 +1763,8 @@ function createStatsReader(getCc) {
       spawns: behavior.spawns,
       flags: behavior.flags,
       boss: behavior.boss,
+      // 血量阈值触发的阶段（巨人扔小鬼/狂暴/掉手/放鸡/放黄鼠狼）；没写阈值就是空数组。
+      phases: zombiePhaseFacts(d),
       behaviorText: zombieBehaviorLine(behavior),
       behaviorUnknown: behavior.unknownImmuneKeys,
       behaviors: {
@@ -1332,6 +1780,11 @@ function createStatsReader(getCc) {
         speedUpWhenEatPlants: d.SpeedUpWhenEatPlants === true,
       },
     };
+    try {
+      const checks = checkZombieStats(z, d);
+      if (!checks.ok) z.checks = checks;
+    } catch { /* ignore */ }
+    return z;
   }
 
   function lawnFacts(stageName) {
@@ -1500,6 +1953,14 @@ function createStatsReader(getCc) {
     const sm = def && def.objdata ? def.objdata.StageModule : null;
     const mm = typeof sm === 'string' ? /RTID\(([^@()]+)@/.exec(sm) : null;
     const lawn = lawnFacts(mm ? mm[1] : null);
+    // 关卡 JSON 里的准备方式：传送带 / 普通选卡。组件还没加载时，先用关卡数据判断。
+    let selectionMethod = null;
+    for (const o of objs) {
+      const cls = String((o && o.objclass) || '');
+      if (cls !== 'SeedBankProperties' && cls !== 'ConveyorSeedBankProperties') continue;
+      if (o.objdata && o.objdata.SelectionMethod != null) selectionMethod = String(o.objdata.SelectionMethod);
+    }
+    const conveyorFromJson = modules.some((m) => /conveyor/i.test(`${m.cls || ''} ${m.alias || ''}`));
     const value = {
       assetName,
       waveCount: waveCount || waveList.length,
@@ -1522,7 +1983,11 @@ function createStatsReader(getCc) {
         } : null,
         suppressedWaves: (lvl && Array.isArray(lvl.SuppressedDynamicZombieWaves) ? lvl.SuppressedDynamicZombieWaves.map(Number) : []),
       },
-      seedBank: { presets: seedBankPresets(objs) },
+      seedBank: {
+        presets: seedBankPresets(objs),
+        selectionMethod,
+        conveyor: conveyorFromJson,
+      },
     };
     levelCache.set(objs, value);
     return value;
@@ -1886,9 +2351,19 @@ function laneMath({ lanes = [], zombies = [] } = {}) {
   return lanes.map((l) => {
     const zs = zombies.filter((z) => z.lane === l.lane);
     const front = zs.sort((a, b) => a.column - b.column)[0] || null;
-    const dpsUsed = zs.length >= 2 && l.dpsGroup != null ? l.dpsGroup : l.dps;
+    // dpsOnFront 只算能打到最前僵尸的植物；没有这个字段时才退回全行 dps。
+    const dpsUsed = l.dpsOnFront != null
+      ? l.dpsOnFront
+      : (zs.length >= 2 && l.dpsGroup != null ? l.dpsGroup : l.dps);
     const ehp = front ? (front.ehp != null ? front.ehp : front.ehpMax) : null;
-    const math = front ? canKillBeforeHouse({ ehp, dps: dpsUsed, column: front.column, speed: front.speed }) : { killSec: null, etaSec: null, ok: null };
+    // 有 projectedHouseSec 时用它（已经算上沿路植物被啃的拖延）；否则退回纯走路时间。
+    const math = front ? (() => {
+      const killSec = ttkSec(ehp, dpsUsed);
+      const etaSec = l.projectedHouseSec != null
+        ? Number(l.projectedHouseSec)
+        : travelSec(front.column, front.speed);
+      return { killSec, etaSec, ok: killSec != null && etaSec != null ? killSec <= etaSec : null };
+    })() : { killSec: null, etaSec: null, ok: null };
     return {
       lane: l.lane,
       frontType: front ? front.type : null,
@@ -1900,6 +2375,7 @@ function laneMath({ lanes = [], zombies = [] } = {}) {
       killSec: math.killSec,
       etaSec: math.etaSec,
       canKillBeforeHouse: math.ok,
+      killBeforeHouse: math.ok,
       wallHp: l.wallHp,
       gap: l.gap,
       lossIn: l.lossIn,
@@ -2068,7 +2544,15 @@ function wallRebuildPlan({ wallPlan = [], leadSec = 0 } = {}) {
 }
 
 function isWallCard(type, meta) {
-  return WALL_RE.test(String(type || '')) || String((meta && meta.family) || '') === 'Defence';
+  const t = String(type || '');
+  if (WALL_RE.test(t)) return true;
+  if (!meta) return false;
+  const family = String(meta.family || '');
+  if (family !== 'Defence') return false;
+  // Defence 家族里还有芦荟/雨伞叶/薄荷这类辅助卡，不能全算墙。
+  // 高血量，或名字明确是坚果（gumnut），才算阻挡位。
+  const hp = Number(meta.hpMax || meta.hp || 0);
+  return hp >= 1500 || /nut/i.test(t);
 }
 
 function isOutputCard(meta) {
@@ -2083,7 +2567,7 @@ function isOutputCard(meta) {
  *  - OUTPUT_IN_FRONT_OF_WALL：同一批里先种墙、再把输出种到墙右侧（桥上单动作校验看不到前一个动作）。
  * 只返回问题，不执行任何动作。
  */
-function batchPreflight({ actions = [], cards = [], state = null, cooldownLimitSec = 3.5 } = {}) {
+function batchPreflight({ actions = [], cards = [], state = null, cooldownLimitSec = 3.5, autoWaitSec = 8 } = {}) {
   const list = Array.isArray(actions) ? actions : [];
   const cardByIndex = new Map();
   const cardByType = new Map();
@@ -2204,8 +2688,17 @@ function batchPreflight({ actions = [], cards = [], state = null, cooldownLimitS
         }
       }
       if (isWallCard(plantType, meta)) {
-        const cur = batchWalls.get(cell.lane);
-        if (!cur || cell.column > cur.column) batchWalls.set(cell.lane, { column: cell.column, index: i });
+        // 如果这一行最前僵尸已经在墙格左侧/同格，这面墙本来就会在
+        // WALL_TOO_LATE 被拒；不要拿一面“注定失败的墙”去拒绝后面的输出。
+        const zs = state && Array.isArray(state.zombies)
+          ? state.zombies.filter((z) => z.lane === cell.lane)
+          : [];
+        const front = zs.length ? Math.min(...zs.map((z) => Number(z.column)).filter(Number.isFinite)) : null;
+        const willBlock = front == null || cell.column + 0.25 < front;
+        if (willBlock) {
+          const cur = batchWalls.get(cell.lane);
+          if (!cur || cell.column > cur.column) batchWalls.set(cell.lane, { column: cell.column, index: i });
+        }
       }
       seenCells.set(key, { op: type, index: i });
     }
@@ -2215,14 +2708,22 @@ function batchPreflight({ actions = [], cards = [], state = null, cooldownLimitS
       const occ = occurrences.get(plantType) || [];
       const baseCd = Number(meta && meta.baseCd) || 0;
       if (occ.length >= 2 && baseCd > cooldownLimitSec) {
+        // 第二张同卡如果冷却不太长，交给执行层排队等一次，不再把整轮动作判死；
+        // 第三张及以后仍然硬拒绝，避免一轮连发 3 个同卡。
+        const autoQueue = baseCd <= autoWaitSec;
+        const defer = occ.length === 2 && autoQueue;
         issues.push({
           index: i, code: 'BATCH_COOLDOWN',
-          reason: `${plantType} 基础冷却 ${baseCd}s（>${cooldownLimitSec}s）：同一批里第 ${occ.length} 次种它不可能成功。本轮最多成功 1 个，其余改下一轮或换一张卡。`,
+          reason: defer
+            ? `${plantType} 基础冷却 ${baseCd}s：同一批里第 2 次种它会先排队等冷却，最多成功 2 个。`
+            : `${plantType} 基础冷却 ${baseCd}s（>${cooldownLimitSec}s）：同一批里第 ${occ.length} 次种它不可能成功。本轮最多成功 ${autoQueue ? 2 : 1} 个，其余改下一轮或换一张卡。`,
           card: a.card != null ? Number(a.card) : null,
           type: plantType,
           cd: baseCd,
           retryAfter: baseCd,
-          maxSuccess: 1,
+          maxSuccess: autoQueue ? 2 : 1,
+          defer,
+          autoWaitSec: defer ? baseCd : undefined,
           duplicateOf: occ[0],
         });
       }
@@ -2559,6 +3060,27 @@ const TASK_MODE_SEMANTICS = {
 };
 const TASK_LIMIT_KEYS = ['plantCountLimit', 'plantLoseLimit', 'sunCostLimit', 'sunProduceRequest', 'sunCostCountDownLimit', 'zombieKillCount'];
 
+// 产阳光的判定不写死 family：不同世界有 Sun/SunShroom 等，
+// 统一看 stats.sun 或 Sun 家族，换关后仍然成立。
+const isSunPlant = (p) => !!(p && (p.sun != null || /^Sun$/i.test(String(p.family || ''))));
+
+// PlantFeatures.TAGS 里只影响“能不能种/种哪层”的标签；角色标签（sunProducer/mint…）不进 state。
+const PLACEMENT_TAGS = new Set([
+  'amphibious', 'aquatic', 'deepAquatic', 'fly', 'vine',
+  'tile', 'powertile', 'lilypad', 'floawerPot', 'any', 'allowOverlap',
+]);
+
+// 粗粒度局面版本：关卡/阶段/波次变化才变，不因阳光或僵尸走格而抖动。
+function versionHash(text) {
+  let h = 2166136261;
+  const s = String(text || '');
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
 const firstNumber = (s) => {
   const m = String(s == null ? '' : s).match(/-?\d+(?:\.\d+)?/);
@@ -2583,6 +3105,15 @@ function parsePlantLimit(texts) {
 function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, version }) {
   let compCache = { scene: null, map: null, at: 0 };
   const learnedCells = new Map();
+  // 保护格上原本有没有植物：只有“见过有、现在没了”才判定死亡，
+  // 避免开局加载那几帧把保护植物误报成 dead。
+  const protectSeen = new Set();
+  let protectSeenScope = null;
+  const protectTypeMemo = new Map();
+  // 保护格本身会随保护植物死亡一起从场景里消失：只按“当前格子”统计，
+  // 复盘会变成“没有保护植物死亡”。这里按本局记住所有见过的保护格。
+  const protectKnown = new Map();
+  let protectKnownScope = null;
   const taskTrack = new Map();
   const collectStats = { total: 0, lastAt: 0, kinds: {} };
   let autoCollectTimer = null;
@@ -2606,20 +3137,33 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
     return { cc, scene, map };
   }
 
-  function cellPlants(cell) {
+  // 同一格可能叠多株：主植物 + 藤蔓 + 地块植物 + 模仿者 + 花盆/睡莲。
+  // 旧实现只把 list[0] 给模型，南瓜套/藤蔓/睡莲层会直接消失。
+  function cellPlantLayers(cell) {
     if (!cell) return [];
     const out = [];
-    for (const g of [cell.plantInSquare, cell.vineInSquare, cell.tilePlantInSquare, cell.iminaterInSquare,
-      cell.floawerpot ? [cell.floawerpot] : null, cell.lilypad ? [cell.lilypad] : null]) {
+    const groups = [
+      [cell.plantInSquare, 'main'],
+      [cell.vineInSquare, 'vine'],
+      [cell.tilePlantInSquare, 'tile'],
+      [cell.iminaterInSquare, 'imitater'],
+      [cell.floawerpot ? [cell.floawerpot] : null, 'pot'],
+      [cell.lilypad ? [cell.lilypad] : null, 'lilypad'],
+    ];
+    for (const [g, role] of groups) {
       if (!Array.isArray(g)) continue;
       for (const p of g) {
-        if (!p || out.includes(p)) continue;
+        if (!p || out.some((x) => x.p === p)) continue;
         let alive = true;
         try { alive = p.isAlive ? p.isAlive() : true; } catch { alive = true; }
-        if (alive) out.push(p);
+        if (alive) out.push({ p, role });
       }
     }
     return out;
+  }
+
+  function cellPlants(cell) {
+    return cellPlantLayers(cell).map((x) => x.p);
   }
 
   function learnCell(lane, column, code) {
@@ -3043,27 +3587,121 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
 
   function levelFacts(lvl, sceneName) {
     const name = (lvl && lvl.levelName) || '';
+    // 关卡资源名（egypt1 这种）只是模板/文件名，不等于世界：
+    // 自定义包经常复用模板资源名（海盗港湾第 16 天的 Level 就叫 egypt1）。
+    // 游戏在 levelController 上直接给了世界名和“世界 - 第 N 天”的显示名，优先用它们。
+    const worldName = (lvl && (lvl._levelWorldName || lvl.levelWorldName || lvl.worldName)) || '';
+    const rawDisplay = (lvl && (lvl.levelNameString || lvl.levelName)) || '';
+    const displayName = rawDisplay && !/^[<【]|template/i.test(rawDisplay) ? rawDisplay : '';
     const source = {
-      world: (lvl && (lvl.worldName || lvl.worldKey || lvl.world || lvl.stageName)) || null,
+      world: worldName || (lvl && (lvl.worldName || lvl.worldKey || lvl.world || lvl.stageName)) || null,
+      worldName: worldName || null,
       levelId: (lvl && (lvl.levelId || lvl.levelID)) || null,
       custom: !!(lvl && (lvl.isCustomLevel || lvl.customLevel)),
-      description: (lvl && (lvl.levelDescription || lvl.description)) || null,
+      description: (lvl && (lvl.levelDescriptionString || lvl.levelDescription || lvl.description)) || null,
       // 资源名（cowboy13 这种）是这一关最稳定的 id：关卡总结按它归档
       asset: (lvl && lvl.Level && (lvl.Level.name || lvl.Level._name)) || (lvl && lvl.levelKey) || null,
       number: (lvl && lvl.levelDefinition && Number.isFinite(Number(lvl.levelDefinition.LevelNumber)))
         ? Number(lvl.levelDefinition.LevelNumber) : null,
+      // 传送带关只看关卡模块字段，不看“当前卡槽空不空”：
+      // 选卡过渡帧卡槽本来就是空的，靠卡槽判断会把普通关误判成传送带。
+      conveyor: !!(() => {
+        try {
+          const def = lvl && lvl.levelDefinition;
+          const mods = (def && Array.isArray(def.Modules)) ? def.Modules : [];
+          const text = mods.map((m) => (typeof m === 'string' ? m : JSON.stringify(m))).join(' ')
+            + ' ' + String((def && def.StageModule) || '');
+          return /conveyor/i.test(text);
+        } catch { return false; }
+      })(),
       scene: sceneName || null,
     };
-    const fact = worldFactOf([name, source.world, source.asset, sceneName].filter(Boolean).join(' '));
+    // 有世界名/显示名时不再把资源名拼进去：否则 "海盗港湾 … egypt1" 会被 /egypt/ 抢先匹配成埃及。
+    const worldText = [displayName, worldName, source.world].filter(Boolean).join(' ');
+    const fact = worldFactOf(worldText) || worldFactOf(source.asset) || worldFactOf(sceneName);
     return {
-      name,
+      name: displayName || name,
       source,
       world: fact ? { key: fact.key, name: fact.name, mechanics: fact.mechanics.slice(), zombies: fact.zombies.slice() } : null,
     };
   }
 
-  function cardState(cards, sunNow) {
-    const out = { cards: [], deck: [], seedSelection: null };
+  // 传送带的真实入口是场景里的 Conveyor 组件：卡不在 Cards.CFs 里，
+  // 当前带上的卡由 getCards() 给，种植走 chooseCard(cf, slot) + PlaceUIPlant()。
+  // 关卡 JSON 里有 Conveyor 模块时，即使组件还没初始化也先把模式标出来。
+  function readConveyor(map, cards, ls) {
+    const cv = map && (map.Conveyor || map.ConveyorBelt || null);
+    const fromLevel = !!(ls && ls.seedBank && ls.seedBank.conveyor);
+    if (!cv && !fromLevel) return null;
+    let list = [];
+    let slots = [];
+    let plantList = [];
+    try {
+      if (cv) {
+        list = (typeof cv.getCards === 'function' ? cv.getCards() : []) || [];
+        slots = [].concat(cv.lane1slots || [], cv.lane2slots || [], cv.laneVertslots || [])
+          .filter(Boolean)
+          .map((s) => cleanCodename(s.card && s.card.Type));
+        plantList = (Array.isArray(cv.plantList) ? cv.plantList : [])
+          .map((p) => cleanCodename(p && (p.PlantType || p.Type) || p))
+          .filter(Boolean);
+      }
+    } catch { /* ignore */ }
+    const cardCount = cards && Array.isArray(cards.CFs) ? cards.CFs.length : 0;
+    // 选卡界面已经就绪（有可选卡）时，绝不能因为“卡组还是空的 + 场景里有 Conveyor 组件”
+    // 就把普通关误判成传送带；否则模型会跳过选卡，开局失败后一直用预填卡组。
+    const chooserReady = !!(cards && cards.seedChooser && Array.isArray(cards.seedChooser.CFs)
+      && cards.seedChooser.CFs.length > 0);
+    const realConveyor = list.length > 0 || plantList.length > 0;
+    const enabled = realConveyor || (fromLevel && !chooserReady && cardCount === 0);
+    if (!enabled) return null;
+    return {
+      enabled: true,
+      vertical: !!(cv && cv.isVertical),
+      source: fromLevel ? 'level' : 'component',
+      cards: list.map((cf, i) => {
+        const type = cleanCodename(cf && cf.Type);
+        const st = stats.plantStatsOf(type);
+        return {
+          index: i,
+          type,
+          name: (st && st.name) || type,
+          // 传送带不扣阳光、不吃种子冷却；保留 ready 兼容旧读法。
+          cost: 0,
+          cd: 0,
+          cdReady: true,
+          affordable: true,
+          sunShort: 0,
+          ready: true,
+          cooling: false,
+          family: (st && st.family) || null,
+          dps: (st && st.attack && st.attack.dps) || null,
+          effectiveDps: (st && st.effectiveDps) || null,
+          reach: st ? st.reach : null,
+          stepDamage: !!(st && st.stepDamage),
+          ignoresArmor: !!(st && st.ignoresArmor),
+          targets: (st && st.attack && st.attack.targets) || 1,
+          multiDps: (st && st.attack && st.attack.multiDps) || null,
+          activation: st && st.usage && st.usage.manual ? st.usage.activation : undefined,
+          burstDmg: (st && st.burst && st.burst.dmg) || undefined,
+          damageType: (st && st.damageType && st.damageType !== 'normal') ? st.damageType : undefined,
+          armorState: (st && st.armorState && st.armorState !== 'no') ? st.armorState : undefined,
+          foodKind: (st && st.plantFood && st.plantFood.kind) || undefined,
+        };
+      }),
+      plantList,
+      slots,
+    };
+  }
+
+  function cardState(cards, sunNow, conveyor) {
+    const out = { cards: [], deck: [], seedSelection: null, conveyor: conveyor || null };
+    // 传送带：state.cards 就是当前带上的卡，index 每轮都可能变；没有阳光/冷却。
+    if (conveyor && conveyor.enabled) {
+      out.cards = (conveyor.cards || []).map((c) => ({ ...c, conveyor: true }));
+      out.deck = out.cards.map((c) => c.type);
+      return out;
+    }
     try {
       if (cards && Array.isArray(cards.CFs)) {
         out.cards = cards.CFs.map((cf, i) => {
@@ -3087,6 +3725,10 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
             effectiveDps: (st && st.effectiveDps) || null,
             reach: st ? st.reach : null,
             stepDamage: !!(st && st.stepDamage),
+            // 放置类别（amphibious/fly/vine/lilypad…）；普通卡为空，不占 token。
+            placementTags: (st && st.placement && st.placement.tags || [])
+              .filter((t) => PLACEMENT_TAGS.has(t)),
+            plantPlace: (st && st.placement && st.placement.plantPlace) || undefined,
             ignoresArmor: !!(st && st.ignoresArmor),
             targets: (st && st.attack && st.attack.targets) || 1,
             multiDps: (st && st.attack && st.attack.multiDps) || null,
@@ -3135,6 +3777,9 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
                 sunPerSec: sunRate != null ? Math.round(sunRate * 100) / 100 : null,
                 paybackSec: (st && st.sun && st.sun.paybackSec) || null,
                 kind: st && st.shot ? st.shot.kind : null,
+                placementTags: (st && st.placement && st.placement.tags || [])
+                  .filter((t) => PLACEMENT_TAGS.has(t)),
+                plantPlace: (st && st.placement && st.placement.plantPlace) || undefined,
                 activation: (st && st.usage && st.usage.manual) ? st.usage.activation : undefined,
                 burstDmg: (st && st.burst && st.burst.dmg) || undefined,
                 foodKind: (st && st.plantFood && st.plantFood.kind) || undefined,
@@ -3146,12 +3791,37 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
     return out;
   }
 
+  // 提前布阵：不同版本字段名不一样（lastStandPrepareStarted / preset.active / prepareStarted）。
+  // 只认明确的“布阵已开始但波次未开始”标志，不靠“阳光多”这类现象猜。
+  function preplantNow(lvl, gameStarted) {
+    if (!lvl || gameStarted) return false;
+    const preset = lvl.preset;
+    return !!(
+      lvl.lastStandPrepareStarted
+      || lvl.prepareStarted
+      || lvl.plantingPhase
+      || lvl.lastStandMode
+      || (preset && (preset.active === true || preset.prepare === true || preset.started === true))
+    );
+  }
+
   // 关卡准备模式：普通选卡 / 提前布阵 / 传送带 / 给定锁定卡组。
   // 这几种关卡的“开局前该做什么”不一样，必须当成结构化事实给模型，不能靠它从 phase 猜。
-  function prepState(cards, lvl, phase) {
+  function prepState(cards, lvl, phase, conveyor, ls, hintText) {
     if (phase === 'menu' || phase === 'worldmap' || phase === 'other') return null;
-    const conveyor = !!(cards && (cards.conveyor || (lvl && lvl.conveyorMode)));
-    const preplant = !!(lvl && lvl.lastStandPrepareStarted && !lvl.gameStarted);
+    const conveyorOn = !!(conveyor && conveyor.enabled)
+      // 兜底：关卡模块字段明确写了 Conveyor 才算传送带；选卡界面有可选卡时以选卡为准。
+      || !!(() => {
+        try {
+          const def = lvl && lvl.levelDefinition;
+          const text = ((def && def.Modules) || []).map((m) => (typeof m === 'string' ? m : JSON.stringify(m))).join(' ')
+            + ' ' + String((def && def.StageModule) || '');
+          const chooserReady = !!(cards && cards.seedChooser && Array.isArray(cards.seedChooser.CFs)
+            && cards.seedChooser.CFs.length > 0);
+          return !chooserReady && /conveyor/i.test(text);
+        } catch { return false; }
+      })();
+    const gameStarted = !!(lvl && lvl.gameStarted) || !!(cards && cards.gameStarted);
     const seed = cards && cards.seedChooser;
     const slots = Number(cards && cards.maxSlotCount) || 0;
     const current = ((cards && cards.CFs) || []).filter(Boolean).map((c) => cleanCodename(c.Type));
@@ -3159,27 +3829,52 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
     const available = seed && Array.isArray(seed.CFs)
       ? seed.CFs.filter((cf) => cf && cf.Type && !(cf.ca && (cf.ca.locked || cf.ca.disallowed))).length
       : 0;
-    const deckLocked = !conveyor && slots > 0 && current.length >= slots
-      && (locked >= slots || (!!seed && available === 0));
-    const gameStarted = !!(lvl && lvl.gameStarted) || !!(cards && cards.gameStarted);
+    const text = String(hintText || '');
+    // 关卡标题/任务原文兜底：只在“已经进入布阵期（phase=running）”或“没有选卡页”时才算，
+    // 不能在选卡前的 preparing 阶段就把普通选卡关误判成提前布阵。
+    const textPreplant = !gameStarted && /提前布阵|先布阵|pre-?plant/i.test(text)
+      && (phase === 'running' || !seed);
+    // 给定卡组同理：有可选卡池时先按正常选卡；无选卡页/可选为 0 才用文本兜底。
+    const textForced = !seed || available === 0
+      ? /使用给定|给定植物|固定卡组|锁定卡组|given plants?|fixed deck|preset deck|locked deck/i.test(text)
+      : false;
+    const preplant = preplantNow(lvl, gameStarted) || textPreplant;
+    // 没有选卡页（没有 seedChooser）但已经拿到卡组，就是“使用给定植物通关”；
+    // 卡槽全锁/可选为 0/关卡配置明说不是 chooser 也算。不能因为 availableCount=0 就退回 normal。
+    const noChooser = !seed;
+    const forcedFlag = !!(cards && (cards.forcedDeck || cards.deckLocked || cards.presetDeck))
+      || !!(lvl && (lvl.forcedDeck || lvl.deckLocked || lvl.presetDeck || lvl.givenDeck));
+    const selection = ls && ls.seedBank ? ls.seedBank.selectionMethod : null;
+    const presetSelection = !!(selection && !/chooser/i.test(String(selection)));
+    const deckLocked = !conveyorOn && (forcedFlag || textForced || (current.length > 0
+      && (noChooser || presetSelection
+        || (slots > 0 && current.length >= slots && (locked >= slots || available === 0)))));
     let canStart = false;
-    if (conveyor) canStart = true;
+    if (conveyorOn) canStart = true;
     else if (preplant && !gameStarted) canStart = true;
     else {
       try { canStart = typeof cards.GameStartable === 'function' ? !!cards.GameStartable() : current.length > 0; } catch { canStart = current.length > 0; }
     }
     let mode = 'normal';
-    if (conveyor) mode = 'conveyor';
+    if (conveyorOn) mode = 'conveyor';
     else if (preplant) mode = 'preplant';
     else if (deckLocked) mode = 'forced_deck';
+    // 给定卡组没有选卡页：只要卡组已经下发，就可以先想对策再开局。
+    if (mode === 'forced_deck' && current.length > 0) canStart = true;
     return {
       mode,
       phase: preplant && !gameStarted ? 'preplant' : (gameStarted ? 'fighting' : 'preparing'),
-      conveyor,
+      // 卡槽/卡池还没初始化时（objective 刚结束、页面过渡）不要据此判断传送带。
+      ready: conveyorOn || !!seed && (slots > 0 || gameStarted) && (available > 0 || current.length > 0) || gameStarted,
+      modePending: !gameStarted && !conveyorOn && !preplant && !deckLocked && !seed && current.length === 0,
+      conveyor: conveyorOn,
       preplant,
       deckLocked,
       gameStarted,
       canStart,
+      // 这几种关必须先想清楚再开局；router/actions 会用这个字段拦“直接点开始”。
+      mustPlanBeforeStart: !gameStarted && (mode === 'forced_deck' || mode === 'preplant'),
+      hasSeedChooser: !!seed,
       slots,
       currentCount: current.length,
       lockedCount: locked,
@@ -3217,7 +3912,7 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
     if (sceneName === 'mainScene') phase = 'menu';
     else if (/worldmap/i.test(sceneName)) phase = 'worldmap';
     else if (sceneName === 'inGameScene' || C) {
-      const presetNow = !!(lvl && lvl.lastStandPrepareStarted && !lvl.gameStarted);
+      const presetNow = preplantNow(lvl, !!(lvl && lvl.gameStarted) || !!(cards && cards.gameStarted));
       const fighting = !!(lvl && lvl.gameStarted) || !!(cards && cards.gameStarted) || presetNow;
       if (lvl && lvl.gameWon) phase = 'won';
       else if (lvl && lvl.gameLost) phase = 'lost';
@@ -3240,9 +3935,10 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
       let sunNow = null, foodNow = null;
       try { sunNow = map.SunCount ? map.SunCount.CurrentValue : null; } catch { /* ignore */ }
       try { foodNow = map.PlantFoodCount ? map.PlantFoodCount.plantFoodNum : null; } catch { /* ignore */ }
-      const cs = cardState(cards, sunNow);
       let lsFull = null;
       try { lsFull = lvl ? stats.levelScriptOf(lvl) : null; } catch { lsFull = null; }
+      const conveyor = readConveyor(map, cards, lsFull);
+      const cs = cardState(cards, sunNow, conveyor);
       const ls = full ? lsFull : leanLevelScript(lsFull);
       const limitFromTask = taskPlantLimit(tasks);
       const limit = limitFromTask != null ? limitFromTask : parsePlantLimit(missionHints);
@@ -3262,7 +3958,8 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
           lost: !!(lvl && lvl.gameLost),
         },
         cards: cs.cards, deck: cs.deck, seedSelection: cs.seedSelection,
-        prep: prepState(cards, lvl, phase),
+        conveyor: cs.conveyor,
+        prep: prepState(cards, lvl, phase, conveyor, lsFull, [level.name, ...missionHints].filter(Boolean).join(' ')),
         plants: [], zombies: [], lanes: [], board: [],
         terrain: null, blockedCells: [], plantable: [], obstacles: [], mechanicFacts: [], mechanics: [],
         levelScript: ls, zombieStats: {},
@@ -3287,6 +3984,9 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
     }
     const lanes = C.LaneCount || 5;
     const cols = C.ColumnCount || 9;
+    const isWall = (type) => {
+      try { return isWallCard(type, stats.plantStatsOf(type)); } catch { return isWallCard(type, null); }
+    };
 
     const level = levelFacts(lvl, sceneName);
     const out = {
@@ -3328,13 +4028,15 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
       out.forecast = full ? null : forecastPreview(lsFull, out.level.wave);
       if (!out.level.waves && lsFull) out.level.waves = lsFull.waveCount || null;
     }
-    if (phase === 'preparing' || phase === 'objective' || (lvl && lvl.lastStandPrepareStarted && !lvl.gameStarted)) out.startingSun = out.sun;
+    const conveyorNow = readConveyor(map, cards, lsFull);
+    if (phase === 'preparing' || phase === 'objective' || preplantNow(lvl, !!(lvl && lvl.gameStarted))) out.startingSun = out.sun;
 
     // 卡片 / 选卡
-    const cs = cardState(cards, out.sun);
+    const cs = cardState(cards, out.sun, conveyorNow);
     out.cards = cs.cards;
     out.deck = cs.deck;
-    out.prep = prepState(cards, lvl, phase);
+    out.conveyor = cs.conveyor;
+    out.prep = prepState(cards, lvl, phase, conveyorNow, lsFull, [out.level.name, ...missionHints].filter(Boolean).join(' '));
     // 只在选卡/任务阶段返回完整可选卡池；战斗中已经有卡组，避免每次状态都塞 30KB 的卡池。
     out.seedSelection = (phase === 'preparing' || phase === 'objective') ? cs.seedSelection : null;
     out.limits.slots = (cards && cards.maxSlotCount) || (out.seedSelection && out.seedSelection.slots) || (out.deck || []).length || 0;
@@ -3368,19 +4070,40 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
         try {
           if (terrainRow[c] === 'R' && !cell.cart) blocked.push({ lane: r, column: c, reason: 'rail' });
         } catch { /* ignore */ }
-        const list = cellPlants(cell);
-        if (list.length) {
-          const p = list[0];
+        const entries = cellPlantLayers(cell);
+        if (entries.length) {
+          const p = entries[0].p;
           const type = cleanCodename(p.Plant_Type);
           const pst = stats.plantStatsOf(type);
           cells[c] = type;
+          const layers = entries.map((e) => {
+            const t = cleanCodename(e.p.Plant_Type);
+            const st = stats.plantStatsOf(t);
+            return {
+              role: e.role, type: t, name: (st && st.name) || t,
+              hp: Math.round(e.p.health || 0), maxHp: Math.round(e.p.toughness || 0),
+            };
+          });
           out.plants.push({
             lane: r, column: c, type, name: (pst && pst.name) || type,
             hp: Math.round(p.health || 0), maxHp: Math.round(p.toughness || 0),
-            atk: pst ? pst.attack : null, shot: pst ? pst.shot : null,
+            // 同一格的总血量：只有多层时才给，单层用 hp 即可。
+            cellHp: layers.length > 1 ? layers.reduce((s, x) => s + (x.hp || 0), 0) : undefined,
+            layers: layers.length > 1 ? layers : undefined,
+            atk: pst ? pst.attack : null,
+            effectiveDps: pst ? pst.effectiveDps : null,
+            stepDamage: !!(pst && pst.stepDamage),
+            shot: pst ? pst.shot : null,
             family: (pst && pst.family) || null,
+            sun: pst && pst.sun ? {
+              perSecDay: pst.sun.perSecDay,
+              paybackSec: pst.sun.paybackSec,
+            } : undefined,
             reach: pst ? pst.reach : null,
             armTimeSec: pst ? pst.armTimeSec : null,
+            // 放置类别（amphibious/fly/vine/lilypad…）：只原样上报游戏 TAGS。
+            placementTags: (pst && pst.placement && pst.placement.tags || [])
+              .filter((t) => PLACEMENT_TAGS.has(t)),
             // 点击类植物：不知道 activation 的模型只会“种下去然后看着它不动”。
             activation: (pst && pst.usage && pst.usage.activation) || 'auto',
             aim: (pst && pst.usage && pst.usage.aim) || null,
@@ -3390,6 +4113,14 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
               area: pst.plantFood.area,
               radius: pst.plantFood.radius,
               total: pst.plantFood.total,
+              totalPerTarget: pst.plantFood.totalPerTarget,
+              maxTotal: pst.plantFood.maxTotal,
+              sunTotal: pst.plantFood.sunTotal,
+              sunValue: pst.plantFood.sunValue,
+              count: pst.plantFood.count,
+              projectileDamage: pst.plantFood.projectileDamage,
+              targetsPerHit: pst.plantFood.targetsPerHit,
+              hitsPerTarget: pst.plantFood.hitsPerTarget,
               durationSec: pst.plantFood.durationSec,
             } : null,
             foodable: !!p.foodable && !p.fooding,
@@ -3452,6 +4183,16 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
         const armorNow = liveArmorHp(z);
         const armorMax = zst && zst.armorHp != null ? zst.armorHp : 0;
         const speed = zst && zst.speed != null ? zst.speed : null;
+        const eating = !!(z.isEating || z.eating || z.isEatingPlant || z.eatTarget
+          || z.targetPlant || z.eatingPlant || z.attackTarget);
+        // 血量阈值阶段（巨人扔小鬼/狂暴/掉手…）：只给“还没触发、最近的那个”。
+        const phases = (zst && Array.isArray(zst.phases)) ? zst.phases : [];
+        const nextPhase = phases.length && zst.hp
+          ? phases
+            .map((ph) => ({ ...ph, atHp: Math.round(Number(zst.hp) * Number(ph.atHpPct)) }))
+            .filter((ph) => ph.atHp < hp)
+            .sort((a, b) => b.atHp - a.atHp)[0] || null
+          : null;
         out.zombies.push({
           lane: r, column: Math.round(col * 10) / 10, type, name: (zst && zst.name) || type,
           hp, maxHp: Math.round((z.totalHealth ? z.totalHealth() : z.health) || 0),
@@ -3463,20 +4204,93 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
           ehpMax: hp + armorMax + ((zst && zst.newspaperHp) || 0),
           tags: (zst && zst.tags) || [],
           counters: ((zst && zst.tags) || []).map((tag) => TAG_COUNTERS[tag]).filter(Boolean).map((c) => c.text),
+          // 只给“下一阶段还差多少血”，不把完整阶段表塞进每回合。
+          nextPhase: nextPhase ? {
+            atHp: nextPhase.atHp,
+            atHpPct: nextPhase.atHpPct,
+            effect: nextPhase.effect,
+            spawn: nextPhase.spawn || undefined,
+          } : undefined,
+          phases: phases.length ? phases.map((ph) => ({
+            atHpPct: ph.atHpPct, effect: ph.effect, spawn: ph.spawn || undefined,
+          })) : undefined,
           // 飞行标签只说明“会飞”；荡索落地后会走到 c4 附近。用列位置给一个可操作的空中窗口。
+          // 游戏本身还暴露了 swinging / _flying / flyZombie：优先用这些真实状态，
+          // 否则荡索在空中时列位置可能已经压到 4.5 以下，三叶草会被判成“没有空中目标”。
           airborne: (() => {
             const tags = (zst && zst.tags) || [];
+            const rawAir = !!(z.swinging || z._flying || z.flyZombie || z.currentFlyZombie);
+            if (rawAir) return true;
             if (!tags.includes('flying')) return false;
             if (/swashbuckler/i.test(String(type))) return col >= 4.5;
             return true;
           })(),
           speed,
+          eatDps: (zst && Number(zst.eatDps) > 0) ? Number(zst.eatDps) : null,
+          eating,
           etaToHouse: speed > 0 ? Math.round((col / speed) * 10) / 10 : null,
         });
       }
     }
     out.zombies.sort((a, b) => a.lane - b.lane || a.column - b.column);
     for (const row of out.board) row.zombies = out.zombies.filter((z) => z.lane === row.lane);
+
+    // 僵尸啃咬：按列位置判断谁已经在同一格/贴住植物，再算这株还能撑多久。
+    // 只有真正接触的僵尸算啃食 DPS；同行的远处僵尸不计入，否则会严重低估支撑时间。
+    const PLANT_CONTACT_AHEAD = 1.1;
+    const PLANT_CONTACT_BEHIND = 0.3;
+    for (const p of out.plants) {
+      const contact = out.zombies.filter((z) => z.lane === p.lane
+        && z.column >= p.column - PLANT_CONTACT_BEHIND
+        && z.column <= p.column + PLANT_CONTACT_AHEAD);
+      const eatDps = contact.reduce((s, z) => s + (Number(z.eatDps) || 0), 0);
+      const approaching = out.zombies
+        .filter((z) => z.lane === p.lane && z.column > p.column + PLANT_CONTACT_AHEAD)
+        .sort((a, b) => a.column - b.column)[0] || null;
+      if (contact.length) {
+        p.underAttack = true;
+        p.eaters = contact.length;
+        p.eatDps = Math.round(eatDps * 10) / 10;
+        // 血量按当前 hp（不是 maxHp），因为墙/输出已经被啃掉一部分。
+        p.holdSec = eatDps > 0 ? Math.round(((p.hp || 0) / eatDps) * 10) / 10 : null;
+      }
+      if (approaching) {
+        const speed = Number(approaching.speed) > 0 ? Number(approaching.speed) : 0.18;
+        p.contactInSec = Math.max(0, Math.round(((approaching.column - (p.column + PLANT_CONTACT_AHEAD)) / speed) * 10) / 10);
+      }
+    }
+
+    // ── 输出口径：射程 / 实际目标数 / 墓碑遮挡 / 毒伤 / 地刺 ──
+    // 只算几何与字段事实，不判断该打谁。
+    const ZOMBIE_HIT_BEHIND = 1.1;
+    function zombieInPlantRange(p, z) {
+      if (!p || !p.atk) return false;
+      // 直线弹道只被“僵尸与植物之间”的墓碑挡住；僵尸在墓碑前面时仍然打得到。
+      if (p.blockedAt && Number(z.column) > Number(p.blockedAt.column)) return false;
+      const gap = Number(z.column) - (p.column + 0.5);
+      if (p.stepDamage) return Math.abs(gap) <= 0.55;
+      if (p.reach == null) return gap >= -0.05;
+      return gap >= -ZOMBIE_HIT_BEHIND && gap <= Number(p.reach) + 0.5;
+    }
+    // 这张卡当前能同时命中几只（不超过 targets）。
+    function plantHitCount(p, zs) {
+      if (!p.atk) return 0;
+      const base = Number(p.effectiveDps) || Number(p.atk.dps) || 0;
+      if (!(base > 0)) return 0;
+      // 地刺只打“踩在本格”的僵尸，不是整行输出。
+      if (p.stepDamage) {
+        const onTile = zs.filter((z) => Math.abs(Number(z.column) - (p.column + 0.5)) <= 0.55).length;
+        return Math.min(1, onTile);
+      }
+      const n = zs.filter((z) => zombieInPlantRange(p, z)).length;
+      return Math.min(Math.max(1, Number(p.atk.targets) || 1), n);
+    }
+    function plantLaneDps(p, zs) {
+      const hits = plantHitCount(p, zs);
+      if (!hits) return 0;
+      const base = Number(p.effectiveDps) || Number(p.atk.dps) || 0;
+      return base * hits * (Number(p.atk.hitsPerTarget) || 1);
+    }
 
     // ── 能量豆 / 点击卡的“值不值”在本地算好 ──
     // 只给几何事实（范围内几只、本行最近僵尸在哪），不建议该不该给。
@@ -3556,6 +4370,13 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
         if (!atk) return s;
         return s + (atk.targets > 1 ? (atk.multiDps || atk.dps || 0) : (atk.dps || 0));
       }, 0) * 10) / 10;
+      // 实际可用输出：排除墓碑遮挡、地刺（只打本格）和射程外的目标；
+      // 多目标按“当前真能同时打到几只”算，而不是固定按 targets 上限算。
+      const dpsEffective = Math.round(ps.reduce((s, p) => s + plantLaneDps(p, zs), 0) * 10) / 10;
+      const dpsBlocked = Math.round(ps.reduce((s, p) => s
+        + (p.blockedAt && p.atk ? Number(p.atk.dps) || 0 : 0), 0) * 10) / 10;
+      const dpsStep = Math.round(ps.reduce((s, p) => s
+        + (p.stepDamage && p.atk ? Number(p.atk.dps) || 0 : 0), 0) * 10) / 10;
       // 威胁率：每秒会有多少 EHP 走到房子（ehp / 到房子的秒数），和本行 dps 直接同量纲
       const incoming = zs.reduce((s, z) => {
         const eta = z.etaToHouse;
@@ -3564,35 +4385,116 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
       }, 0);
       const lossIn = zs.length ? Math.min(...zs.map((z) => (z.etaToHouse == null ? Infinity : z.etaToHouse))) : null;
       const front = zs.length ? zs.reduce((a, b) => (b.column < a.column ? b : a)) : null;
+      // 最前僵尸前方（左侧）最近的一株植物；它才是僵尸接下来会啃的阻挡物。
+      // 包含“僵尸已经进入同一格”的植物（p.column <= zombie.column + 0.5），
+      // 这样正在被啃的那株才会成为 frontPlant，而不是跳到它后面那株。
+      const aheadPlants = front
+        ? ps.filter((p) => p.column <= front.column + 0.5).sort((a, b) => b.column - a.column)
+        : [];
+      const frontPlant = aheadPlants[0] || null;
+      const speed = front && Number(front.speed) > 0 ? Number(front.speed) : 0.18;
+      const contactInSec = frontPlant && front
+        ? Math.max(0, Math.round(((front.column - (frontPlant.column + 0.5)) / speed) * 10) / 10)
+        : null;
+      const holdSec = frontPlant
+        ? (frontPlant.holdSec != null
+          ? frontPlant.holdSec
+          : Math.round(((frontPlant.hp || 0) / (Number(front && front.eatDps) || 100)) * 10) / 10)
+        : null;
+      const killWindowSec = contactInSec != null && holdSec != null
+        ? Math.round((contactInSec + holdSec) * 10) / 10 : null;
+      // 先看射程：短手植物够不到最前僵尸就不算；远程植物只看是否在它左侧（不能打背后）。
+      const dpsOnFront = Math.round(ps.reduce((s, p) => {
+        if (!front || !zombieInPlantRange(p, front)) return s;
+        return s + plantLaneDps(p, zs);
+      }, 0) * 10) / 10;
+      const frontEhp = front ? (front.ehp != null ? front.ehp : (front.ehpMax || 0)) : null;
+      const killSec = front && dpsOnFront > 0 && frontEhp != null
+        ? Math.round((frontEhp / dpsOnFront) * 10) / 10 : null;
+      const killBeforeWindow = killSec != null && killWindowSec != null ? killSec <= killWindowSec : null;
+      // 沿路把所有会挡路的植物按“接触 → 啃掉 → 继续走”估一遍，
+      // 这样墙/向日葵/输出被啃的时间都会算进“还能拖多久”。
+      let projectedHouseSec = null;
+      if (front && aheadPlants.length) {
+        let pos = front.column;
+        let t = 0;
+        for (const p of aheadPlants) {
+          const contactPos = p.column + 0.5;
+          if (pos > contactPos) t += (pos - contactPos) / speed;
+          const eat = p.holdSec != null
+            ? p.holdSec
+            : ((p.hp || 0) / (Number(front.eatDps) || 100));
+          t += eat;
+          pos = contactPos;
+        }
+        t += Math.max(0, pos) / speed;
+        projectedHouseSec = Math.round(t * 10) / 10;
+      }
+      const killBeforeHouse = killSec != null && projectedHouseSec != null
+        ? killSec <= projectedHouseSec : null;
       const tombColumns = obstacles
         .filter((o) => o && o.type === 'tomb' && o.lane === r)
         .map((o) => o.column)
         .sort((a, b) => a - b);
+      // 全行口径：不是只看最前一只。ehp 是本行所有僵尸的剩余总血量，
+      // clearSec 是用本行全部有效 dps 清完这一行要多久（近似值，多目标按实际覆盖算）。
+      const laneEhp = Math.round(zs.reduce((s, z) => s + (z.ehp != null ? z.ehp : z.ehpMax || 0), 0));
+      const clearSec = laneEhp > 0 && dpsEffective > 0
+        ? Math.round((laneEhp / dpsEffective) * 10) / 10 : null;
+      const clearBeforeHouse = clearSec != null && lossIn != null && Number.isFinite(lossIn)
+        ? clearSec <= lossIn : null;
       out.lanes.push({
         lane: r, zombies: zs.length,
         nearestZombie: zs.length ? Math.min(...zs.map((z) => z.column)) : null,
         shooters: ps.filter((p) => p.atk && p.atk.dps).length,
-        walls: ps.filter((p) => /peanut|tallnut|wallnut|holonut|endurian/i.test(p.type)).length,
-        wallCells: ps.filter((p) => /peanut|tallnut|wallnut|holonut|endurian/i.test(p.type))
+        walls: ps.filter((p) => isWall(p.type)).length,
+        wallCells: ps.filter((p) => isWall(p.type))
           .map((p) => ({ column: p.column, type: p.type, hp: p.hp, maxHp: p.maxHp })),
         shooterCells: ps.filter((p) => p.atk && p.atk.dps).map((p) => ({ column: p.column, type: p.type, dps: p.atk.dps })),
-        sunProducers: ps.filter((p) => /^Sun$/i.test(String(p.family || ''))).length,
+        sunProducers: ps.filter(isSunPlant).length,
         plants: ps.length,
         dps,
         dpsGroup,
-        wallHp: ps.reduce((s, p) => s + (/peanut|tallnut|wallnut|holonut|endurian/i.test(p.type) ? (p.hp || 0) : 0), 0),
+        dpsEffective,
+        dpsBlocked,
+        dpsStep,
+        wallHp: ps.reduce((s, p) => s + (isWall(p.type) ? (p.hp || 0) : 0), 0),
         tombColumns,
         straightBlocked: tombColumns.length > 0,
         // 本行在场上僵尸的剩余 EHP 合计（读不到护甲时用 ehpMax 上界），以及是否全是精确值
-        ehp: Math.round(zs.reduce((s, z) => s + (z.ehp != null ? z.ehp : z.ehpMax || 0), 0)),
+        ehp: laneEhp,
         ehpExact: zs.every((z) => z.ehp != null),
-        // 防御缺口：incomingPerSec > dps 就说明这行会被压穿；gap 是每秒净增的威胁
+        // 全行清怪时间：ehp / dpsEffective；和 lossIn 比，看这行能不能在到家前清完。
+        clearSec,
+        clearBeforeHouse,
+        // 防御缺口：incomingPerSec > 实际可用 dps 就说明这行会被压穿。
+        // gap 用 dpsEffective（排除遮挡/地刺/射程外）；gapRaw 保留名义口径，方便对照。
         incomingPerSec: Math.round(incoming * 10) / 10,
-        gap: Math.round((incoming - dps) * 10) / 10,
+        gap: Math.round((incoming - dpsEffective) * 10) / 10,
+        gapRaw: Math.round((incoming - dps) * 10) / 10,
         lossIn: lossIn == null || !Number.isFinite(lossIn) ? null : Math.round(lossIn * 10) / 10,
         // 把 AI 延迟算进去后，最晚什么时候必须动手；<0 就是已经来不及
         actBy: lossIn == null || !Number.isFinite(lossIn) ? null : Math.round((lossIn - lead) * 10) / 10,
-        front: front ? { column: front.column, type: front.type, ehp: front.ehp != null ? front.ehp : front.ehpMax } : null,
+        // 救场计算：僵尸左侧还能打到它的 dps、前方阻挡植物能拖多久、够不够在植物被啃完前杀掉。
+        dpsOnFront,
+        killSec,
+        frontPlant: frontPlant ? {
+          lane: frontPlant.lane, column: frontPlant.column, type: frontPlant.type,
+          hp: frontPlant.hp, eatDps: frontPlant.eatDps || null,
+          underAttack: !!frontPlant.underAttack, holdSec,
+        } : null,
+        contactInSec,
+        holdSec,
+        killWindowSec,
+        killBeforeWindow,
+        // 把沿路所有植物能拖的时间都算进去：即使这株挡不住，也可能在到房子前磨死它。
+        killBeforeHouse,
+        projectedHouseSec,
+        front: front ? {
+          column: front.column, type: front.type,
+          ehp: front.ehp != null ? front.ehp : front.ehpMax,
+          speed, eatDps: front.eatDps || null, eating: !!front.eating,
+        } : null,
         mower,
       });
     }
@@ -3600,7 +4502,7 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
     // ── 提前量：波次 ETA / 卡牌可用时间 / 一次性卡落点窗口 / 每回合摘要 ──
     let fc = null;
     try { fc = lsFull ? buildForecast(lsFull, stats) : null; } catch { fc = null; }
-    const totalDps = Math.round((out.lanes || []).reduce((s, l) => s + (l.dps || 0), 0) * 10) / 10;
+    const totalDps = Math.round((out.lanes || []).reduce((s, l) => s + (l.dpsEffective != null ? l.dpsEffective : (l.dps || 0)), 0) * 10) / 10;
     const waveNow = out.level.wave || 0;
     const waveFc = fc && waveNow ? (fc.waves || []).find((w) => w.wave === waveNow) : null;
     const threshold = (lsFull && lsFull.manager && lsFull.manager.minNextHealth != null) ? lsFull.manager.minNextHealth : 0.5;
@@ -3657,6 +4559,108 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
     }
     out.instantAim = aims.length ? aims.sort((a, b) => a.lane - b.lane).slice(0, 8) : null;
 
+    // 一次性/范围卡的落点事实：只回答“放在这个已有僵尸的格子上，会命中几只、总伤害多少、能杀几只”。
+    // 不排序、不标 best、不选卡；空格的“最佳落点”留给模型自己判断。
+    const aimOptions = [];
+    const aimScopeOf = (areaText) => {
+      const area = String(areaText || '');
+      const r = /半径\s*([\d.]+)/.exec(area);
+      if (r) return { scope: 'radius', radius: Number(r[1]) };
+      if (/5x5|5×5/.test(area)) return { scope: 'box', radius: 2 };
+      if (/3x3|3×3/.test(area)) return { scope: 'box', radius: 1 };
+      if (/1x3|1×3/.test(area)) return { scope: '1x3', radius: 1 };
+      if (/全屏|全场/.test(area)) return { scope: 'all', radius: null };
+      if (/三行|多行/.test(area)) return { scope: 'lanes3', radius: null };
+      if (/整行|本行|一行/.test(area)) return { scope: 'lane', radius: null };
+      if (/本格|Tile/i.test(area)) return { scope: 'tile', radius: 0 };
+      return { scope: 'single', radius: 0 };
+    };
+    const aimHits = (opt, cell) => out.zombies.filter((z) => {
+      const zc = Math.max(0, Math.min(cols - 1, Math.floor(z.column)));
+      const dx = zc - cell.column;
+      const dy = z.lane - cell.lane;
+      if (opt.scope === 'all') return true;
+      if (opt.scope === 'lane') return dy === 0;
+      if (opt.scope === 'lanes3') return Math.abs(dy) <= 1;
+      if (opt.scope === 'single' || opt.scope === 'tile') {
+        return dy === 0 && dx === 0;
+      }
+      if (opt.scope === 'radius') return Math.hypot(dx, dy) <= opt.radius;
+      if (opt.scope === '1x3') return dy === 0 && Math.abs(dx) <= 1;
+      return Math.abs(dx) <= opt.radius && Math.abs(dy) <= opt.radius;
+    });
+    for (const c of out.cards || []) {
+      const st = stats.plantStatsOf(c.type);
+      if (!st || !st.burst || !(Number(st.burst.dmg) > 0)) continue;
+      const area = st.burst.area || st.area || '';
+      // Explosive 但没有任何范围字段：不猜它是单体还是全屏，宁可不给落点。
+      if (!area && st.family === 'Explosive') continue;
+      const oneShot = (st.shot && st.shot.kind === 'instant')
+        || (st.shot && st.shot.kind === 'aimed')
+        || (st.shot && st.shot.kind === 'area' && area)
+        || (st.usage && st.usage.manual)
+        || (!st.attack && area && Number(st.burst.dmg) >= 100)
+        || (st.shot && st.shot.kind === 'melee' && Number(st.burst.dmg) >= 1000);
+      if (!oneShot) continue;
+      const opt = aimScopeOf(area);
+      const dmg = Number(st.burst.dmg);
+      const cells = [];
+      if (opt.scope === 'all') {
+        cells.push({ lane: null, column: null });
+      } else if (opt.scope === 'lane' || opt.scope === 'lanes3') {
+        for (const lane of [...new Set(out.zombies.map((z) => z.lane))].sort((a, b) => a - b)) {
+          if (opt.scope === 'lane' && !out.zombies.some((z) => z.lane === lane)) continue;
+          cells.push({ lane, column: null });
+        }
+      } else {
+        const seen = new Set();
+        for (const z of out.zombies) {
+          const column = Math.max(0, Math.min(cols - 1, Math.floor(z.column)));
+          const key = `${z.lane}:${column}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          cells.push({ lane: z.lane, column });
+        }
+      }
+      for (const cell of cells) {
+        const allHits = aimHits(opt, cell);
+        // 单体卡只打一只；同格多只时按快照顺序取第一只，只作为几何事实。
+        const hits = opt.scope === 'single' ? allHits.slice(0, 1) : allHits;
+        if (!hits.length) continue;
+        // 已经有植物的格子不能直接种；要换植得用 replace，不在 aimOptions 里假装可种。
+        if (cell.column != null) {
+          const row = out.board[cell.lane];
+          if (row && row.cells && row.cells[cell.column]) continue;
+        }
+        // 土豆雷/地雷有 armTime：僵尸到得太早的落点不算有效选项。
+        if (st.armTimeSec > 0 && cell.column != null) {
+          const minEta = Math.min(...hits.map((z) => {
+            const speed = Number(z.speed) > 0 ? Number(z.speed) : 0.18;
+            return (Number(z.column) - (cell.column + 0.5)) / speed;
+          }));
+          if (!(minEta >= Number(st.armTimeSec) + Number(lead || 0) + 1)) continue;
+        }
+        let total = 0;
+        let kills = 0;
+        let overkill = 0;
+        for (const z of hits) {
+          const ehp = z.ehp != null ? z.ehp : (z.ehpMax || 0);
+          total += dmg;
+          if (dmg >= ehp) {
+            kills += 1;
+            overkill += dmg - ehp;
+          }
+        }
+        aimOptions.push({
+          card: c.type, scope: opt.scope,
+          lane: cell.lane, column: cell.column,
+          hits: hits.length, dmg, total, kills,
+          overkill: Math.round(overkill),
+        });
+      }
+    }
+    out.aimOptions = aimOptions;
+
     const pressure = out.lanes
       .filter((l) => l.gap > 0)
       .sort((a, b) => b.gap - a.gap)
@@ -3697,19 +4701,55 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
         });
       }
     } catch { /* ignore */ }
+    // 保护格的 scope：换关/重开才清空“见过植物”的记录。
+    const protectScope = `${level.source.asset || level.name || ''}#${level.source.number == null ? '' : level.source.number}`;
+    const protectRunStarted = !!(lvl && lvl.gameStarted);
+    if (protectScope !== protectSeenScope || protectScope !== protectKnownScope || !protectRunStarted) {
+      protectSeenScope = protectScope;
+      protectKnownScope = protectScope;
+      protectSeen.clear();
+      protectKnown.clear();
+    }
+    // 保护关有两种判负：被啃死（eat）和碰到就输（contact，如“别让僵尸踩坏鲜花”）。
+    // 这决定布防逻辑（挡/秒杀 vs 拼 DPS），必须显式告诉模型。
+    const protectText = [].concat(missionHints || [], (objective && objective.missions) || []).join(' ');
+    const protectMode = /踩|踏|碰|接触|撞|trample|touch/i.test(protectText) ? 'contact' : 'eat';
     const protectInfo = protectCellsNow.length ? (() => {
-      const plantAt = (lane, col) => (out.plants || []).find((p) => p.lane === lane && p.column === col) || null;
+      const plantAt = (lane, col) => (out.plants || []).find((p) => p.lane === lane && Math.abs(Number(p.column) - col) < 0.75) || null;
       const statsOf = (p) => {
         if (!p) return null;
         try { return stats.plantStatsOf(p.type); } catch { return null; }
       };
       const isWall = (p) => {
         const st = statsOf(p);
-        return !!(st && (st.family === 'Defence' || (st.hp || 0) >= 1000));
+        // 有伤害的“高血量卡”（吸血牛肝菌 4000 血 + 3x3 吸血）不是墙，不能按阻挡位摆后排。
+        return !!(st && (st.family === 'Defence'
+          || ((st.hp || 0) >= 1000 && !(st.attack && Number(st.attack.dps) > 0) && !st.burst)));
       };
       const isMelee = (p) => {
         const st = statsOf(p);
         return !!(st && (st.family === 'Melee' || /接触|接近|前后|3x3/.test(String(st.range || ''))));
+      };
+      // 保护植物本身也要给模型看：是哪张卡、现在多少血、有什么被动/冷却。
+      // 只有坐标的话，模型会把它当成“空格/花盆”，复盘时只能瞎归因（比如怪到向日葵头上）。
+      const plantFacts = (p) => {
+        if (!p) return null;
+        const st = statsOf(p);
+        const props = (st && st.props) || {};
+        const out0 = {
+          type: p.type, name: p.name || p.type, hp: p.hp, maxHp: p.maxHp || null,
+          family: (st && st.family) || p.family || null,
+          brief: (st && st.brief) || null,
+        };
+        if (st && Array.isArray(st.special) && st.special.length) out0.special = st.special.slice(0, 3);
+        const usage = st && st.usage;
+        if (usage && (usage.restSec != null || usage.activation)) {
+          out0.usage = { activation: usage.activation || 'auto' };
+          if (usage.restSec != null) out0.usage.restSec = usage.restSec;
+        }
+        if (props.KnockbackDistance != null) out0.knockback = props.KnockbackDistance;
+        if (props.RestTime != null) out0.restSec = props.RestTime;
+        return out0;
       };
       const cells = protectCellsNow.map((c) => {
         const guards = [];
@@ -3717,24 +4757,74 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
           const cc = c.column + d;
           if (cc >= 0 && cc < cols) guards.push({ lane: c.lane, column: cc });
         }
+        const own = plantAt(c.lane, c.column);
+        const seenKey = `${c.lane}:${c.column}`;
+        let dead = !!c.dead;
+        if (own) {
+          protectSeen.add(seenKey);
+          // 同一格可能也有别的植物，逐个标上 protected，工具层和复盘就不用再猜坐标。
+          own.protected = true;
+        } else if (protectSeen.has(seenKey)) {
+          dead = true;
+        }
+        // 保护判定是“踩踏/接触”时，僵尸走到这一格就直接判负：
+        // 算清楚最前僵尸还有几秒碰到保护格，模型才知道该提前挡还是硬杀。
+        const laneZ = (out.zombies || []).filter((z) => z.lane === c.lane && Number(z.column) > c.column);
+        const frontZ = laneZ.sort((a, b) => Number(a.column) - Number(b.column))[0] || null;
+        const spd = frontZ && Number(frontZ.speed) > 0 ? Number(frontZ.speed) : 0.18;
+        const contactInSec = frontZ ? Math.max(0, Math.round(((Number(frontZ.column) - c.column - 1) / spd) * 10) / 10) : null;
         const front = plantAt(c.lane, c.column + 1);
         const back = plantAt(c.lane, c.column - 1);
         const meleeGuard = [front, back].find((p) => p && isMelee(p)) || null;
         const wallGuard = front && isWall(front) ? front : null;
+        const cellType = own ? own.type : protectTypeMemo.get(`${protectScope}|${c.lane}:${c.column}`) || null;
+        if (protectRunStarted) protectKnown.set(`${c.lane}:${c.column}`, { lane: c.lane, column: c.column, type: cellType });
         return {
-          lane: c.lane, column: c.column, dead: c.dead,
+          lane: c.lane, column: c.column, dead,
           frontColumn: Math.min(cols - 1, c.column + 1),
           guardColumns: guards,
+          // 保护目标本体：类型/血量/技能/冷却；死了之后 plant=null、type 保留最后一次见到的卡。
+          plant: plantFacts(own),
+          type: cellType,
+          // 还有几秒被踩到/被接触到；null = 本行暂时没有更靠右的僵尸。
+          contactInSec,
+          frontZombie: frontZ ? { type: frontZ.type, column: frontZ.column, speed: frontZ.speed } : null,
           wall: wallGuard ? wallGuard.type : null,
           melee: meleeGuard ? meleeGuard.type : null,
           // 地面防线是否已有墙/近战；false 表示这一行还没布防，优先补。
           groundGuarded: !!(wallGuard || meleeGuard),
         };
       });
+      // 本局见过、但现在整个消失的保护格 = 保护植物已经死了（游戏会把格子和植物一起移除）。
+      if (protectRunStarted) {
+        for (const v of protectKnown.values()) {
+          if (cells.some((x) => x.lane === v.lane && x.column === v.column)) continue;
+          cells.push({
+            lane: v.lane, column: v.column, dead: true, missing: true,
+            atLoss: !!(lvl && lvl.gameLost),
+            frontColumn: Math.min(cols - 1, v.column + 1),
+            guardColumns: [],
+            plant: null,
+            type: v.type || null,
+            wall: null, melee: null, groundGuarded: false,
+          });
+        }
+        cells.sort((a, b) => a.lane - b.lane || a.column - b.column);
+      }
+      // 记住最后一个活着的保护植物类型，死亡后仍能说清“死的是弹簧豆”。
+      for (const c of cells) {
+        if (c.plant && c.plant.type) protectTypeMemo.set(`${protectScope}|${c.lane}:${c.column}`, c.plant.type);
+      }
       const airCards = (out.deck || []).filter((t) => t === 'blover' || t === 'lightningreed');
       return {
         count: cells.length,
         dead: cells.filter((c) => c.dead).length,
+        // 判负时游戏可能把所有保护格一起清掉：这种情况不能断言“5/5 全死”，
+        // 只能说明“保护目标被突破”。
+        lossTriggered: !!(lvl && lvl.gameLost),
+        // contact = 碰到即判负（踩坏鲜花）；eat = 被啃到没血才判负。
+        mode: protectMode,
+        types: [...new Set(cells.map((c) => c.type).filter(Boolean))],
         cells,
         unguardedLanes: cells.filter((c) => !c.dead && !c.groundGuarded).map((c) => c.lane),
         airCards,
@@ -3755,14 +4845,37 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
         if (!zs.length) continue;
         const front = zs.reduce((a, b) => (b.column < a.column ? b : a));
         const speed = Number(front.speed) > 0 ? Number(front.speed) : 0.18;
+        // 同格聚集情况：地雷/土豆雷的爆炸按“格”结算，同一格里的多只僵尸
+        // 会被同一次爆炸一起打到。给模型看哪里聚得最多，而不是只盯着最前一只。
+        const tiles = [];
+        for (const z of zs) {
+          const c = Math.max(0, Math.min(cols - 1, Math.floor(Number(z.column))));
+          let t = tiles.find((x) => x.column === c);
+          if (!t) { t = { column: c, count: 0, ehp: 0, types: [] }; tiles.push(t); }
+          t.count += 1;
+          t.ehp += Number(z.ehp != null ? z.ehp : (z.ehpMax || z.hp || 0)) || 0;
+          if (z.type && !t.types.includes(z.type)) t.types.push(z.type);
+        }
+        tiles.sort((a, b) => b.count - a.count || a.column - b.column);
         const row = out.board[lane];
+        // 僵尸到雷格的时间 = 直接走过去的时间 + 路上所有植物的啃食时间。
+        // 这正是“最后把向日葵换雷、靠前面墙/植物拖到雷出土”的算法；只看
+        // (front.column - c)/speed 会把墙前/墙后的雷全判成太晚。
+        const etaTo = (c) => {
+          const direct = (front.column - c) / speed;
+          const hold = (out.plants || []).filter((p) => p.lane === lane
+            && Number(p.column) > c && Number(p.column) <= front.column + 0.5)
+            .reduce((s, p) => s + (p.holdSec != null
+              ? Number(p.holdSec)
+              : (Number(p.hp) || 0) / (Number(front.eatDps) || 100)), 0);
+          return direct + hold;
+        };
         const safe = [];
         for (let c = 0; c < cols; c++) {
           const occupied = row && row.cells && row.cells[c];
           const terr = row && row.terrain && row.terrain[c];
           if (occupied || terr === 'W' || terr === 'S') continue;
-          const eta = (front.column - c) / speed;
-          if (eta >= arm + lead + 1) safe.push(c);
+          if (etaTo(c) >= arm + lead + 1) safe.push(c);
         }
         const latest = safe.length ? Math.max(...safe) : null;
         minePlan.push({
@@ -3772,12 +4885,101 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
           front: { type: front.type, name: front.name, column: front.column, speed },
           latestSafeColumn: latest,
           safeColumns: safe.slice(-5),
-          etaAtLatest: latest == null ? null : Math.round(((front.column - latest) / speed) * 10) / 10,
+          etaAtLatest: latest == null ? null : Math.round(etaTo(latest) * 10) / 10,
           tooLate: latest == null,
+          // 当前每格聚了多少只（按数量降序）：同格多只 = 一次爆炸多杀。
+          tiles: tiles.slice(0, 4).map((t) => ({ column: t.column, count: t.count, ehp: Math.round(t.ehp), types: t.types })),
         });
       }
     }
     const laneCalculations = laneMath({ lanes: out.lanes, zombies: out.zombies });
+
+    // 救场事实：僵尸贴到家门口时，哪几格还能打到它、哪株低价值植物可以铲掉换输出、
+    // 前方植物还能拖几秒、哪些一次性卡/能量豆能覆盖它。只给可执行事实，不替模型做选择。
+    const rescuePlan = [];
+    const rescueWallCard = (out.deck || []).find((t) => isWall(t)) || null;
+    const roleOfPlant = (p) => {
+      if (isSunPlant(p)) return 'economy';
+      if (String(p.family || '') === 'Defence') return 'wall';
+      if (p.atk && Number(p.atk.dps) > 0) return 'output';
+      return 'support';
+    };
+    for (const l of out.lanes) {
+      if (!l.front) continue;
+      const front = l.front;
+      const urgent = (l.actBy != null && l.actBy <= 3)
+        || (l.front.column <= 3)
+        || l.killBeforeWindow === false;
+      if (!urgent) continue;
+      const ps = out.plants.filter((p) => p.lane === l.lane);
+      const cells = [];
+      for (let c = 0; c < cols; c++) {
+        // 输出/墙都必须放在僵尸左侧（column 更小）才打得到/挡得住它。
+        if (c + 0.25 >= front.column) continue;
+        const p = ps.find((x) => x.column === c) || null;
+        cells.push({
+          column: c,
+          occupied: !!p,
+          plant: p ? { type: p.type, role: roleOfPlant(p), hp: p.hp, dps: (p.atk && p.atk.dps) || null, family: p.family } : null,
+        });
+      }
+      const emptyColumns = cells.filter((x) => !x.occupied).map((x) => x.column).sort((a, b) => b - a).slice(0, 3);
+      const replaceCandidates = cells.filter((x) => x.occupied)
+        .sort((a, b) => {
+          const ra = a.plant.role === 'economy' ? 0 : (a.plant.role === 'support' ? 1 : 2);
+          const rb = b.plant.role === 'economy' ? 0 : (b.plant.role === 'support' ? 1 : 2);
+          if (ra !== rb) return ra - rb;
+          return (a.plant.dps || 0) - (b.plant.dps || 0) || b.column - a.column;
+        })
+        .slice(0, 4)
+        .map((x) => ({ lane: l.lane, ...x }));
+      const outputCards = (out.cards || [])
+        .filter((c) => (Number(c.dps) > 0 || Number(c.burstDmg) > 0) && c.type !== rescueWallCard)
+        .map((c) => ({
+          card: c.index, type: c.type, cost: c.cost,
+          dps: c.dps || null, burstDmg: c.burstDmg || null,
+          ready: !!c.ready, affordable: !!c.affordable,
+          // 放在空位/替换低价值植物后，按这一行现有输出粗算击杀这只僵尸的时间。
+          ttkSec: (() => {
+            const gain = Number(c.dps) || 0;
+            const dps = (l.dpsOnFront || 0) + gain;
+            const ehp = Number(front.ehp) || 0;
+            return dps > 0 && ehp > 0 ? Math.round((ehp / dps) * 10) / 10 : null;
+          })(),
+          canHitFrontFrom: emptyColumns.concat(replaceCandidates.map((x) => x.column)),
+        }))
+        .sort((a, b) => (b.dps || b.burstDmg || 0) - (a.dps || a.burstDmg || 0))
+        .slice(0, 4);
+      rescuePlan.push({
+        lane: l.lane,
+        urgency: (l.actBy != null && l.actBy <= 0) || l.front.column <= 1 ? 'critical' : 'high',
+        front,
+        window: {
+          contactInSec: l.contactInSec,
+          holdSec: l.holdSec,
+          killWindowSec: l.killWindowSec,
+          killSec: l.killSec,
+          killBeforeWindow: l.killBeforeWindow,
+          killBeforeHouse: l.killBeforeHouse,
+          projectedHouseSec: l.projectedHouseSec,
+        },
+        frontPlant: l.frontPlant,
+        emptyColumns,
+        replaceCandidates,
+        wallColumns: rescueWallCard ? emptyColumns.concat(replaceCandidates.map((x) => x.column)).slice(0, 4) : [],
+        wallBlockable: !!(rescueWallCard && (emptyColumns.length || replaceCandidates.length)),
+        outputCards,
+        instantCards: (out.cards || []).filter((c) => Number(c.burstDmg) > 0)
+          .map((c) => ({ card: c.index, type: c.type, burstDmg: c.burstDmg, cost: c.cost, ready: !!c.ready, affordable: !!c.affordable }))
+          .slice(0, 4),
+        food: (out.plantFoodPlan || []).filter((f) => f.lane === l.lane).slice(0, 3),
+        wallCard: rescueWallCard,
+      });
+    }
+    rescuePlan.sort((a, b) => (a.urgency === 'critical' ? -1 : 1) - (b.urgency === 'critical' ? -1 : 1)
+      || (a.front.column - b.front.column));
+    const rescueTop = rescuePlan.slice(0, 3);
+
     // 整关威胁类型：不只是场上和接下来两波，而是 levelScript 里所有波次出现过的僵尸。
     // 这样 coverageGaps 才能覆盖整关（例如第 12 波才出现的滚桶/骆驼牌）。
     const levelWaveTypes = [];
@@ -3830,60 +5032,303 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
       unblockedLanes: out.lanes.filter((l) => !(l.tombColumns && l.tombColumns.length)).map((l) => l.lane),
     };
     // 墙的“还能撑多久 / 下一张墙什么时候好”，本地算好，避免一口气连发多张 20s 冷却的墙。
-    // 支撑时间按该行所有僵尸的总啃食 DPS 算（多只叠在一起时不是只看最前一只）。
-    const wallCardOf = (out.deck || []).find((t) => /wallnut|tallnut|peanut|endurian|holonut/i.test(t)) || null;
+    // 支撑时间只算“已经贴住这面墙”的僵尸总啃食 DPS；同行远处僵尸没碰到墙，不能算进去。
+    const wallCardOf = (out.deck || []).find((t) => isWall(t)) || null;
     const wallCardState = wallCardOf ? (out.cards || []).find((c) => c.type === wallCardOf) : null;
     const wallCardStats = wallCardOf ? plantStats(wallCardOf) : null;
     const wallBaseCd = (wallCardStats && Number(wallCardStats.cd)) || null;
     const wallPlan = out.lanes.map((l) => {
       const zs = out.zombies.filter((z) => z.lane === l.lane).sort((a, b) => a.column - b.column);
       const front = zs[0] || null;
-      const eaters = [];
-      for (const z of zs) {
-        let dps = null;
-        try {
-          const zst = stats.zombieStatsOf(z.type);
-          if (zst && Number(zst.eatDps) > 0) dps = Number(zst.eatDps);
-        } catch { /* ignore */ }
-        if (dps != null) eaters.push({ type: z.type, column: z.column, eatDps: dps });
-      }
-      const survival = wallSurvive({ wallHp: l.wallHp, eatDps: eaters.map((e) => e.eatDps) });
+      const walls = (l.wallCells || []).slice().sort((a, b) => b.column - a.column);
+      // 只有僵尸左侧（column 更小）的墙才在它前进路径上；它右侧的墙已经被越过了。
+      const frontWall = front ? walls.find((w) => w.column + 0.5 < front.column) || null : (walls[0] || null);
+      const eaters = frontWall
+        ? zs.filter((z) => z.column >= frontWall.column - 0.3 && z.column <= frontWall.column + 1.1)
+        : [];
+      const survival = wallSurvive({
+        wallHp: frontWall ? frontWall.hp : 0,
+        eatDps: eaters.map((z) => (Number(z.eatDps) > 0 ? Number(z.eatDps) : 100)),
+      });
       const frontEta = front ? Math.round((front.column / (front.speed > 0 ? front.speed : 0.18)) * 10) / 10 : null;
+      const wallEta = frontWall && front
+        ? Math.max(0, Math.round(((front.column - (frontWall.column + 0.5)) / (front.speed > 0 ? front.speed : 0.18)) * 10) / 10)
+        : null;
+      const risk = !front ? 'ok'
+        : !frontWall ? 'no_wall'
+          : (survival.surviveSec != null && l.killSec != null && survival.surviveSec < l.killSec ? 'wall_too_thin' : 'ok');
       return {
         lane: l.lane,
-        wallHp: l.wallHp,
-        wallType: (l.wallCells && l.wallCells[0] && l.wallCells[0].type) || null,
+        wallHp: frontWall ? frontWall.hp : 0,
+        wallType: frontWall ? frontWall.type : null,
+        wallBehind: !frontWall && walls.length > 0,
         frontType: front ? front.type : null,
         frontColumn: front ? front.column : null,
         frontEta,
+        wallEta,
         eatDps: survival.totalEatDps,
         eaters: eaters.length,
         wallSurviveSec: survival.surviveSec,
+        killSec: l.killSec,
+        risk,
         wallCard: wallCardOf,
         wallCd: wallCardState ? wallCardState.cd : null,
         wallBaseCd,
-        risk: !l.wallHp && front ? 'no_wall' : (survival.surviveSec != null && frontEta != null && survival.surviveSec < frontEta ? 'wall_too_thin' : 'ok'),
       };
     });
     const wallRebuild = wallRebuildPlan({ wallPlan, leadSec: lead });
+    // 旗帜波/波次计数结束 != 关卡结束：场上还有僵尸就是残敌。
+    // 这组事实用来阻止模型在空行继续按旧计划补墙/输出。
+    const waveTotal = out.level.waves;
+    const activeLanes = [...new Set((out.zombies || []).map((z) => Number(z.lane)).filter(Number.isFinite))]
+      .sort((a, b) => a - b);
+    const idleLanes = out.lanes.filter((l) => !(l.zombies > 0)).map((l) => l.lane);
+    const residualEhp = Math.round((out.zombies || []).reduce((s, z) => s + (z.ehp != null ? z.ehp : (z.ehpMax || 0)), 0));
+    const residual = out.zombies && out.zombies.length ? {
+      count: out.zombies.length,
+      lanes: activeLanes,
+      ehp: residualEhp,
+      front: out.zombies.reduce((a, b) => (b.column < a.column ? b : a), out.zombies[0]),
+    } : null;
+    // 卡效对比：把“单体 dps”和“多目标 multiDps”的差距、每阳光收益摊开。
+    // 不排序推荐，也不替模型选卡；只让“同线多只僵尸时多目标卡更值”变成可算的事实。
+    const cardEfficiency = (out.cards || [])
+      .filter((c) => Number(c.dps) > 0 || Number(c.multiDps) > 0)
+      .map((c) => {
+        let st = null;
+        try { st = stats.plantStatsOf(c.type); } catch { st = null; }
+        const dps = Number(c.dps) || 0;
+        const multi = Number(c.multiDps) || dps;
+        const cost = Number(c.cost) || 0;
+        return {
+          card: c.type,
+          cost,
+          dps,
+          targets: Number(c.targets) || 1,
+          multiDps: Math.round(multi * 10) / 10,
+          dpsPerSun: cost ? Math.round((dps / cost) * 1000) / 1000 : null,
+          multiDpsPerSun: cost ? Math.round((multi / cost) * 1000) / 1000 : null,
+          shot: (st && st.shot && st.shot.kind) || null,
+          overObstacle: !!(st && st.shot && st.shot.overObstacle),
+          blockedByStraightBlocker: !!(st && st.shot && st.shot.blockedByStraightBlocker),
+        };
+      });
+    // 同格升级事实：这一行已经有 2 株以上单体输出、且同线僵尸≥2 时，
+    // 列出“可换的多目标卡”和最低价值的可换格。换植不返还阳光，成本和冷却由模型自己算。
+    const upgradePlan = [];
+    for (const l of out.lanes) {
+      if (!(Number(l.zombies) >= 2)) continue;
+      const outs = (out.plants || [])
+        .filter((p) => p.lane === l.lane && p.atk && Number(p.atk.dps) > 0)
+        .sort((a, b) => Number(a.atk.dps) - Number(b.atk.dps));
+      if (!outs.length) continue;
+      // 后期/阳光富余时，后排向日葵也是“可换输出”的格子：一路的 dps 不够时，
+      // 不是只在已有输出里换更强的，而是把经济位也转成输出。
+      const sunAbundant = Number(out.sun) >= 300
+        || (waveTotal != null && waveNow >= waveTotal - 1);
+      const econ = (out.plants || [])
+        .filter((p) => p.lane === l.lane && isSunPlant(p) && Number(p.column) <= 3)
+        .sort((a, b) => Number(a.column) - Number(b.column));
+      const replaceBase = (sunAbundant && econ.length)
+        ? [...econ.map((p) => ({ p, role: 'economy' })), ...outs.map((p) => ({ p, role: 'output' }))]
+        : outs.map((p) => ({ p, role: 'output' }));
+      if (replaceBase.length < 2) continue;
+      const candidates = (out.cards || [])
+        .filter((c) => c.ready && c.affordable && Number(c.multiDps) > 0
+          && Number(c.multiDps) > Number(c.dps) * 1.8)
+        .map((c) => {
+          let st = null;
+          try { st = stats.plantStatsOf(c.type); } catch { st = null; }
+          const blocked = (obstacles || [])
+            .filter((o) => o && Number(o.lane) === l.lane && o.blocksStraightShot !== false)
+            .map((o) => ({ column: o.column, hp: o.hp }));
+          const straight = !!(st && st.shot && String(st.shot.kind) === 'straight');
+          // 直线弹道只被“目标格右侧”的障碍挡住；左边的墓碑不影响。
+          const usable = replaceBase.filter(({ p }) => !straight
+            || !blocked.some((o) => Number(o.column) > Number(p.column)));
+          if (!usable.length) return null;
+          return {
+            card: c.type,
+            cost: c.cost,
+            dps: c.dps,
+            targets: c.targets || 1,
+            multiDps: c.multiDps,
+            shot: (st && st.shot && st.shot.kind) || null,
+            // 这些格子已经有植物：要换只能 replace（先铲后种），不是再 plant 一株。
+            use: 'replace',
+            blockedBy: straight && blocked.length ? blocked : undefined,
+            replaceCells: usable.slice(0, 3).map(({ p, role }) => ({
+              column: p.column, type: p.type, dps: (p.atk && p.atk.dps) || 0, role,
+            })),
+          };
+        })
+        .filter((c) => c && c.replaceCells.length)
+        .sort((a, b) => (b.multiDps / (b.cost || 1)) - (a.multiDps / (a.cost || 1)))
+        .slice(0, 2);
+      if (!candidates.length) continue;
+      upgradePlan.push({
+        lane: l.lane,
+        zombies: l.zombies,
+        outputs: outs.length,
+        outputDps: Math.round(outs.reduce((s, p) => s + Number(p.atk.dps || 0), 0) * 10) / 10,
+        laneEhp: l.ehp,
+        clearSec: l.clearSec,
+        sunAbundant,
+        economyCells: econ.map((p) => ({ column: p.column, type: p.type })),
+        candidates,
+      });
+    }
+    // 每行还差多少输出：用“本行总 EHP / 可用时间”算需要的 dps，
+    // 再减去当前有效 dps。不是只看最前一只，也不只是“补一株就够”。
+    const capacityGaps = [];
+    for (const l of out.lanes) {
+      const laneEhp = Number(l.ehp) || 0;
+      const laneDps = Number(l.dpsEffective) || 0;
+      if (!(l.zombies > 0) || !(laneEhp > 0) || l.lossIn == null) continue;
+      const nextIn = Number(out.level && out.level.nextWaveIn);
+      const budgetSec = Math.max(3, Math.min(Number(l.lossIn) || 30,
+        Number.isFinite(nextIn) && nextIn > 0 ? nextIn : (Number(l.lossIn) || 30)));
+      const neededDps = Math.round((laneEhp / budgetSec) * 10) / 10;
+      const missingDps = Math.round((neededDps - laneDps) * 10) / 10;
+      if (!(missingDps > 0)) continue;
+      const row = out.board && out.board[l.lane];
+      const empties = [];
+      if (row && Array.isArray(row.cells)) {
+        for (let c = 0; c < row.cells.length; c++) if (!row.cells[c]) empties.push(c);
+      }
+      const frontCol = l.front ? Number(l.front.column) : 99;
+      const addCells = empties.filter((c) => c <= frontCol + 0.5)
+        .sort((a, b) => b - a).slice(0, 3);
+      const economyCells = (out.plants || [])
+        .filter((p) => p.lane === l.lane && isSunPlant(p))
+        .sort((a, b) => a.column - b.column)
+        .slice(0, 2)
+        .map((p) => ({ column: p.column, type: p.type }));
+      capacityGaps.push({
+        lane: l.lane,
+        ehp: laneEhp,
+        dpsEffective: laneDps,
+        clearSec: l.clearSec,
+        lossIn: l.lossIn,
+        budgetSec: Math.round(budgetSec * 10) / 10,
+        neededDps,
+        missingDps,
+        addCells,
+        economyCells,
+        note: `按 ${Math.round(budgetSec * 10) / 10}s 内清完本行需要 ${neededDps} dps；当前 ${laneDps}，还差 ${missingDps}。`,
+      });
+    }
+    capacityGaps.sort((a, b) => b.missingDps - a.missingDps);
+    // 最后防线：这一行已经 clearBeforeHouse=false / 输出缺口大时，把后排向日葵
+    // 换成雷也来得及——前提是前面的墙/植物能拖到雷出土。minePlan 已经把这些
+    // 阻挡物的啃食时间算进 safeColumns，所以这里直接交叉引用，不再只看直接距离。
+    const lastResortPlan = [];
+    for (const l of out.lanes) {
+      if (!l.front || l.lossIn == null) continue;
+      const gap = capacityGaps.find((g) => g.lane === l.lane);
+      const falling = l.clearBeforeHouse === false
+        || !!(gap && Number(gap.missingDps) >= 20);
+      if (!falling) continue;
+      const mine = minePlan.find((m) => m && Number(m.lane) === Number(l.lane));
+      if (!mine) continue;
+      const front = l.front;
+      const speed = Number(front.speed) > 0 ? Number(front.speed) : 0.18;
+      const suns = (out.plants || [])
+        .filter((p) => p.lane === l.lane && isSunPlant(p) && Number(p.column) <= 3)
+        .sort((a, b) => Number(a.column) - Number(b.column));
+      for (const s of suns) {
+        // 换植格本身可能被向日葵占着，minePlan 只列空格；这里单独算
+        // “僵尸走到这个太阳花格”的时间，并把路上所有植物的啃食时间加进去。
+        const hold = (out.plants || []).filter((p) => p.lane === l.lane
+          && Number(p.column) > Number(s.column) && Number(p.column) <= Number(front.column) + 0.5)
+          .reduce((sum, p) => sum + (p.holdSec != null
+            ? Number(p.holdSec)
+            : (Number(p.hp) || 0) / (Number(front.eatDps) || 100)), 0);
+        const eta = (Number(front.column) - Number(s.column)) / speed + hold;
+        if (!(eta >= Number(mine.armTimeSec) + 1)) continue;
+        lastResortPlan.push({
+          lane: l.lane,
+          replaceCell: { column: s.column, type: s.type },
+          mine: mine.card,
+          armTimeSec: mine.armTimeSec,
+          latestSafeColumn: mine.latestSafeColumn,
+          etaSec: Math.round(eta * 10) / 10,
+          frontColumn: l.front.column,
+          lossIn: l.lossIn,
+          clearSec: l.clearSec,
+          tiles: mine.tiles,
+          note: `本行 clearSec ${l.clearSec}s > lossIn ${l.lossIn}s；前面的墙/植物还能拖 ${Math.round(hold)}s，把 ${s.type} @c${s.column} 换 ${mine.card}，雷约 ${Math.round(eta)}s 后到达（需 ${mine.armTimeSec}s）。`,
+        });
+        break;
+      }
+    }
+    // 数据交叉校验汇总：deck 植物和场上僵尸的解析值 vs 原始字段。
+    // 只在有 issue 时才带样本；正常情况下这里接近 0 成本。
+    const dataChecks = { plants: 0, zombies: 0, issues: 0, samples: [] };
+    const addChecks = (kind, type, checks) => {
+      if (!checks || !Array.isArray(checks.issues) || !checks.issues.length) return;
+      dataChecks.issues += checks.issues.length;
+      for (const it of checks.issues.slice(0, 2)) {
+        if (dataChecks.samples.length >= 8) break;
+        dataChecks.samples.push({ kind, type, ...it });
+      }
+    };
+    for (const type of [...new Set(out.deck || [])]) {
+      let st = null;
+      try { st = stats.plantStatsOf(type); } catch { st = null; }
+      if (!st) continue;
+      dataChecks.plants += 1;
+      addChecks('plant', type, st.checks);
+    }
+    for (const type of [...new Set((out.zombies || []).map((z) => z.type))]) {
+      let zs = null;
+      try { zs = stats.zombieStatsOf(type); } catch { zs = null; }
+      if (!zs) continue;
+      dataChecks.zombies += 1;
+      addChecks('zombie', type, zs.checks);
+    }
+    // 植物 × 当前僵尸的配对事实：护甲、免疫、直线遮挡、单/多目标 TTK。
+    const matchupList = buildMatchups(
+      out.deck || [],
+      (out.zombies || []).map((z) => z.type),
+      (t) => { try { return stats.plantStatsOf(t); } catch { return null; } },
+      (t) => { try { return stats.zombieStatsOf(t); } catch { return null; } },
+      { budgetSec: 20 },
+    ).filter((m) => m && m.verdict !== 'no_damage')
+      .sort((a, b) => (a.verdict === 'good' ? -1 : 0) - (b.verdict === 'good' ? -1 : 0)
+        || (a.singleTtk == null ? 999 : a.singleTtk) - (b.singleTtk == null ? 999 : b.singleTtk))
+      .slice(0, 10);
+
     out.brief = {
       leadSec: lead,
       totalDps,
       sunRate,
       wave: {
-        now: waveNow, total: out.level.waves,
+        now: waveNow, total: waveTotal,
         etaSec: waveEta == null ? null : Math.round(waveEta * 10) / 10,
         basis: waveBasis,
         flag: !!(waveFc && waveFc.flag),
+        done: !!(waveTotal != null && waveNow >= waveTotal),
+        residual: residual ? { count: residual.count, lanes: residual.lanes, ehp: residual.ehp } : null,
       },
+      activeLanes,
+      idleLanes,
+      residual,
       incoming,
       pressure,
       safeLanes: out.lanes.filter((l) => !(l.gap > 0)).map((l) => l.lane),
       airRaid: airRaid.length ? { count: airRaid.length, cells: airRaid } : null,
       minePlan,
+      rescuePlan: rescueTop,
       laneMath: laneCalculations,
       counterMatrix: counterCalculations,
       deckCapabilities: deckCaps.byCapability,
+      cardEfficiency: cardEfficiency.length ? cardEfficiency : undefined,
+      upgradePlan: upgradePlan.length ? upgradePlan : undefined,
+      dataChecks: dataChecks.issues ? dataChecks : undefined,
+      matchups: matchupList.length ? matchupList : undefined,
+      capacityGaps: capacityGaps.length ? capacityGaps.slice(0, 3) : undefined,
+      lastResortPlan: lastResortPlan.length ? lastResortPlan.slice(0, 3) : undefined,
       coverageGaps,
       tomb,
       wallPlan,
@@ -3892,10 +5337,15 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
       // 本地算好的两个“值不值”：模型不用自己数格子/比列号
       plantFoodPlan: out.plantFoodPlan,
       activatePlan: out.activatePlan,
+      aimOptions: aimOptions.length ? aimOptions : undefined,
     };
 
     out.latency = latency ? latency.state() : null;
-    out.protectCells = protectCellsNow;
+    // 保护格对外统一用“带本体”的版本：坐标 + plant(type/name/hp/brief/restSec) + dead。
+    // 只有坐标时，模型和复盘都会把保护目标当成空格，把失败归因到别的植物。
+    out.protectCells = (protectInfo && protectInfo.cells && protectInfo.cells.length)
+      ? protectInfo.cells
+      : protectCellsNow;
 
     // 最近 15 秒被判 CELL_BLOCKED 的格子
     try {
@@ -3960,6 +5410,15 @@ function createSnapshotReader({ getCc, findCompByClass, stats, latency = null, v
     out.limits.plantsPlanted = out.plants.length;
     out.limits.plantsLeft = limit != null ? Math.max(0, limit - out.plants.length) : null;
     out.plantFoodUsable = out.plants.filter((p) => p.foodable).length;
+
+    // 队列任务用来判断“是不是换关/换模式了”：不包含 phase/wave，
+    // 否则开局前写的任务会在 preparing→running 的瞬间全部被判 STALE_ACTION。
+    // 时间敏感由 validForSec/deadline 负责。
+    out.stateVersion = versionHash([
+      (out.level && (out.level.name || out.level.assetName)) || '',
+      (out.prep && out.prep.mode) || '',
+      (out.prep && out.prep.conveyor) ? 'conveyor' : 'normal',
+    ].join('|'));
 
     // 每回合都发的精简版不带 zombieStats（完整数值 + 标签只在 pvz_briefing 里给）
     if (!full) delete out.zombieStats;
@@ -4030,9 +5489,39 @@ function nearestZombieCol(C, lane) {
   } catch { return null; }
 }
 
-function createActions({ getCc, findComps, findCompByClass, stats, reader, version }) {
+function createActions({ getCc, findComps, findCompByClass, stats, reader, version, getPlan, getLevelKey }) {
+  const isWallType = (type) => {
+    try { return isWallCard(type, stats.plantStatsOf(type)); } catch { return isWallCard(type, null); }
+  };
   function fail(code, extra, reason) {
     return { ok: false, code, reason: reason || code, ...(extra || {}) };
+  }
+
+  // 传送带：当前带上的卡在 Conveyor.getCards()，不在 Cards.CFs。
+  // 关卡 JSON 里有 Conveyor 模块时也算（组件还没初始化时，至少模式判断正确）。
+  function conveyorInfo(map, cards) {
+    const cv = map && (map.Conveyor || map.ConveyorBelt || null);
+    let ls = null;
+    try { ls = map && map.levelController ? stats.levelScriptOf(map.levelController) : null; } catch { ls = null; }
+    const fromLevel = !!(ls && ls.seedBank && ls.seedBank.conveyor);
+    if (!cv && !fromLevel) return null;
+    let list = [];
+    let slots = [];
+    let plantList = [];
+    try {
+      if (cv) {
+        list = (typeof cv.getCards === 'function' ? cv.getCards() : []) || [];
+        slots = [].concat(cv.lane1slots || [], cv.lane2slots || [], cv.laneVertslots || []).filter(Boolean);
+        plantList = (Array.isArray(cv.plantList) ? cv.plantList : [])
+          .map((p) => cleanType(p && (p.PlantType || p.Type) || p)).filter(Boolean);
+      }
+    } catch { /* ignore */ }
+    const cardCount = cards && Array.isArray(cards.CFs) ? cards.CFs.length : 0;
+    const enabled = cv
+      ? (list.length > 0 || plantList.length > 0 || cardCount === 0)
+      : (fromLevel && cardCount === 0);
+    if (!enabled) return null;
+    return { cv, cards: list, slots, plantList, enabled: true };
   }
 
   function deckStatus() {
@@ -4045,13 +5534,17 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     const slots = cards.maxSlotCount || 0;
     const current = (cards.CFs || []).filter(Boolean).map((c) => cleanType(c.Type));
     const seed = cards.seedChooser;
-    const conveyor = !!(cards.conveyor || (lvl && lvl.conveyorMode));
+    const cinfo = conveyorInfo(ctxg.map, cards);
+    const conveyor = !!(cinfo && cinfo.enabled) || !!(cards.conveyor || (lvl && lvl.conveyorMode));
     return {
       ok: true,
       phase: phaseState.phase,
       gameStarted: !!cards.gameStarted,
       prepReady: !!(seed && slots > 0),
       conveyor,
+      conveyorCards: cinfo && cinfo.enabled
+        ? cinfo.cards.map((cf, i) => ({ index: i, type: cleanType(cf.Type), name: (stats.plantStatsOf(cleanType(cf.Type)) || {}).name || cleanType(cf.Type) }))
+        : [],
       slots,
       current,
       gameStartable: typeof cards.GameStartable === 'function' ? !!cards.GameStartable() : null,
@@ -4126,7 +5619,8 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
       if (phaseNow === 'objective') return fail('PREP_NOT_READY', { phase: phaseNow, retryable: true }, '任务弹窗还没关闭，再试一次');
     }
     if (phaseNow === 'running' || phaseNow === 'won' || phaseNow === 'lost') return fail('ALREADY_STARTED', { phase: phaseNow });
-    if (cards.conveyor || (lvl && lvl.conveyorMode)) {
+    const cinfo = conveyorInfo(ctxg.map, cards);
+    if ((cinfo && cinfo.enabled) || cards.conveyor || (lvl && lvl.conveyorMode)) {
       return { ok: true, conveyor: true, slots: 0, requested: [], applied: [], skipped: [], missing: [], actualDeck: [], full: true, detail: '传送带关卡无需选卡' };
     }
     // 给定/锁定卡组：卡槽已满且没有可选卡（或全部锁定）。不要清空、不要报“缺卡”，原样返回。
@@ -4136,12 +5630,16 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     const seedUnlocked = cards.seedChooser && Array.isArray(cards.seedChooser.CFs)
       ? cards.seedChooser.CFs.filter((cf) => cf && cf.Type && !(cf.ca && (cf.ca.locked || cf.ca.disallowed))).length
       : 0;
-    if (slotsNow > 0 && currentNow.length >= slotsNow && (lockedNow >= slotsNow || seedUnlocked === 0)) {
+    const noChooser = !cards.seedChooser;
+    const forcedFlag = !!(cards.forcedDeck || cards.deckLocked || cards.presetDeck)
+      || !!(lvl && (lvl.forcedDeck || lvl.deckLocked || lvl.presetDeck || lvl.givenDeck));
+    if (forcedFlag || (currentNow.length > 0 && (noChooser || (slotsNow > 0 && currentNow.length >= slotsNow && (lockedNow >= slotsNow || seedUnlocked === 0))))) {
       return {
         ok: true, forced: true, deckLocked: true, slots: slotsNow,
         requested: Array.isArray(requested) ? requested : [], applied: [], skipped: [], missing: [],
         actualDeck: currentNow, full: true,
-        detail: '本关卡组由系统给定/锁定，无需也不能换卡；直接 pvz_start_level',
+        mustPlanBeforeStart: true,
+        detail: '本关卡组由系统给定/锁定，无需也不能换卡；先 pvz_briefing + pvz_set_plan，再 pvz_start_level',
       };
     }
     if (!cards.seedChooser) return fail('PREP_NOT_READY', { retryable: true }, '选卡界面还没准备好');
@@ -4286,28 +5784,86 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     };
   }
 
+  // 提前布阵关的“开始！”按钮在不同版本里可能是节点，而不是 lvl 方法。
+  function clickSceneNode(scene, names) {
+    const wanted = names.map((x) => String(x).toLowerCase());
+    let hit = null;
+    const walk = (n) => {
+      if (hit || !n) return;
+      const name = String(n.name || '').toLowerCase();
+      if (wanted.includes(name)) { hit = n; return; }
+      for (const ch of n.children || []) { walk(ch); if (hit) return; }
+    };
+    try { walk(scene); } catch { return false; }
+    if (!hit) return false;
+    for (const method of ['emit', 'click', 'onClick', 'trigger']) {
+      try {
+        if (typeof hit[method] !== 'function') continue;
+        if (method === 'emit') hit.emit('click');
+        else hit[method]();
+        return true;
+      } catch { /* try next */ }
+    }
+    return false;
+  }
+
   async function startLevel() {
     const ctxg = findComps();
     if (!ctxg) return fail('NO_SCENE');
     const cards = ctxg.map.Cards;
     const lvl = ctxg.map.levelController;
-    if (!lvl || typeof lvl.letsRock !== 'function') return fail('NO_SCENE', {}, '当前场景无法开局');
+    if (!lvl) return fail('NO_SCENE', {}, '当前场景无法开局');
     if (lvl.gameStarted) return { ok: true, detail: '已经在战斗中', started: true };
-    if (cards && cards.seedChooser && !lvl.lastStandPrepareStarted) {
+    const prep = (() => { try { return reader.snapshot().prep; } catch { return null; } })();
+    // 给定卡组 / 提前布阵必须先把整关波次和对策写进计划，再允许点开始。
+    // 这不是替模型决策：只要求“先想再开局”，计划内容仍完全由模型写。
+    if (prep && prep.mustPlanBeforeStart) {
+      const p = typeof getPlan === 'function' ? getPlan() : null;
+      let levelKey = null;
+      try { levelKey = typeof getLevelKey === 'function' ? getLevelKey() : null; } catch { levelKey = null; }
+      const stale = !!(p && p.plan && levelKey && p.plan.levelKey && p.plan.levelKey !== levelKey);
+      if (!p || !p.plan || !String(p.plan.text || '').trim() || stale) {
+        return fail('NEED_PLAN', {
+          prep,
+          stalePlan: stale || undefined,
+          hint: stale
+            ? '这份计划是上一关的；先针对本关重新 pvz_briefing + pvz_set_plan，再开局。'
+            : '先用 pvz_briefing 读完整关波次/卡组/克制，再用 pvz_set_plan 写下对策（text + lanes/counters/phases），然后才能 pvz_start_level。',
+        }, stale ? '计划属于上一关，需要按本关事实重写' : '还没有作战计划：先想清楚卡组对策再开局');
+      }
+    }
+    const cinfoStart = conveyorInfo(ctxg.map, cards);
+    const conveyorStart = !!(cinfoStart && cinfoStart.enabled);
+    if (!conveyorStart && cards && cards.seedChooser && !(prep && prep.preplant)) {
       if (typeof cards.GameStartable === 'function' && !cards.GameStartable()) {
         const current = (cards.CFs || []).filter(Boolean).map((c) => cleanType(c.Type));
         return fail('DECK_NOT_FULL', { current, slots: cards.maxSlotCount || 0 }, `卡组还没选满（${current.length}/${cards.maxSlotCount || 0}）`);
       }
     }
-    if (lvl.lastStandPrepareStarted && !lvl.gameStarted && typeof lvl.startReadySet === 'function') {
-      try { lvl.startReadySet(); return { ok: true, detail: '开始了提前布阵', started: true }; } catch (e) { return fail('START_FAILED', {}, String(e && e.message || e)); }
+    if (prep && prep.preplant) {
+      // 不同版本的方法名：startReadySet / readySetPlant / startGame。
+      for (const method of ['startReadySet', 'readySetPlant', 'startGame']) {
+        try {
+          if (typeof lvl[method] !== 'function') continue;
+          lvl[method]();
+          return { ok: true, detail: `开始了提前布阵（${method}）`, started: true };
+        } catch { /* try next */ }
+      }
+      if (clickSceneNode(ctxg.scene, ['LastStandStartButton', 'StartReadyButton', 'StartButton', 'ReadyButton'])) {
+        return { ok: true, detail: '已点击提前布阵“开始！”按钮', started: true };
+      }
+    }
+    if (typeof lvl.letsRock !== 'function') {
+      return fail('START_UNSUPPORTED', { prep }, '当前关卡没有 letsRock / 提前布阵开始入口');
     }
     try {
       lvl.letsRock();
       return { ok: true, detail: '已开局', started: true };
     } catch (e) {
       // 传送带关的 letsRock 可能在隐藏种子栏 UI 时抛错，但战斗已经启动；交给上层用 phase 复核。
-      return fail('START_FAILED', { started: !!(lvl.letsRocked || lvl.gameStarted || (cards && cards.gameStarted)) }, String(e && e.message || e));
+      const started = !!(lvl.letsRocked || lvl.gameStarted || (cards && cards.gameStarted));
+      if (started) return { ok: true, detail: '已开局（启动时 UI 有非致命异常）', started: true, warning: String(e && e.message || e) };
+      return fail('START_FAILED', { started }, String(e && e.message || e));
     }
   }
 
@@ -4378,11 +5934,11 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
 
   // 同行还能种的空格（按离目标列的距离排序）：占用/不可种时直接给候选，
   // 省掉"撞一次错误、再想一轮"的往返。
-  function emptyCellsInLane(C, lane, wantColumn, cf, limit = 3) {
+  function emptyCellsInLane(C, lane, wantColumn, cf, limit = 3, excludeColumn = wantColumn) {
     const cols = C.ColumnCount || 9;
     const out = [];
     for (let c = 0; c < cols; c++) {
-      if (c === wantColumn) continue;
+      if (c === excludeColumn) continue;
       const cell = C.getLnC(lane, c);
       if (!cell) continue;
       try { if (reader.cellPlants(cell).length) continue; } catch { continue; }
@@ -4391,6 +5947,54 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
       if (ok) out.push({ lane, column: c });
     }
     out.sort((a, b) => Math.abs(a.column - wantColumn) - Math.abs(b.column - wantColumn));
+    return out.slice(0, limit);
+  }
+
+  /**
+   * 僵尸还在“左边/前面”的空格：墙必须种在这僵尸的左侧（column 更小），
+   * 否则僵尸已经走过去，墙只会种在它背后。
+   * 这里用与 WALL_TOO_LATE 相同的 0.25 格提前量，并排除本次目标格，
+   * 避免返回“可改种 c1”但 c1 就是当前格这种死循环。
+   */
+  function emptyCellsInFrontOfZombie(C, lane, zombieColumn, cf, limit = 3, excludeColumn = null) {
+    const cols = C.ColumnCount || 9;
+    const out = [];
+    for (let c = 0; c < cols; c++) {
+      if (c === excludeColumn) continue;
+      if (c + 0.25 >= zombieColumn) continue;
+      const cell = C.getLnC(lane, c);
+      if (!cell) continue;
+      try { if (reader.cellPlants(cell).length) continue; } catch { continue; }
+      let ok = true;
+      try { ok = cell.putPlantAvailable ? cell.putPlantAvailable(true, cf && cf.ID, true, true, cf && cf.spf) : true; } catch { ok = true; }
+      if (ok) out.push({ lane, column: c });
+    }
+    // 离僵尸最近的可挡位优先（列号越大越靠前）。
+    out.sort((a, b) => b.column - a.column);
+    return out.slice(0, limit);
+  }
+
+  /** 僵尸前方、已被占用的格子；给 WALL_TOO_LATE 提供“可 replace 哪个植物”。 */
+  function occupiedCellsInFrontOfZombie(C, lane, zombieColumn, excludeColumn = null, limit = 3) {
+    const cols = C.ColumnCount || 9;
+    const out = [];
+    for (let c = 0; c < cols; c++) {
+      if (c === excludeColumn || c + 0.25 >= zombieColumn) continue;
+      const cell = C.getLnC(lane, c);
+      if (!cell) continue;
+      const plants = reader.cellPlants(cell);
+      if (!plants.length) continue;
+      const type = cleanType(plants[0] && plants[0].Plant_Type);
+      let st = null;
+      try { st = stats.plantStatsOf(type); } catch { st = null; }
+      out.push({
+        lane, column: c, type,
+        family: (st && st.family) || null,
+        hp: Math.round((plants[0] && (plants[0].health || plants[0].toughness)) || 0),
+        dps: (st && st.attack && st.attack.dps) || null,
+      });
+    }
+    out.sort((a, b) => b.column - a.column);
     return out.slice(0, limit);
   }
 
@@ -4422,7 +6026,8 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     const out = [];
     const seen = new Set();
     for (const p of protectCells) {
-      for (const d of [1, 0, -1]) {
+      // d=0 是保护格本身，永远不能当“守卫格”推荐出去。
+      for (const d of [1, -1]) {
         const column = p.column + d;
         if (column < 0 || column >= cols || seen.has(column)) continue;
         seen.add(column);
@@ -4446,9 +6051,7 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
       try { ps = reader.cellPlants(cell) || []; } catch { ps = []; }
       for (const p of ps) {
         const t = cleanType(p && p.Plant_Type);
-        let st = null;
-        try { st = stats.plantStatsOf(t); } catch { st = null; }
-        if (/peanut|tallnut|wallnut|holonut|endurian/i.test(t) || (st && String(st.family || '') === 'Defence')) {
+        if (isWallType(t)) {
           out.push({ column: c, type: t });
         }
       }
@@ -4476,26 +6079,54 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     if (a.type === 'move_cart') return moveCart(a.cart, a.direction);
 
     if (!C) return fail('NO_SCENE');
-    if (!cards) return fail('NO_SCENE', {}, '卡槽还没加载');
+    // 传送带可以没有常规卡槽组件；只要 Conveyor 在就不算“卡槽还没加载”。
+    const preCinfo = conveyorInfo(map, cards);
+    if (!cards && !(preCinfo && preCinfo.enabled)) return fail('NO_SCENE', {}, '卡槽还没加载');
     const cols = C.ColumnCount || 9;
 
     const lane = Number(a.lane), column = Number(a.column);
     if (!Number.isFinite(lane) || !Number.isFinite(column)) return fail('BAD_POSITION');
 
     if (a.type === 'plant' || a.type === 'replace') {
+      const cinfo = conveyorInfo(map, cards);
+      const conveyorMode = !!(cinfo && cinfo.enabled);
       let index = Number(a.card);
-      if (!Number.isFinite(index) && a.plant) {
-        index = (cards.CFs || []).findIndex((cf) => cleanType(cf.Type) === String(a.plant));
+      let cf = null;
+      let conveyorSlot = null;
+      if (conveyorMode) {
+        // 传送带 index 会随带子变化：只要模型给了 codename，就以 codename 为准，
+        // 避免旧的 card 下标在下一轮指到另一张卡。
+        if (a.plant) {
+          index = cinfo.cards.findIndex((x) => cleanType(x && x.Type) === String(a.plant));
+        }
+        cf = Number.isFinite(index) ? cinfo.cards[index] : null;
+        if (!cf) {
+          return fail('NO_CARD', {
+            conveyor: true, card: a.card, plant: a.plant || null,
+            available: cinfo.cards.map((x, i) => ({ index: i, type: cleanType(x && x.Type) })),
+            hint: '传送带卡会变：用本轮 state.cards / state.conveyor.cards 的最新 index，不要沿用上一轮。',
+          }, `传送带当前没有这张卡（现在有 ${cinfo.cards.length} 张）`);
+        }
+        conveyorSlot = cinfo.slots.find((s) => s && s.card === cf) || null;
+        if (!conveyorSlot) {
+          return fail('CARD_UNAVAILABLE', { conveyor: true, card: index, type: cleanType(cf.Type) }, '这张卡已经离开传送带，重新读 state.cards 取最新的卡');
+        }
+      } else {
+        if (!Number.isFinite(index) && a.plant) {
+          index = (cards.CFs || []).findIndex((x) => cleanType(x.Type) === String(a.plant));
+        }
+        cf = cards && cards.CFs && cards.CFs[index];
+        if (!cf) return fail('NO_CARD', { card: a.card, plant: a.plant || null });
       }
-      const cf = cards && cards.CFs && cards.CFs[index];
-      if (!cf) return fail('NO_CARD', { card: a.card, plant: a.plant || null });
       const type = cleanType(cf.Type);
-      const upper = cards.cardsUIUpper && cards.cardsUIUpper[index];
-      const cd = upper ? Math.max(0, +upper.CD || 0) : 0;
-      if (cd > 0) return fail('COOLDOWN', { card: index, type, retryAfter: Math.round(cd * 10) / 10 }, `${type} 冷却中 ${cd.toFixed(1)}s${a.type === 'replace' ? '（铲除本身没有冷却；这里是新卡的种子冷却）' : ''}`);
-      const cost = Number.isFinite(cf.SUNCOST) ? cf.SUNCOST : 0;
-      const sunNow = map.SunCount ? map.SunCount.CurrentValue : null;
-      if (sunNow != null && sunNow < cost && !(cf.ca && cf.ca.free)) return fail('SUN', { card: index, type, need: cost, have: sunNow }, `阳光不足：需要 ${cost}，现有 ${sunNow}`);
+      if (!conveyorMode) {
+        const upper = cards.cardsUIUpper && cards.cardsUIUpper[index];
+        const cd = upper ? Math.max(0, +upper.CD || 0) : 0;
+        if (cd > 0) return fail('COOLDOWN', { card: index, type, retryAfter: Math.round(cd * 10) / 10 }, `${type} 冷却中 ${cd.toFixed(1)}s${a.type === 'replace' ? '（铲除本身没有冷却；这里是新卡的种子冷却）' : ''}`);
+        const cost = Number.isFinite(cf.SUNCOST) ? cf.SUNCOST : 0;
+        const sunNow = map.SunCount ? map.SunCount.CurrentValue : null;
+        if (sunNow != null && sunNow < cost && !(cf.ca && cf.ca.free)) return fail('SUN', { card: index, type, need: cost, have: sunNow }, `阳光不足：需要 ${cost}，现有 ${sunNow}`);
+      }
 
       // 三叶草只对空中单位生效；没有 airborne 目标时种下去就是浪费。
       if (/blover/i.test(type)) {
@@ -4518,14 +6149,20 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
       if (prot.length) {
         const onCell = prot.find((p) => Math.abs(column - p.column) < 0.75);
         if (onCell) {
-          const guardCells = guardCellsFor(C, lane, prot);
-          const cellText = guardCells.length ? guardCells.map((x) => `c${x.column}`).join('/') : '（保护格旁边没有空位）';
-          return fail('PROTECT_CELL_BLOCKED', {
-            lane, column, card: index, type,
-            protectCells: prot.map((p) => ({ lane: p.lane, column: p.column })),
-            guardCells,
-            hint: `c${onCell.column} 本身是必须保护的植物，不能种别的；改种 ${cellText}（左侧远程/右侧墙或近战）。`,
-          }, `${type} 不能种在保护格 c${onCell.column} 上；改种 ${cellText}`);
+          // 保护格不一定是“不能种的格子”：很多关的花是地块装饰，格位本身可以种。
+          // 只有这一格真的有植物实体时才拒绝；否则交给游戏判定（被占会报 OCCUPIED）。
+          let occupied = false;
+          try { occupied = reader.cellPlants(C.getLnC(lane, column)).length > 0; } catch { occupied = false; }
+          if (occupied) {
+            const guardCells = guardCellsFor(C, lane, prot);
+            const cellText = guardCells.length ? guardCells.map((x) => `c${x.column}`).join('/') : '（保护格旁边没有空位）';
+            return fail('PROTECT_CELL_BLOCKED', {
+              lane, column, card: index, type,
+              protectCells: prot.map((p) => ({ lane: p.lane, column: p.column })),
+              guardCells,
+              hint: `c${onCell.column} 上有保护植物实体，不能覆盖；改种 ${cellText}（左侧远程/右侧墙或近战）。`,
+            }, `${type} 不能覆盖保护格 c${onCell.column} 上的植物；改种 ${cellText}`);
+          }
         }
         if (reach != null) {
           const nearest = prot.reduce((best, p) => Math.min(best, Math.abs(column - p.column)), Infinity);
@@ -4542,18 +6179,42 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
             }, `${type} 离保护格 ${nearest} 格，短手够不到；可改种 ${cellText}`);
           }
         }
+        // 墙/高血量肉盾种在保护格左侧（房子侧）= 完全没用：僵尸从右往左来，
+        // 先踩到花才轮到这面墙。吸血牛肝菌这种高血量卡也算“墙”。
+        const tankProbe = (() => { try { return stats.plantStatsOf(type); } catch { return null; } })();
+        const tanky = isWallType(type) || !!(tankProbe && Number(tankProbe.hp) >= 1000
+          && !(tankProbe.attack && Number(tankProbe.attack.dps) > 0) && !tankProbe.burst);
+        const behindCells = prot.filter((p) => column < p.column - 0.25);
+        if (tanky && behindCells.length) {
+          const p = behindCells[0];
+          const frontCol = Math.min(cols - 1, p.column + 1);
+          const guardCells = guardCellsFor(C, lane, prot);
+          const suggest = [frontCol, ...guardCells.map((x) => x.column)].filter((c, i, arr) => arr.indexOf(c) === i && c > p.column);
+          return fail('WALL_BEHIND_PROTECT', {
+            lane, column, card: index, type, protectColumn: p.column,
+            suggestedColumns: suggest,
+            protectCells: prot.map((x) => ({ lane: x.lane, column: x.column })),
+            hint: `${type} 是高血量肉盾，但种在 c${column} 位于保护格 c${p.column} 的左侧（房子侧）：僵尸从右往左走，会先踩/啃到花，这面墙挡不到任何东西。改种保护格右侧 c${suggest.join('/c')}，或者用一次性/远程卡在花前方解决。`,
+          }, `${type} 种在保护格 c${p.column} 左侧挡不到；应种在右侧 c${suggest.join('/c')}`);
+        }
       }
 
       // 输出种在本行墙的右侧（僵尸先啃输出再啃墙）：等于把墙白放了。
       // 输出应放墙左侧；没位置就 replace 墙为输出，再把新墙补到右侧。
       let stType = null;
       try { stType = stats.plantStatsOf(type); } catch { stType = null; }
-      const isWallType = /peanut|tallnut|wallnut|holonut|endurian/i.test(type)
-        || !!(stType && String(stType.family || '') === 'Defence');
+      const isWallPlant = isWallType(type);
       // 地刺类：伤害来自“僵尸走过这一格”，必须种在墙前（右侧），否则僵尸被墙挡住、永远踩不到。
       const isStepDamage = !!(stType && stType.stepDamage);
-      const isOutputType = !!(stType && stType.attack && Number(stType.attack.dps) > 0 && !isWallType && !isStepDamage);
-      if (isStepDamage) {
+      // 土豆雷/地雷虽然被标成 stepDamage（本格），但它是“接触触发的一次性爆炸”，
+      // 不是地刺那种“走过就持续掉血”。雷种在墙后是有效的最后防线：墙拖时间，
+      // 雷在后面出土，僵尸破墙后踩上一起炸。不能按 SPIKE_BEHIND_WALL 拒绝。
+      const isMinePlant = !!(stType && (Number(stType.armTimeSec) > 0 || String(stType.family || '') === 'Explosive'));
+      const isOutputType = !!(stType && stType.attack && Number(stType.attack.dps) > 0 && !isWallPlant && !isStepDamage);
+      // 整行/全屏一次性卡（寒冰辣椒、果冻蔓越莓、火爆辣椒…）的效果与落点无关：
+      // 站在僵尸左边还是右边都能命中，之前按“输出只能打右侧”拒绝，会把救场卡全部挡掉。
+      const rowWideEffect = !!(stType && /整行|本行|一行|全屏|全场|多行/.test(String(stType.area || '')));
+      if (isStepDamage && !isMinePlant) {
         const walls = wallColumnsInLane(C, lane);
         const frontWall = walls.length ? Math.max(...walls.map((w) => w.column)) : null;
         if (frontWall != null && column < frontWall) {
@@ -4620,7 +6281,16 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
             : (alternatives.length ? '这格不能种（墓碑/水面/障碍）；alternatives 是同行可种位' : '这行没有可种的空位'),
         }, `${lane} 行 ${column} 列不能种${emptied ? '（旧植物已铲掉，现在空着）' : ''}${alternatives.length ? `，可改种 ${alternatives.map((x) => `c${x.column}`).join('/')}` : ''}`);
       }
-      if (ui && typeof ui.tryChangingIndex === 'function' && ui.index !== index) {
+      if (conveyorMode) {
+        try {
+          cinfo.cv.chooseCard(cf, conveyorSlot);
+        } catch (e) {
+          return fail('CARD_UNAVAILABLE', { conveyor: true, card: index, type }, `传送带选卡失败：${String(e && e.message || e)}`);
+        }
+        if (ui && ui.currentFreeCF && ui.currentFreeCF !== cf) {
+          return fail('CARD_UNAVAILABLE', { conveyor: true, card: index, type }, '传送带卡没有选中');
+        }
+      } else if (ui && typeof ui.tryChangingIndex === 'function' && ui.index !== index) {
         ui.tryChangingIndex(index);
         // 等种子栏真正切到目标卡，再发起种植；否则 PlaceUIPlant 可能用旧卡。
         await waitFor(() => Number(ui.index) === index, 120);
@@ -4634,14 +6304,47 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
         late: nearZombie <= column + 0.25,
         suggestedColumn,
       };
-      const lateNote = timing && timing.late
-        ? `；⚠ 僵尸已到 c${timing.nearestZombieColumn}，这个落点可能在它身后，下一轮改 c${timing.suggestedColumn} 或往左 1–2 格`
+      const lateNote = timing && timing.late && !rowWideEffect
+        ? `；⚠ 僵尸已到 c${timing.nearestZombieColumn}，这个落点打不到它，只对右侧更远的僵尸有效`
         : '';
+      // 输出种在本行最前僵尸的右侧/同格：它已经走过这一格，而输出只向右打，
+      // 这株现在打不到它。如果目标格右侧也没有别的僵尸，这一株这波就是纯浪费
+      // （扣阳光 + 吃种子冷却），必须在扣资源前拒绝，而不是种下后再警告。
+      if (isOutputType && !rowWideEffect && timing && timing.late) {
+        let rightZombies = [];
+        try {
+          const snap = reader.snapshot();
+          rightZombies = (snap.zombies || []).filter((z) => Number(z.lane) === lane
+            && Number(z.column) > column + 0.25);
+        } catch { rightZombies = []; }
+        if (!rightZombies.length) {
+          const safeCells = emptyCellsInFrontOfZombie(C, lane, nearZombie, cf, 3, column);
+          const replaceCells = occupiedCellsInFrontOfZombie(C, lane, nearZombie, column, 3);
+          const emptyText = safeCells.length ? safeCells.map((x) => `c${x.column}`).join('/c') : null;
+          const replaceText = replaceCells.length
+            ? replaceCells.map((x) => `c${x.column}(${x.type}${x.dps ? ` ${x.dps}dps` : ''})`).join('/')
+            : null;
+          const parts = [];
+          if (emptyText) parts.push(`改种左侧空位 c${emptyText}`);
+          if (replaceText) parts.push(`或 replace ${replaceText} 腾格`);
+          if (!parts.length) parts.push('前方没有可种/可换的格子，改用冰冻/一次性/能量豆，或等这波清完再补');
+          return fail('PLANT_BEHIND_ZOMBIE', {
+            lane,
+            column,
+            type,
+            nearestZombieColumn: timing.nearestZombieColumn,
+            suggestedColumns: safeCells.map((x) => x.column),
+            replaceCells,
+            hint: `僵尸已到 c${timing.nearestZombieColumn}，${type} 种在 c${column} 已经在它身后（输出只向右打，打不到它），目标格右侧也没有别的僵尸；现在种只会白扣阳光和冷却。${parts.join('；')}。`,
+          }, `${type} 落在僵尸 c${timing.nearestZombieColumn} 身后，打不到；先处理这只再补`);
+        }
+      }
       // 土豆雷有出土时间，不是瞬爆：按当前僵尸距离算，来不及就别埋在脸上。
-      if (/potatomine/i.test(type) && stType && Number(stType.armTimeSec) > 0) {
+      if (stType && Number(stType.armTimeSec) > 0 && String(stType.family || '') === 'Explosive') {
         const arm = Number(stType.armTimeSec);
         let minEta = null;
         let closest = null;
+        let planOk = false;
         try {
           const snap = reader.snapshot();
           for (const z of (snap.zombies || [])) {
@@ -4650,17 +6353,51 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
             const eta = (Number(z.column) - column) / speed;
             if (minEta == null || eta < minEta) { minEta = eta; closest = z; }
           }
+          // 本地 minePlan 已经把“路上植物/墙的啃食时间”算进去了；
+          // 它在 safeColumns 里就说明雷能在僵尸到达前出土（哪怕直接距离不够）。
+          const mp = (snap.brief && snap.brief.minePlan || [])
+            .find((m) => m && m.card === type && Number(m.lane) === Number(lane));
+          planOk = !!(mp && Array.isArray(mp.safeColumns) && mp.safeColumns.includes(Number(column)));
         } catch { /* ignore */ }
-        if (minEta != null && minEta < arm + 1) {
-          const needCol = closest ? Math.max(0, Math.floor(Number(closest.column) - arm * 0.2)) : null;
+        if (minEta != null && minEta < arm + 1 && !planOk) {
+          // 安全列：c <= 僵尸列 - (arm+1) × 真实速度。不能用固定 0.2 或
+          // “僵尸列 - 几格”拍脑袋，否则会给到仍然来不及的列。
+          const speed = closest && Number(closest.speed) > 0 ? Number(closest.speed) : 0.18;
+          const latestSafe = closest ? Math.floor(Number(closest.column) - (arm + 1) * speed) : null;
+          const candidates = latestSafe == null ? [] : emptyCellsInLane(C, lane, latestSafe, cf, 6, column)
+            .filter((x) => x.column <= latestSafe)
+            .sort((a, b) => b.column - a.column)
+            .slice(0, 3);
+          const needCol = candidates.length ? candidates[0].column : null;
           return fail('MINE_TOO_LATE', {
             lane, column, type, armTimeSec: arm,
             nearestZombieColumn: closest ? closest.column : null,
+            speed,
             etaSec: Math.round(minEta * 10) / 10,
+            latestSafeColumn: latestSafe,
             suggestedColumn: needCol,
-            hint: `土豆地雷需要 ${arm} 秒出土，按当前僵尸速度只剩 ${Math.round(minEta * 10) / 10} 秒，埋在 c${column} 来不及。改种樱桃/倭瓜，或提前埋到 c${needCol != null ? needCol : '?'} 或更靠左（给足 ${arm} 秒）；不要把地雷种在贴脸僵尸脚下。`,
+            suggestedColumns: candidates.map((x) => x.column),
+            hint: `土豆地雷需要 ${arm} 秒出土，按当前僵尸速度（${speed} 格/秒）只剩 ${Math.round(minEta * 10) / 10} 秒，埋在 c${column} 来不及。按计算最晚安全列是 c${latestSafe != null ? latestSafe : '?'}；${needCol != null ? `可提前埋到 c${needCol} 或更靠左` : '前方没有空位，改用樱桃/倭瓜/冰冻等瞬发手段'}。不要把地雷种在贴脸僵尸脚下。`,
           }, `土豆地雷只剩 ${Math.round(minEta * 10) / 10}s 准备时间，来不及（需 ${arm}s）`);
         }
+      }
+      // 接触触发植物（冰冻生菜等）种在僵尸右侧/身后：僵尸已经走过，不会被踩到。
+      // 和输出一样，在扣阳光前拒绝；一次性爆炸卡不受这条限制（3x3 仍可能覆盖）。
+      const isContactEffect = !!(stType && !stType.attack && !isWallPlant
+        && (String(stType.family || '') === 'Cold' || !!(stType.usage && stType.usage.contact)));
+      if (isContactEffect && !rowWideEffect && timing && timing.late) {
+        const candidates = emptyCellsInLane(C, lane, Math.max(0, Math.floor(nearZombie)), cf, 4, column)
+          .filter((x) => x.column <= nearZombie)
+          .sort((a, b) => b.column - a.column);
+        const cols = candidates.map((x) => x.column);
+        return fail('PLANT_BEHIND_ZOMBIE', {
+          lane,
+          column,
+          type,
+          nearestZombieColumn: timing.nearestZombieColumn,
+          suggestedColumns: cols,
+          hint: `僵尸已到 c${timing.nearestZombieColumn}，${type} 是接触触发，种在 c${column} 在它身后不会被踩到；${cols.length ? `改种僵尸所在格或左侧 c${cols.join('/c')}` : '前方没有空位，改用输出/能量豆或等这波清完'}。`,
+        }, `${type} 落在僵尸 c${timing.nearestZombieColumn} 身后，踩不到`);
       }
       // 墙类植物种在最前僵尸的右侧/同列：它已经过去了，这面墙挡不到它。
       // 这是几何事实，不是打法建议；直接给出左侧可种位。
@@ -4668,19 +6405,26 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
       try { stNow = stats.plantStatsOf(type); } catch { stNow = null; }
       const isWall = !!(stNow && String(stNow.family || '') === 'Defence');
       if (isWall && timing && timing.late) {
-        const want = Math.max(0, Math.floor(nearZombie) - 1);
-        const leftCells = emptyCellsInLane(C, lane, want, cf, 6)
-          .filter((x) => x.column < nearZombie)
-          .slice(0, 3);
-        const cellText = leftCells.length ? leftCells.map((x) => `c${x.column}`).join('/') : '（左侧没有空位）';
+        // 墙必须种在僵尸左侧（column 更小）。这里排除本次目标格，且只给
+        // c + 0.25 < 僵尸列 的格子，避免出现“可改种 c1”但目标就是 c1 的死循环。
+        const safeCells = emptyCellsInFrontOfZombie(C, lane, nearZombie, cf, 3, column);
+        const replaceCells = occupiedCellsInFrontOfZombie(C, lane, nearZombie, column, 3);
+        const emptyText = safeCells.length ? safeCells.map((x) => `c${x.column}`).join('/c') : null;
+        const replaceText = replaceCells.length
+          ? replaceCells.map((x) => `c${x.column}(${x.type}${x.dps ? ` ${x.dps}dps` : ''})`).join('/')
+          : null;
+        const parts = [];
+        if (emptyText) parts.push(`空位改种 c${emptyText}`);
+        if (replaceText) parts.push(`或 replace ${replaceText} 腾格`);
+        if (!parts.length) parts.push('前方已经没有可种/可换的格子');
         return fail('WALL_TOO_LATE', {
           lane, column, type,
           nearestZombieColumn: Math.round(nearZombie * 10) / 10,
-          suggestedColumns: leftCells.map((x) => x.column),
-          hint: leftCells.length
-            ? `该行最前僵尸已在 c${Math.round(nearZombie * 10) / 10}，你把墙种在 c${column} 在它右边，挡不到它；改种 ${cellText}，或用倭瓜/樱桃/三叶草先处理这只。`
-            : `该行僵尸已经贴到 c${Math.round(nearZombie * 10) / 10}，左侧没有空位放墙；用一次性卡处理，别把墙种在它身后。`,
-        }, `${type} 种在 c${column} 挡不到 c${Math.round(nearZombie * 10) / 10} 的僵尸；可改种 ${cellText}`);
+          suggestedColumns: safeCells.map((x) => x.column),
+          replaceCells,
+          blockable: !!(safeCells.length || replaceCells.length),
+          hint: `本行最前僵尸已在 c${Math.round(nearZombie * 10) / 10}，墙必须种在它左侧（column 更小）才挡得住；c${column} 已经是它背后。${parts.join('；')}。如果来不及种墙，就不要继续试墙，改用输出/一次性卡/冰冻先把这只僵尸磨掉。`,
+        }, `${type} 种在 c${column} 挡不到 c${Math.round(nearZombie * 10) / 10} 的僵尸；${parts.join('，')}`);
       }
       try {
         cell.PlaceUIPlant();
@@ -4922,6 +6666,22 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     return fail('UNKNOWN_ACTION', { type: a.type });
   }
 
+  /** 批量发起后统一等落地：队列一拍连发多株时不用每株各等一次。 */
+  async function settlePending(pending) {
+    const list = (Array.isArray(pending) ? pending : []).filter((p) => p
+      && Number.isInteger(Number(p.lane)) && Number.isInteger(Number(p.column)));
+    if (!list.length) return { ok: true, settled: true, count: 0 };
+    const ctxg = findComps();
+    const map = ctxg && ctxg.map;
+    const C = map && map.Square && map.Square.constructor;
+    if (!C) return { ok: false, code: 'NO_SCENE' };
+    const settled = await waitFor(() => list.every((p) => {
+      const cell = C.getLnC(Number(p.lane), Number(p.column));
+      return !!(cell && reader.cellPlants(cell).length > 0);
+    }), 900);
+    return { ok: settled, settled, count: list.length };
+  }
+
   async function actAll(actions) {
     const list = Array.isArray(actions) ? actions.slice(0, 6) : [];
     if (!list.length) return fail('NO_ACTIONS', {}, 'actions 为空（一次 1–6 个）');
@@ -4941,7 +6701,527 @@ function createActions({ getCc, findComps, findCompByClass, stats, reader, versi
     };
   }
 
-  return { act, actAll, chooseDeck, startLevel, restartLevel, dismissObjective, resume, collect, moveCart, deckStatus, fail };
+  return { act, actAll, settlePending, chooseDeck, startLevel, restartLevel, dismissObjective, resume, collect, moveCart, deckStatus, fail };
+}
+
+
+// ── bridge/queue.js ──
+/**
+ * queue：模型写任务，本地按节拍执行“可行性”。
+ *
+ * 这里不做策略：种什么、哪一行、什么顺序都由模型在 plan.queue 里给出。
+ * 本地只做三件事：
+ *  1. 按 tick 读取实时局面；
+ *  2. 用 cond（阳光/波次/僵尸/空格/无墙/无输出）判断任务是否可执行；
+ *  3. 调 actions.act 执行；遇到 COOLDOWN/SUN/占格就跳过，继续试下一条任务。
+ *
+ * 这样模型不用为每一株植物等一次往返，冷却/阳光/落地时间由本地吃掉。
+ */
+
+const DEFAULT_TICK_MS = 450;
+const MAX_TASKS = 32;
+// 一拍里最多连发几个动作：不同卡、不同格可以背靠背执行（游戏里都是即时点击，
+// 没有真正的多线程）；同卡仍受种子冷却限制，不会在一拍里重复种。
+const MAX_ACTIONS_PER_TICK = 4;
+
+const qNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+const qNow = () => Date.now();
+
+function normalizeTask(t) {
+  if (!t || typeof t !== 'object') return null;
+  const type = String(t.type || 'plant');
+  if (!['plant', 'replace', 'shovel', 'plant_food', 'activate'].includes(type)) return null;
+  const task = { ...t, type };
+  if (t.id != null) task.id = String(t.id).slice(0, 64);
+  if (t.plant != null) task.plant = String(t.plant);
+  if (t.card != null) task.card = qNum(t.card);
+  if (t.lane != null) task.lane = (typeof t.lane === 'string' ? t.lane : qNum(t.lane));
+  if (t.column != null) task.column = (typeof t.column === 'string' ? t.column : qNum(t.column));
+  if (t.cond && typeof t.cond === 'object') task.cond = t.cond;
+  if (t.repeat === true) task.repeat = true;
+  if (t.validForSec != null) task.validForSec = Math.max(0, Number(t.validForSec) || 0);
+  if (t.deadline != null) task.deadline = t.deadline;
+  if (t.stateVersion != null) task.stateVersion = String(t.stateVersion).slice(0, 64);
+  if (t.onFail != null) task.onFail = String(t.onFail) === 'skip' ? 'skip' : 'retry';
+  if (t.priority != null) task.priority = Number(t.priority) || 0;
+  task.tag = t.tag ? String(t.tag).slice(0, 80) : null;
+  return task;
+}
+
+function taskKey(task, i) {
+  if (task.id) return `id:${task.id}`;
+  return `${i}:${task.type}:${task.plant || task.card || ''}:${task.lane}:${task.column}`;
+}
+
+function expiresAtOf(task, now) {
+  if (task.validForSec != null) return now + Math.max(0, Number(task.validForSec) || 0) * 1000;
+  if (task.deadline == null) return null;
+  const n = Number(task.deadline);
+  if (Number.isFinite(n)) return n < 1e12 ? n * 1000 : n;
+  const parsed = Date.parse(String(task.deadline));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * 把任务里的 lane/column 解析成游戏坐标。只做几何映射，不选卡。
+ * lane: 0-4 | danger | protect
+ * column: 0-8 | ahead | safe | back
+ */
+function resolvePosition(task, s) {
+  let lane = qNum(task.lane);
+  if (lane == null && task.lane === 'danger') {
+    const lanes = (s.lanes || []).filter((l) => l && l.zombies > 0);
+    lanes.sort((a, b) => (Number(b.gap) || 0) - (Number(a.gap) || 0)
+      || (Number(a.lossIn) || 999) - (Number(b.lossIn) || 999));
+    lane = lanes[0] ? Number(lanes[0].lane) : null;
+  }
+  if (lane == null && task.lane === 'protect') {
+    const p = s.brief && s.brief.protect;
+    lane = p && Array.isArray(p.unguardedLanes) && p.unguardedLanes.length
+      ? Number(p.unguardedLanes[0]) : null;
+  }
+  // 空中目标行：三叶草/对空救场用；只取第一个 airborne 僵尸所在行。
+  if (lane == null && task.lane === 'airborne') {
+    const z = (s.zombies || []).find((x) => x && x.airborne === true);
+    if (z) lane = Number(z.lane);
+  }
+  if (lane == null || !Number.isInteger(lane) || lane < 0 || lane > 4) return null;
+
+  let column = qNum(task.column);
+  if (column == null && task.column === 'ahead') {
+    const l = (s.lanes || [])[lane];
+    const front = l && l.front;
+    if (!front) return null;
+    column = Math.max(0, Math.floor(Number(front.column)) - 1);
+  }
+  if (column == null && task.column === 'safe') {
+    const type = task.plant || (task.card != null && s.cards && s.cards[task.card] ? s.cards[task.card].type : null);
+    const m = ((s.brief && s.brief.minePlan) || []).find((x) => x
+      && x.lane === lane && (!type || x.card === type));
+    column = m && m.latestSafeColumn != null ? Number(m.latestSafeColumn) : null;
+  }
+  if (column == null && task.column === 'back') column = 0;
+  if (column == null || !Number.isInteger(column) || column < 0 || column > 8) return null;
+  return { lane, column };
+}
+
+function laneInfo(s, lane) {
+  return (s.lanes || []).find((l) => Number(l.lane) === Number(lane)) || null;
+}
+
+function cellOccupied(s, lane, column) {
+  const row = s.board && s.board[lane];
+  return !!(row && row.cells && row.cells[column]);
+}
+
+// 动态规则（lane:'airborne' / column:'back' 这类）落点不固定：
+// 目标格被占时在同行走最近的空格，而不是把整条规则当“永久冲突”丢掉。
+function firstEmptyCellInLane(s, lane, prefer) {
+  const cols = (s.terrain && s.terrain.columns) || 9;
+  const blocked = new Set(((s.blockedCells || []).filter((x) => x.lane === lane)).map((x) => x.column));
+  for (let d = 0; d < cols; d++) {
+    for (const c of [prefer + d, prefer - d]) {
+      if (c < 0 || c >= cols) continue;
+      if (blocked.has(c)) continue;
+      if (!cellOccupied(s, lane, c)) return c;
+    }
+  }
+  return null;
+}
+
+/** 只判断模型写下的 cond；不在这里发明新条件。 */
+function conditionsOk(task, s, pos) {
+  const c = task.cond || {};
+  const l = laneInfo(s, pos.lane) || {};
+  if (c.minSun != null && Number(s.sun) < Number(c.minSun)) return false;
+  if (c.minPlantFood != null && Number(s.plantFood) < Number(c.minPlantFood)) return false;
+  if (c.waveGte != null && Number(s.level && s.level.wave) < Number(c.waveGte)) return false;
+  if (c.waveLte != null && Number(s.level && s.level.wave) > Number(c.waveLte)) return false;
+  if (c.zombieInLane === true && !(Number(l.zombies) > 0)) return false;
+  if (c.zombieInLane === false && Number(l.zombies) > 0) return false;
+  // 空中目标：三叶草这类窗口只有 0.5–1s 的卡，交给本地队列抢帧，比等模型快。
+  if (c.airborne === true && !(s.zombies || []).some((z) => z && z.airborne === true)) return false;
+  if (c.airborne === false && (s.zombies || []).some((z) => z && z.airborne === true)) return false;
+  if (c.zombieType != null) {
+    const t = String(c.zombieType);
+    if (!(s.zombies || []).some((z) => z && String(z.type) === t)) return false;
+  }
+  if (c.cardReady != null) {
+    const t = String(c.cardReady);
+    const list = (s.cards || []).concat((s.conveyor && s.conveyor.cards) || []);
+    const card = list.find((x) => x && String(x.type) === t);
+    if (!card || !card.ready) return false;
+  }
+  // 接触/踩踏型保护关：最短“还有几秒被碰到”，用于提前挡/秒杀。
+  if (c.protectContactLt != null) {
+    const cells = (s.brief && s.brief.protect && s.brief.protect.cells) || [];
+    const min = cells.reduce((m, x) => (x && x.contactInSec != null ? Math.min(m, Number(x.contactInSec)) : m), Infinity);
+    if (!(min <= Number(c.protectContactLt))) return false;
+  }
+  if (c.zombieColumnLt != null) {
+    if (!(l.nearestZombie != null && Number(l.nearestZombie) < Number(c.zombieColumnLt))) return false;
+  }
+  if (c.noWall === true && Number(l.walls) > 0) return false;
+  if (c.noShooter === true && Number(l.shooters) > 0) return false;
+  if (c.cellEmpty === true && cellOccupied(s, pos.lane, pos.column)) return false;
+  if (c.cellEmpty === false && !cellOccupied(s, pos.lane, pos.column)) return false;
+  // 只有“波次计数到底 + 残敌不多”的收尾阶段才阻止往空行继续铺，
+  // 避免旧队列在通关后还把钱花在空行。正常波次里场上任何位置有僵尸，
+  // 都不该连带禁止其他空行预布防（否则会等到僵尸进门才开始补墙/补输出）。
+  // 收尾阶段确实想预布防，写 cond.allowIdleLane=true。
+  const residual = Number(s.brief && s.brief.residual && s.brief.residual.count) || 0;
+  const waveDone = !!(s.brief && s.brief.wave && s.brief.wave.done);
+  const cleanup = waveDone && residual > 0 && residual <= 6;
+  if ((task.type === 'plant' || task.type === 'replace')
+    && cleanup && Number(l.zombies) === 0 && c.allowIdleLane !== true) return false;
+  return true;
+}
+
+function taskCardType(task, s) {
+  if (task.plant) return String(task.plant);
+  if (task.card != null && s && Array.isArray(s.cards) && s.cards[task.card]) {
+    return String(s.cards[task.card].type || '');
+  }
+  return null;
+}
+
+function actionOf(task, pos, s) {
+  const a = {
+    type: task.type, lane: pos.lane, column: pos.column,
+  };
+  if (task.type === 'plant' || task.type === 'replace') {
+    if (task.plant) a.plant = task.plant;
+    else if (task.card != null) {
+      // 兜底：入队时还没选卡、没解析出 codename 的话，执行时按当前卡槽解析，
+      // 避免选卡后 card 下标漂移直接 NO_CARD。
+      const c = s && Array.isArray(s.cards) ? s.cards[Number(task.card)] : null;
+      if (c && c.type) a.plant = c.type;
+      else a.card = task.card;
+    }
+  }
+  if (task.type === 'plant_food' && task.force === true) a.force = true;
+  if (task.type === 'activate') {
+    if (task.targetLane != null) a.targetLane = qNum(task.targetLane);
+    if (task.targetColumn != null) a.targetColumn = qNum(task.targetColumn);
+  }
+  if (task.type === 'shovel' && task.expect) a.expect = task.expect;
+  return a;
+}
+
+function createActionQueue({ reader, actions, onAction = null } = {}) {
+  let tasks = [];
+  let tickMs = DEFAULT_TICK_MS;
+  let timer = null;
+  let busy = false;
+  let pausedUntil = 0;
+  let lastActionAt = 0;
+  let lastResult = null;
+  let history = [];
+  let blocked = new Map();
+  let blockedCards = new Map();
+  let doneIds = new Set();
+  // 模型思考期间：普通队列任务暂停，只有 urgent 的本地规则（三叶草等短窗口救场）继续执行。
+  // 否则队列会在模型算阳光的同时花掉阳光，模型下一轮按过期数值决策。
+  let thinking = false;
+  let stats = { ticks: 0, actions: 0, failures: 0, done: 0, expired: 0, stale: 0, skipped: 0, paused: 0, adjusted: 0 };
+
+  function setThinking(v) { thinking = !!v; }
+
+  function status() {
+    return {
+      ok: true,
+      enabled: tasks.length > 0,
+      tickMs,
+      pending: tasks.length,
+      paused: qNow() < pausedUntil,
+      thinking,
+      lastActionAt: lastActionAt || null,
+      lastResult,
+      stats: { ...stats },
+      tasks: tasks.slice(0, 8).map((t) => ({
+        id: t.id || null, type: t.type, plant: t.plant || null,
+        card: t.card != null ? t.card : null,
+        lane: t.lane, column: t.column, tag: t.tag, cond: t.cond || null,
+        priority: t.priority != null ? t.priority : null,
+        stateVersion: t.stateVersion || null,
+        expiresAt: t.expiresAt || null,
+        onFail: t.onFail || 'retry',
+      })),
+      history: history.slice(-8),
+      recentSunSpent: history
+        .filter((h) => h && h.sunSpent != null && (Date.now() - Date.parse(h.at)) < 8000)
+        .reduce((sum, h) => sum + Number(h.sunSpent || 0), 0),
+    };
+  }
+
+  function stopTimer() {
+    if (timer) {
+      try { clearInterval(timer); } catch { /* ignore */ }
+      timer = null;
+    }
+  }
+
+  function startTimer() {
+    if (timer || !tasks.length) return;
+    timer = setInterval(tick, tickMs);
+    // Node 测试里不要把进程吊住；浏览器没有 unref。
+    try { if (timer && typeof timer.unref === 'function') timer.unref(); } catch { /* ignore */ }
+  }
+
+  function setTasks(list, opts = {}) {
+    const now = qNow();
+    const next = (Array.isArray(list) ? list : []).map(normalizeTask).filter(Boolean).slice(0, MAX_TASKS);
+    // 优先级只按模型写的 priority 排；同优先级保持模型原始顺序。
+    const ordered = next.map((t, i) => ({ t, i }))
+      .sort((a, b) => (Number(b.t.priority) || 0) - (Number(a.t.priority) || 0) || a.i - b.i)
+      .map(({ t }) => ({ ...t, expiresAt: expiresAtOf(t, now) }));
+    tasks = ordered;
+    blocked = new Map();
+    blockedCards = new Map();
+    if (opts.tickMs != null) tickMs = Math.max(200, Math.min(2000, Number(opts.tickMs) || DEFAULT_TICK_MS));
+    if (opts.pausedUntil != null) pausedUntil = Number(opts.pausedUntil) || 0;
+    stopTimer();
+    if (tasks.length) startTimer();
+    else tasks = [];
+    return { ok: true, count: tasks.length, tickMs };
+  }
+
+  function clear() {
+    stopTimer();
+    tasks = [];
+    blocked = new Map();
+    blockedCards = new Map();
+    doneIds = new Set();
+    return { ok: true, cleared: true };
+  }
+
+  function pause(ms = 1500) {
+    pausedUntil = Math.max(pausedUntil, qNow() + Math.max(0, Number(ms) || 0));
+    stats.paused += 1;
+    return { ok: true, pausedUntil };
+  }
+
+  async function tick() {
+    if (busy || !tasks.length) return;
+    if (qNow() < pausedUntil) return;
+    busy = true;
+    stats.ticks += 1;
+    try {
+      const s = reader.snapshot();
+      if (!s || s.ok === false || s.phase !== 'running') return;
+      const noteSkip = (task, code, detail) => {
+        lastResult = {
+          at: new Date().toISOString(), key: taskKey(task, 0), action: null, ok: false,
+          code, detail: detail || null,
+        };
+        history.push(lastResult);
+        if (history.length > 30) history.shift();
+      };
+      // 同一拍里已经发过的卡/格：不同卡可以连发，同卡要等种子冷却，同格会互相覆盖。
+      const usedCards = new Set();
+      const usedCells = new Set();
+      const pendingCells = [];
+      let executed = 0;
+      for (let i = 0; i < tasks.length; i++) {
+        const task = tasks[i];
+        if (!task) continue;
+        // 模型思考期间只跑 urgent 规则（短窗口救场），普通建造任务等模型行动后再执行，
+        // 避免“模型看到 100 阳光、队列先花掉、动作报 SUN 只剩 25”的过期决策。
+        if (thinking && task.urgent !== true) continue;
+        const key = taskKey(task, i);
+        const now = qNow();
+        // 过期 / 重复 id / 模型基于旧局面写的任务：直接丢弃，不再重试。
+        if (task.expiresAt != null && now > Number(task.expiresAt)) {
+          tasks.splice(i, 1); i -= 1;
+          stats.expired += 1;
+          noteSkip(task, 'TASK_EXPIRED', '任务已超过 validForSec/deadline');
+          continue;
+        }
+        if (task.id && task.repeat !== true && doneIds.has(task.id)) {
+          tasks.splice(i, 1); i -= 1;
+          stats.skipped += 1;
+          noteSkip(task, 'TASK_DONE', '同一 id 已执行过，跳过重复提交');
+          continue;
+        }
+        // 只拦“换关/换模式”导致的旧任务；同一关换波不算 stale，交给 validForSec/cond。
+        // 模型经常把 stateVersion 抄短（"1"、或把 "1167gff" 写成 "1167"），
+        // 这种不完整的值不应该让整条任务作废：长度 <4 视为没写，前缀匹配视为同一局面。
+        if (task.stateVersion && s.stateVersion) {
+          const sv = String(task.stateVersion);
+          const cur = String(s.stateVersion);
+          const truncated = sv.length < 4 || (sv.length >= 4 && cur.startsWith(sv));
+          if (sv !== cur && !truncated) {
+            tasks.splice(i, 1); i -= 1;
+            stats.stale += 1;
+            noteSkip(task, 'STALE_ACTION', `任务属于旧关卡/模式 ${sv}，当前 ${cur}`);
+            continue;
+          }
+        }
+        const until = blocked.get(key) || 0;
+        if (now < until) continue;
+        const cardType = taskCardType(task, s);
+        // 同一张卡在冷却时，整张卡的任务都先跳过；否则会在同一拍里连撞 5 次 COOLDOWN。
+        if (cardType && ['plant', 'replace'].includes(task.type)
+          && now < (blockedCards.get(cardType) || 0)) continue;
+        const pos = resolvePosition(task, s);
+        if (!pos) continue;
+        // 关键字落点（lane:'airborne' / column:'back'|'ahead'|'safe'）是“就近找个能种的位置”，
+        // 不是固定格：被占时自动挪到同行空格，避免规则触发一次就因 TASK_OCCUPIED 被删掉。
+        if (task.type === 'plant' && (typeof task.column === 'string' || task.lane === 'airborne')
+          && cellOccupied(s, pos.lane, pos.column)) {
+          const alt = firstEmptyCellInLane(s, pos.lane, pos.column);
+          if (alt == null) continue;
+          pos.column = alt;
+        }
+        // 同一拍内：同一格不重复种/铲；同一张卡不连发（种子冷却在第一次种植后立即开始）。
+        if (usedCells.has(`${pos.lane}:${pos.column}`)) continue;
+        if (cardType && ['plant', 'replace'].includes(task.type) && usedCards.has(cardType)) continue;
+        // 目标格已经是同一种植物：这条任务已经完成，直接移除。
+        // 否则带 cond.cellEmpty:true 的重复任务会一直 pending，卡住 queue 空提醒。
+        if (task.type === 'plant' && cellOccupied(s, pos.lane, pos.column)) {
+          const currentType = s.board && s.board[pos.lane] && s.board[pos.lane].cells
+            ? s.board[pos.lane].cells[pos.column] : null;
+          const wantType = task.plant || taskCardType(task, s);
+          if (currentType && wantType && String(currentType) === String(wantType)) {
+            if (task.id) doneIds.add(task.id);
+            tasks.splice(i, 1); i -= 1;
+            stats.done += 1;
+            noteSkip(task, 'TASK_ALREADY_PLANTED', `目标格 ${pos.lane},${pos.column} 已经有 ${currentType}`);
+            continue;
+          }
+        }
+        // plant 打到已有植物的格子：没有显式 cellEmpty 条件时是永久冲突，直接丢弃，
+        // 不要每 2.5 秒撞一次 OCCUPIED；要换植必须由模型写 replace。
+        if (task.type === 'plant' && cellOccupied(s, pos.lane, pos.column)
+          && !(task.cond && task.cond.cellEmpty === true)) {
+          tasks.splice(i, 1); i -= 1;
+          stats.skipped += 1;
+          noteSkip(task, 'TASK_OCCUPIED', `目标格 ${pos.lane},${pos.column} 已有植物，plant 任务丢弃`);
+          continue;
+        }
+        if (!conditionsOk(task, s, pos)) continue;
+        if (task.oncePerWave && task._doneWave === (Number(s.level && s.level.wave) || 0)) continue;
+        const action = actionOf(task, pos, s);
+        let r = null;
+        try {
+          // 一拍可能连发多株：先全部发起，结束这一拍前统一等一次落地，
+          // 不要每株各等 1500ms（那会把 4 株的一拍拖成 6 秒）。
+          r = await actions.act(action, { deferSettle: true });
+        } catch (e) {
+          r = { ok: false, code: 'ACT_THREW', reason: String(e && e.message || e) };
+        }
+        if (r && r.pending) pendingCells.push({ lane: pos.lane, column: pos.column });
+        const ok = !!(r && (r.ok || r.pending));
+        // 记录这一拍花了多少阳光：模型下一轮看到 queue.history 就能对账，
+        // 不会再把“队列花掉的阳光”误判成“阳光被自动收走”。
+        let sunSpent = null;
+        if (ok && (task.type === 'plant' || task.type === 'replace') && taskCardType(task, s)) {
+          const t = taskCardType(task, s);
+          const card = (s.cards || []).concat((s.conveyor && s.conveyor.cards) || []).find((x) => x && String(x.type) === t);
+          if (card && card.cost != null) sunSpent = Number(card.cost);
+        }
+        lastResult = {
+          at: new Date().toISOString(), key, action, ok,
+          code: (r && r.code) || null, detail: (r && r.detail) || (r && r.reason) || null,
+          sunSpent,
+        };
+        history.push(lastResult);
+        if (history.length > 30) history.shift();
+        if (ok) {
+          stats.actions += 1;
+          lastActionAt = qNow();
+          executed += 1;
+          if (cardType) usedCards.add(cardType);
+          usedCells.add(`${pos.lane}:${pos.column}`);
+          if (task.repeat !== true && task.oncePerWave !== true && task.cooldownSec == null) {
+            if (task.id) doneIds.add(task.id);
+            tasks.splice(i, 1);
+            i -= 1;
+            stats.done += 1;
+          } else {
+            // 规则任务：执行成功后保留，按 oncePerWave / cooldownSec 控制下次触发的时机。
+            if (task.oncePerWave) task._doneWave = Number(s.level && s.level.wave) || 0;
+            const cool = task.cooldownSec != null ? Math.max(0.4, Number(task.cooldownSec) || 0) * 1000 : 0;
+            blocked.set(key, qNow() + Math.max(400, tickMs, cool));
+          }
+          if (onAction) {
+            try { onAction(lastResult); } catch { /* ignore */ }
+          }
+          // 不同卡、不同格在同一拍里继续执行；到上限或没有任务就结束这一拍。
+          if (executed >= MAX_ACTIONS_PER_TICK) break;
+          continue;
+        }
+        stats.failures += 1;
+        const code = String((r && r.code) || '');
+        // 没阳光/暂停/场景不可用时，后面几条也大概率失败，不该在一拍里全撞一遍。
+        if (['SUN', 'PAUSED', 'NO_SCENE', 'NO_CELL'].includes(code)) break;
+        // 写死的列在僵尸越过后失败（WALL_TOO_LATE/MINE_TOO_LATE/PLANT_BEHIND_ZOMBIE、
+        // 墙后输出/地刺）时，按动作返回的 suggestedColumns 自动改一次列；
+        // 这是模型已经授权的同一张卡/同一行，只把落点换到动作层算出来的可用格。
+        const adjustCodes = ['WALL_TOO_LATE', 'MINE_TOO_LATE', 'PLANT_BEHIND_ZOMBIE',
+          'OUTPUT_IN_FRONT_OF_WALL', 'SPIKE_BEHIND_WALL'];
+        const suggestions = Array.isArray(r && r.suggestedColumns) ? r.suggestedColumns
+          : (Array.isArray(r && r.behindCells) ? r.behindCells.map((x) => (x && x.column != null ? x.column : x)) : []);
+        if (adjustCodes.includes(code) && !task.autoAdjusted
+          && /^\d+$/.test(String(task.column)) && suggestions.length) {
+          task.column = Number(suggestions[0]);
+          task.autoAdjusted = true;
+          // 占住新格子，避免同一拍后面的任务也落到这里（并行批处理的竞态）。
+          usedCells.add(`${pos.lane}:${task.column}`);
+          stats.adjusted += 1;
+          lastResult.detail = `${lastResult.detail || code} → 自动改种 c${task.column + 1}`;
+          blocked.set(key, qNow() + 250);
+          continue;
+        }
+        if (code === 'COOLDOWN') {
+          const wait = Math.max(0.4, Math.min(6, Number(r.retryAfter) || 1)) * 1000;
+          blocked.set(key, qNow() + wait);
+          if (cardType && ['plant', 'replace'].includes(task.type)) {
+            blockedCards.set(cardType, qNow() + wait);
+          }
+        } else if (code === 'SUN') {
+          blocked.set(key, qNow() + 800);
+        } else if (['CELL_BLOCKED', 'WALL_TOO_LATE', 'MINE_TOO_LATE', 'OUTPUT_IN_FRONT_OF_WALL', 'SPIKE_BEHIND_WALL', 'PLANT_BEHIND_ZOMBIE'].includes(code)) {
+          // 目标格/时机已经不可能靠等待变好：直接丢弃，避免 700 阳光却一直卡在一条坏任务上。
+          // 模型会从 state.threatGaps 和 queue 空提醒看到该补什么。
+          tasks.splice(i, 1);
+          i -= 1;
+          stats.skipped += 1;
+          continue;
+        } else if (code === 'OCCUPIED') {
+          blocked.set(key, qNow() + 2500);
+        } else if (['CARD_NOT_IN_DECK', 'NO_CARD'].includes(code)) {
+          // 卡下标/卡组已经失效：重试不会变好，直接丢弃；模型下一轮按实际 deck 重写。
+          tasks.splice(i, 1);
+          i -= 1;
+          stats.skipped += 1;
+          continue;
+        } else if (['CARD_UNAVAILABLE', 'NO_PLANT', 'EMPTY', 'NOT_FOODABLE'].includes(code)) {
+          blocked.set(key, qNow() + 15000);
+        } else if (code === 'FOOD_NO_TARGET' || code === 'NO_FOOD') {
+          blocked.set(key, qNow() + 1200);
+        } else {
+          blocked.set(key, qNow() + 1200);
+        }
+        // onFail=skip：这一条失败后直接丢弃，不再每拍重试；默认 retry 保持旧行为。
+        if (task.onFail === 'skip') {
+          tasks.splice(i, 1);
+          i -= 1;
+          stats.skipped += 1;
+        }
+        // 失败后继续试下一条任务：这就是“这张卡冷却就遍历下一个”。
+      }
+      // 这一拍连发的植物统一等一次落地（最多 900ms），再交给下一拍。
+      if (pendingCells.length && typeof actions.settlePending === 'function') {
+        try { await actions.settlePending(pendingCells); } catch { /* ignore */ }
+      }
+    } finally {
+      busy = false;
+      if (!tasks.length) stopTimer();
+    }
+  }
+
+  return { setTasks, clear, pause, setThinking, status, tick, dispose: stopTimer };
 }
 
 
@@ -4972,8 +7252,13 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
   function compactFood(pf) {
     if (!pf) return null;
     return {
-      kind: pf.kind, area: pf.area, radius: pf.radius, total: pf.total,
+      kind: pf.kind, area: pf.area, radius: pf.radius,
+      total: pf.total, totalPerTarget: pf.totalPerTarget, maxTotal: pf.maxTotal,
+      sunTotal: pf.sunTotal, sunValue: pf.sunValue,
+      count: pf.count, projectileDamage: pf.projectileDamage,
+      targetsPerHit: pf.targetsPerHit, hitsPerTarget: pf.hitsPerTarget,
       durationSec: pf.durationSec, confidence: pf.confidence,
+      assumptions: pf.assumptions,
     };
   }
 
@@ -4996,6 +7281,15 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
       burst: st.burst || null,
       effectiveDps: st.effectiveDps || null,
       area: st.area || null,
+      // 短射程输出（reach<=1 且有伤害）必须贴住僵尸，不能当后排墙用。
+      role: (st.reach != null && Number(st.reach) <= 1 && ((st.attack && Number(st.attack.dps) > 0) || st.burst))
+        ? 'melee_output'
+        : (String(st.family || '') === 'Defence' ? 'wall'
+          : (st.sun ? 'economy' : (st.attack ? 'ranged' : 'support'))),
+      needsContact: (st.reach != null && Number(st.reach) <= 1 && !!((st.attack && Number(st.attack.dps) > 0) || st.burst)) || undefined,
+      // once = 触发一次、持续几秒；repeat = 按 interval 反复打。
+      trigger: (st.attack && st.attack.trigger) || undefined,
+      repeatAttack: st.attack ? !!st.attack.repeat : undefined,
       stepDamage: !!st.stepDamage,
       poison: st.poison || null,
       // 伤害与护甲：yes/no/unknown 三态 + 语义（normal/pierce/true/poison/drain）
@@ -5009,6 +7303,8 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
       // 激活方式必须常驻：点击卡如果模型不知道要手点，等于不能用的卡
       activation: (st.usage && st.usage.activation) || 'auto',
       aim: (st.usage && st.usage.aim) || null,
+      // 放置类别：游戏 TAGS 原样上报（amphibious / fly / vine / lilypad …）
+      placement: st.placement || null,
       shot: st.shot,
       brief: st.brief,
       // 图鉴长文本只在 pvz_knowledge 单查时给；简报里省掉能省一大截 token
@@ -5041,6 +7337,8 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
       immunities: st.immunities && st.immunities.length ? st.immunities : undefined,
       spawns: st.spawns && st.spawns.length ? st.spawns : undefined,
       boss: st.boss || undefined,
+      // 血量阈值阶段：巨人扔小鬼 / 狂暴 / 掉手 / 放鸡 / 放黄鼠狼
+      phases: st.phases && st.phases.length ? st.phases : undefined,
       behaviorText: st.behaviorText || undefined,
       brief: st.brief,
       introduction: lean ? undefined : st.introduction,
@@ -5088,11 +7386,47 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
   function briefing() {
     const state = reader.snapshot({ full: true });
     if (!state.ok) return { ok: false, code: state.code || 'NO_SCENE', reason: state.reason || '不在关卡内' };
+    const levelNow = state.level || {};
+    const sourceNow = levelNow.source || {};
+    // 页面过渡/回地图时可能返回 ok 但关卡、世界、波次全空；不要给模型一份“空简报”。
+    const hasLevel = !!((sourceNow.asset || sourceNow.world || sourceNow.levelId)
+      || levelNow.name || state.world || state.levelScript);
+    if (!hasLevel) {
+      return {
+        ok: false,
+        code: 'BRIEFING_NOT_READY',
+        retry: true,
+        reason: '关卡数据还没加载完（可能是关卡切换/回地图的过渡帧），稍后再读一次。',
+      };
+    }
     const seed = state.seedSelection;
     const pool = (seed && seed.available) || state.cards || [];
     const cards = pool.map((c) => plantEntry(c.type, true)).filter(Boolean);
 
     const waveList = wavesOf(state);
+    // 过渡帧里 Level.name 还在（asset=egypt1），但波次/卡池全空——这不是有效简报。
+    // 以前这种骨架会被当成事实喂给模型（卡槽 undefined / 起始阳光 ? / 波次 0），
+    // 模型再转手去读一次，形成“反复读开局简报”的循环。
+    const dataReady = !!(state.level && state.level.gameStarted)
+      || waveList.length > 0
+      || (state.cards || []).length > 0
+      || ((state.seedSelection && state.seedSelection.available) || []).length > 0;
+    if (!dataReady) {
+      return {
+        ok: false,
+        code: 'BRIEFING_NOT_READY',
+        retry: true,
+        reason: '关卡/卡槽还在加载（波次和卡池都为空），稍后再读一次。',
+      };
+    }
+    if (!waveList.length && state.phase === 'objective') {
+      return {
+        ok: false,
+        code: 'BRIEFING_NOT_READY',
+        retry: true,
+        reason: '关卡波次还没初始化（objective 阶段常见），关闭目标弹窗进入准备后再读。',
+      };
+    }
     const waveTypes = new Set();
     for (const w of waveList) for (const t of Object.keys(w.zombies || {})) waveTypes.add(t);
     for (const z of state.zombies || []) waveTypes.add(z.type);
@@ -5140,9 +7474,27 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
         byLane.get(c.lane).push(c.column);
       }
       const where = [...byLane.entries()].map(([l, cols]) => `第${l}行 c${cols.slice().sort((a, b) => a - b).join('/c')}`).join('；');
+      // 保护目标是谁也要写清：只有坐标时，模型会把它当空格，失败后把锅甩给向日葵。
+      const protectTypes = [...new Set(liveProtect
+        .map((c) => (c.plant && (c.plant.name || c.plant.type)) || c.type)
+        .filter(Boolean))];
+      const ability = liveProtect.map((c) => c.plant).filter(Boolean).map((p) => {
+        const extra = [];
+        if (p.brief) extra.push(p.brief);
+        if (p.restSec != null) extra.push(`触发后休息 ${p.restSec}s`);
+        if (p.knockback != null) extra.push(`击退 ${p.knockback} 格`);
+        return `${p.name || p.type}${extra.length ? '：' + extra.join('，') : ''}`;
+      });
       constraints.push({
         id: 'protect_cells',
-        text: `${where} 是必须保护的植物。僵尸会走到这些格上啃它：短手植物（接触/接近/前后/3x3/N 格）只能种在同行、离保护格不超过它的射程（多数是 1 格）的位置；远程/整行/抛物种在保护格左侧同一行就能覆盖。种在保护格左侧 2 格以外，短手既打不到僵尸也保护不到。`,
+        text: `${where} 是必须保护的植物${protectTypes.length ? `（${protectTypes.join('、')}）` : ''}${ability.length ? `；它们的特性：${ability.join('；')}` : ''}。判负条件是这些植物死，不是普通防线植物。僵尸会走到这些格上啃它：短手植物（接触/接近/前后/3x3/N 格）只能种在同行、离保护格不超过它的射程（多数是 1 格）的位置；远程/整行/抛物种在保护格左侧同一行就能覆盖。种在保护格左侧 2 格以外，短手既打不到僵尸也保护不到。`,
+        source: 'task',
+      });
+    }
+    if (liveProtect.length && state.brief && state.brief.protect && state.brief.protect.mode === 'contact') {
+      constraints.push({
+        id: 'protect_contact',
+        text: '本关是“踩踏/接触”判定：僵尸只要走到保护格就判负，不需要啃食。防守必须在保护格右侧挡住或提前击杀；高血量墙/肉盾也要种在保护格右侧，种左侧完全无效。',
         source: 'task',
       });
     }
@@ -5195,20 +7547,20 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
       if (prep.mode === 'preplant') {
         constraints.push({
           id: 'preplant',
-          text: `提前布阵关：波次还没开始，但已经可以种植物。先用给定阳光把阵型摆好；准备好后调用 pvz_start_level 开打（现在 canStart=${prep.canStart}）。不要一直种下去不等开始，也不要在开打前反复读状态。`,
+          text: `提前布阵关：波次还没开始，但已经可以种植物。开局数据已算好（forecast/levelContext 是整关全部波次）；先用 pvz_set_plan 按波次写清每行职责、counter 和应急，再用给定阳光布阵。阵型好后调用 pvz_start_level 开打（现在 canStart=${prep.canStart}）。没有计划就点开始会返回 NEED_PLAN；不要一直种下去不等开始，也不要在开打前反复读状态。`,
           source: 'prep',
         });
       } else if (prep.mode === 'conveyor') {
         constraints.push({
           id: 'conveyor',
-          text: '传送带关：卡组由传送带给定，不能选卡也不能改卡组，直接 pvz_start_level 开打；之后每轮看 cards 里当前可用的传送带卡，种完等下一张。',
+          text: '传送带关：卡组由传送带动态给定，不能选卡也不能改卡组。state.cards / conveyor.cards 是当前带上的卡（index 每轮可能变），不扣阳光、不吃种子冷却；一张卡只种一次，不要用 cells 铺多格。实时性最高：每轮用最新 index 先堵最危险行，不要把卡攒到下一波。',
           source: 'prep',
         });
       }
       if (prep.deckLocked && prep.mode !== 'conveyor') {
         constraints.push({
           id: 'forced_deck',
-          text: `本关卡组是给定的（锁定 ${prep.lockedCount}/${prep.slots} 张，可选 ${prep.availableCount} 张）：不要尝试换卡；卡组已满就直接 pvz_start_level。choose_deck 会原样返回 actualDeck。`,
+          text: `本关是“使用给定植物通关”（锁定 ${prep.lockedCount}/${prep.slots} 张，可选 ${prep.availableCount} 张）：没有选卡页，不要换卡也不要直接点开始。先用本简报的整关波次/卡组数值/coverageGaps 想清楚每张给定卡的对策，用 pvz_set_plan 写 counters 和分波次方案，然后再 pvz_start_level。choose_deck 会原样返回 actualDeck；没有计划就开局会返回 NEED_PLAN。`,
           source: 'prep',
         });
       }
@@ -5408,6 +7760,39 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
       },
     };
 
+    // 开局脚本建议：按本关卡组 + 判定自动生成，模型直接抄进 plan.rules 即可。
+    // 只是模板，不替模型选卡；不在卡组里的卡不会出现。
+    const deckSet = new Set(deckTypes);
+    const cardOf = (t) => cards.find((c) => c && c.type === t) || null;
+    const suggestedRules = [];
+    if (deckSet.has('blover')) {
+      suggestedRules.push({
+        id: 'blover-air',
+        when: { airborne: true, cardReady: 'blover', minSun: (cardOf('blover') && cardOf('blover').cost) || 50 },
+        do: { type: 'plant', plant: 'blover', lane: 'airborne', column: 'back' },
+        limits: { cooldownSec: 20, validForSec: 240 },
+        onFail: 'ask',
+      });
+    }
+    const protectModeNow = state.brief && state.brief.protect && state.brief.protect.mode;
+    if (liveProtect.length && protectModeNow === 'contact') {
+      for (const t of ['squash', 'chillypepper', 'cranjelly']) {
+        if (!deckSet.has(t)) continue;
+        const c = cardOf(t);
+        suggestedRules.push({
+          id: `guard-${t}`,
+          when: {
+            protectContactLt: t === 'squash' ? 2.5 : 3,
+            cardReady: t,
+            minSun: (c && c.cost) || 50,
+          },
+          do: { type: 'plant', plant: t, lane: 'protect', column: t === 'squash' ? 'ahead' : 'back' },
+          limits: { cooldownSec: 20, validForSec: 240 },
+          onFail: 'ask',
+        });
+      }
+    }
+
     return {
       ok: true,
       version,
@@ -5417,7 +7802,12 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
       missionHints: state.missionHints,
       levelContext,
       level: {
-        name: state.level.name || null,
+        name: state.level.name || (world
+          ? `${world.name}${levelNow.source && levelNow.source.number ? ` ${levelNow.source.number}` : ''}`
+          : (sourceNow.asset || null)),
+        label: state.level.name || (world
+          ? `${world.name}${levelNow.source && levelNow.source.number ? ` ${levelNow.source.number}` : ''}`
+          : (sourceNow.asset || '本关')),
         asset: (state.level.source && state.level.source.asset) || null,
         wave: state.level.wave,
         waves: state.level.waves,
@@ -5455,6 +7845,8 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
       startingSun: state.startingSun,
       plantLimit: state.plantLimit,
       prep,
+      // 传送带当前带上的卡（index/type/name）；战斗中也每轮从 state.cards 刷新。
+      conveyor: state.conveyor || null,
       airRaid,
       minePlan: (state.brief && state.brief.minePlan) || null,
       laneMath: (state.brief && state.brief.laneMath) || null,
@@ -5468,6 +7860,7 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
         ? { ...state.brief.protect, airThreats: flyingThreats.map((z) => z.type) }
         : (liveProtect.length && flyingThreats.length ? { airThreats: flyingThreats.map((z) => z.type) } : null),
       constraints,
+      suggestedRules,
       mechanics,
       forecast,
       history,
@@ -5498,7 +7891,10 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
         'plantLimit 为 null 就是本关没有植物数量上限；不要从任务原文、图鉴或以往关卡推断上限。objective.trusted=false 表示只是未初始化的模板，missions 已清空。',
         'forecast 是逐波的确定信息：带 lanes 的僵尸是写死的行，lanes=null 的生成时随机行；dynamic.mode=generated 表示本局动态僵尸已经生成（dynamicCount 是随机追加的数量），estimated 表示还没生成、estimate 是模拟期望。',
         'history 是这一关以前的结果记录（含用过的卡组、打到第几波、计划、备注）。它来自你的上一局，不是系统建议；开局先看它，结束时系统会自动把本局结果写回去。history.lessons 是以前（含自动复盘）写下的可执行经验，优先读。',
-        'prep 是准备模式：mode=normal 正常选卡；preplant 提前布阵（先种，再 pvz_start_level）；conveyor 传送带（不能选卡）；forced_deck 卡组已给定/锁定（不要换卡，直接开局）。',
+        'prep 是准备模式：mode=normal 正常选卡；preplant 提前布阵（先按整关波次写计划，再种，最后 pvz_start_level）；conveyor 传送带（不能选卡，当前卡在 conveyor.cards，index 每轮会变）；forced_deck 使用给定植物通关（没有选卡页，先写计划对策再开局，不能直接 start）。prep.mustPlanBeforeStart=true 表示现在点开始会返回 NEED_PLAN。',
+        ...(prep && prep.ready === false
+          ? ['准备还没就绪：卡槽/卡池尚未初始化（常见于关卡目标弹窗或页面过渡）。不要据此判断传送带或卡组；进入选卡/准备阶段后再 pvz_briefing 一次。']
+          : []),
         ...(state.objective && state.objective.trusted === false
           ? ['本关没有下发任务文本（objective 是模板），tasks 为空就按普通关卡打。']
           : []),
@@ -5546,6 +7942,25 @@ function createBriefing({ stats, reader, planStore, levelMemory = null, version,
   }
 
   function knowledge(args) {
+    // 批量图鉴：开局强制读卡池/僵尸时一次查多张，避免几十次往返。
+    if (args && Array.isArray(args.types) && args.types.length) {
+      const entries = [];
+      const missing = [];
+      for (const t of args.types.slice(0, 24)) {
+        if (!t) continue;
+        const r = knowledge({ type: String(t), kind: args.kind });
+        if (r && r.ok && r.entry) entries.push(r.entry);
+        else missing.push(String(t));
+      }
+      return {
+        ok: entries.length > 0,
+        batch: true,
+        count: entries.length,
+        entries,
+        missing,
+        hint: missing.length ? 'missing 里的 codename 没查到，可单独用 query 搜中文名。' : undefined,
+      };
+    }
     const { type, kind, query } = normalizeQuery(args);
     if (kind && !['plant', 'zombie', 'level'].includes(kind)) {
       return { ok: false, code: 'BAD_QUERY', reason: 'kind 只能是 plant / zombie / level' };
@@ -5687,10 +8102,14 @@ function normalizeCoverageGaps(gaps) {
   return [];
 }
 
-function counterCovers(counter, gap) {
+function counterCovers(counter, gap, deckSet) {
   if (!counter || typeof counter !== 'object') return false;
+  // counter 里写的卡必须真的在当前卡组里，否则“计划有克制”只是纸面覆盖。
+  if (counter.card && deckSet && deckSet.size && !deckSet.has(String(counter.card))) return false;
   const tags = Array.isArray(gap.tags) ? gap.tags : [];
-  if (counter.tag && tags.includes(String(counter.tag))) return true;
+  const counterTags = Array.isArray(counter.tags) ? counter.tags.map(String)
+    : (counter.tag ? [String(counter.tag)] : []);
+  if (counterTags.some((t) => tags.includes(t))) return true;
   if (counter.threat && tags.includes(String(counter.threat))) return true;
   const alts = Array.isArray(gap.alternatives) && gap.alternatives.length
     ? gap.alternatives.map(String)
@@ -5716,7 +8135,7 @@ function auditPlan(plan, ctx = {}) {
   if (!p.text) {
     warnings.push({ code: 'PLAN_NO_TEXT', reason: '计划缺少 text（给玩家看的中文摘要）' });
   }
-  const structuredKeys = ['lanes', 'counters', 'phases', 'triggers', 'emergency'];
+  const structuredKeys = ['lanes', 'counters', 'phases', 'triggers', 'emergency', 'queue', 'rules'];
   const structured = structuredKeys.filter((k) => {
     const v = p[k];
     if (Array.isArray(v)) return v.length > 0;
@@ -5727,6 +8146,27 @@ function auditPlan(plan, ctx = {}) {
       code: 'PLAN_TEXT_ONLY',
       reason: '计划只有文字：补 lanes（每行职责）、counters（机制→卡）、phases/triggers（波次条件），快模型才能直接执行',
     });
+  }
+
+  // 开局计划不建议写死具体行/列：僵尸生成和波次是动态的。
+  // 只提示，不阻止保存；running 时再写 queue 是允许的。
+  if (ctx.phase === 'preparing') {
+    const lanes = Array.isArray(p.lanes) ? p.lanes : [];
+    const positional = lanes.filter((l) => l && typeof l === 'object' && (
+      (l.wall != null && Number.isFinite(Number(l.wall)))
+      || (Array.isArray(l.output) && l.output.some((c) => Number.isFinite(Number(c))))
+      || (Array.isArray(l.econ) && l.econ.some((c) => Number.isFinite(Number(c))))
+    ));
+    const queue = Array.isArray(p.queue) ? p.queue : [];
+    const fixedQueue = queue.filter((t) => t && t.column != null && /^\d+$/.test(String(t.column)));
+    if (positional.length || fixedQueue.length) {
+      warnings.push({
+        code: 'PLAN_POSITIONAL_AT_START',
+        lanes: positional.map((l) => l.lane).filter((x) => x != null),
+        fixedTasks: fixedQueue.map((t) => t.id).filter(Boolean).slice(0, 6),
+        reason: '开局计划里出现了具体行/列/固定格。僵尸生成和波次是动态的，建议开局只写 counters/usage/phases 这类“什么克制什么、怎么用”的建议；位置留到 running 时由 capacityGaps/wallPlan/minePlan/lastResortPlan 现算。',
+      });
+    }
   }
 
   if (Array.isArray(p.lanes)) {
@@ -5755,9 +8195,10 @@ function auditPlan(plan, ctx = {}) {
 
   const gaps = normalizeCoverageGaps(ctx.coverageGaps);
   const counters = Array.isArray(p.counters) ? p.counters : [];
+  const deckSet = new Set((Array.isArray(ctx.deck) ? ctx.deck : []).map(String));
   for (const gap of gaps) {
     // 只认 counters 里的显式对应；卡组里带了某张卡不等于写了“用它处理这个机制”。
-    const covered = counters.some((c) => counterCovers(c, gap));
+    const covered = counters.some((c) => counterCovers(c, gap, deckSet));
     if (covered) continue;
     const alts = Array.isArray(gap.alternatives) && gap.alternatives.length ? gap.alternatives : [gap.capability];
     warnings.push({
@@ -5769,6 +8210,25 @@ function auditPlan(plan, ctx = {}) {
       reason: `本关需要能力 ${alts.join('/')}${gap.tags && gap.tags.length ? `（tag: ${gap.tags.join('/')}）` : ''}，计划里没有对应 counter${gap.candidates && gap.candidates.length ? `；卡池里能满足的是 ${gap.candidates.join('/')}` : ''}。补一条 counters 或写清替代方案。`,
     });
   }
+
+  // 时间敏感任务写死列：墙/雷到执行时僵尸可能已经越过，固定 c 列会变成
+  // WALL_TOO_LATE / MINE_TOO_LATE。只提示改列写法，不替模型改任务。
+  const queue = Array.isArray(p.queue) ? p.queue : [];
+  const fixedColumnWarn = (types, code, label, fix) => {
+    if (!Array.isArray(types) || !types.length) return;
+    const hits = queue.filter((t) => t && t.type !== 'shovel'
+      && types.includes(String(t.plant || ''))
+      && t.column != null && /^\d+$/.test(String(t.column)));
+    if (!hits.length) return;
+    warnings.push({
+      code,
+      ids: hits.map((t) => t.id).filter(Boolean).slice(0, 6),
+      columns: [...new Set(hits.map((t) => Number(t.column)))].sort((a, b) => a - b),
+      reason: `queue 里 ${label} 写死了列 c${[...new Set(hits.map((t) => Number(t.column)))].sort((a, b) => a - b).join('/c')}；僵尸越过这一列后任务会变成 ${code === 'PLAN_FIXED_WALL_COLUMN' ? 'WALL_TOO_LATE' : 'MINE_TOO_LATE'}。改用 column:'${fix}'（本地按最前僵尸/出土时间算），或至少带 cond.zombieColumnLt。`,
+    });
+  };
+  fixedColumnWarn(ctx.wallTypes, 'PLAN_FIXED_WALL_COLUMN', '坚果墙', 'ahead');
+  fixedColumnWarn(ctx.mineTypes, 'PLAN_FIXED_MINE_COLUMN', '土豆雷/地雷', 'safe');
 
   return { ok: warnings.length === 0, warnings };
 }
@@ -5922,10 +8382,17 @@ function createEventStreamApi({ snapshot, onLevelEnd = null, keyOf = null }) {
       .map((l) => ({ lane: l.lane, gap: l.gap, lossIn: l.lossIn, dps: l.dps }));
     const protect = (state && state.protectCells) || [];
     const flowerLineCells = protect.filter((c) => c && c.source !== 'tile');
-    const flowersDead = flowerLineCells.filter((c) => c.dead).length;
+    // 地块型保护格现在也能判定死亡（见过植物、后来没了），所以按全部保护格统计。
+    const flowersDead = protect.filter((c) => c && c.dead).length;
     const deadCells = protect.filter((c) => c && c.dead).map((c) => ({
       lane: c.lane, column: c.column, source: c.source || null, tip: c.tip || null,
+      // 死亡的保护目标要说清是哪张卡（弹簧豆/花…），否则复盘只能瞎归因。
+      plant: (c.plant && c.plant.type) || c.type || null,
+      name: (c.plant && c.plant.name) || null,
     }));
+    const protectTypes = [...new Set(protect
+      .map((c) => (c && c.plant && c.plant.type) || (c && c.type) || null)
+      .filter(Boolean))];
     const lastZombies = ((state && state.zombies) || []).slice(0, 16).map((z) => ({
       type: z.type, name: z.name || null, lane: z.lane, column: z.column, tags: z.tags || [], ehp: z.ehp,
     }));
@@ -5958,7 +8425,24 @@ function createEventStreamApi({ snapshot, onLevelEnd = null, keyOf = null }) {
       sunEnd: state && state.sun != null ? state.sun : null,
       plantsLost: run.plantsLost,
       mowersLost: run.mowersLost,
-      flowers: protect.length ? { total: protect.length, dead: flowersDead, deadKnown: flowerLineCells.length > 0, cells: deadCells } : null,
+      flowers: protect.length ? {
+        total: protect.length,
+        dead: flowersDead,
+        // 判负那一帧会清场，不能据此断言“全部死亡”。
+        lossTriggered: !!(state.level && state.level.lost),
+        // contact = 碰到即判负（踩坏鲜花）；eat = 被啃死。
+        mode: (state.brief && state.brief.protect && state.brief.protect.mode) || null,
+        // 地块型保护格以前 deadKnown 恒为 false，复盘会以为“没有保护植物死亡”；
+        // 现在保护格带了本体类型和死亡判定，可以当作已知事实用。
+        deadKnown: flowerLineCells.length > 0 || protectTypes.length > 0 || deadCells.length > 0,
+        types: protectTypes,
+        cells: deadCells,
+        goal: protect.map((c) => ({
+          lane: c.lane, column: c.column,
+          type: (c.plant && c.plant.type) || c.type || null,
+          dead: !!c.dead,
+        })),
+      } : null,
       lastZombies,
       pressure,
       tasks,
@@ -6129,9 +8613,12 @@ function createEventStreamApi({ snapshot, onLevelEnd = null, keyOf = null }) {
  * 这里没有 setStrategy、autoDeck、suggestDeck、本地队列 —— 决策只属于 LLM。
  */
 
-const BRIDGE_VERSION = '0.4.15';
+const BRIDGE_VERSION = '0.4.17';
 
-function createBridge(ctx) {
+function createBridge(ctx, opts = {}) {
+  // 测试/纯工具场景可以显式关掉“开局强制读图鉴”门；游戏内默认开启。
+  const knowledgeGateEnabled = opts && opts.knowledgeGate != null
+    ? !!opts.knowledgeGate : !(ctx && ctx.testMode);
   const A = (() => (typeof window !== 'undefined' ? window : globalThis))();
   const getCc = () => {
     try { return (ctx && ctx.unsafe && ctx.unsafe.engine && ctx.unsafe.engine.getCc && ctx.unsafe.engine.getCc()) || A.cc || null; } catch { return null; }
@@ -6155,7 +8642,291 @@ function createBridge(ctx) {
   const reader = createSnapshotReader({ getCc, findCompByClass, stats, latency, version: BRIDGE_VERSION });
   const planStore = createPlanStore(BRIDGE_VERSION);
   const levelMemory = createLevelMemory();
-  const actions = createActions({ getCc, findComps: reader.findComps, findCompByClass, stats, reader, version: BRIDGE_VERSION });
+  const actions = createActions({
+    getCc, findComps: reader.findComps, findCompByClass, stats, reader, version: BRIDGE_VERSION,
+    getPlan: () => planStore.getPlan(),
+    getLevelKey: () => {
+      try { return levelMemory.keyOf(snapshot()); } catch { return null; }
+    },
+  });
+  // 模型在 plan.queue 里写任务，本地按 tick 执行可行的那一条。
+  // 这里不选择卡/行，只处理冷却、阳光、占格和 cond；任务顺序仍由模型决定。
+  const queue = createActionQueue({ reader, actions });
+
+  // 旧计划不能跨关卡/跨模式继续生效：传送带的 plan 留到普通关会误导模型。
+  // 只在新一局/关卡 key 或 prep 模式变化时清空；不碰局内正常重写。
+  let lastPlanScope = null;
+  let lastPhaseSeen = null;
+  function planScopeOf(s) {
+    if (!s) return null;
+    const mode = s.prep && s.prep.mode ? String(s.prep.mode) : null;
+    if (!s.levelKey && !mode) return null;
+    return {
+      key: s.levelKey || null,
+      mode,
+      conveyor: !!(s.prep && s.prep.conveyor),
+    };
+  }
+  function samePlanScope(a, b) {
+    if (!a || !b) return true;
+    // 关卡 key 还没解析出来时是 null，不能因此把刚写的计划清掉。
+    if (a.key && b.key && a.key !== b.key) return false;
+    if (a.conveyor !== b.conveyor) return false;
+    if (a.mode && b.mode && a.mode !== b.mode) return false;
+    return true;
+  }
+  // 本地算好的微决策：只给“这条动作现在值不值得做”的 yes/no，
+  // 不替模型选卡/选行；模型可以回 other 自己用 pvz_act。
+  const decisionStore = new Map();
+  // 开局强制读图鉴：briefing 后必须用 pvz_knowledge 查完卡池植物和本关僵尸，
+  // 才允许选卡/写计划/开局。换关/重开时重置。
+  let knowledgeGate = { briefed: false, deck: [], zombies: [], read: new Set() };
+  function resetKnowledgeGate() {
+    knowledgeGate = { briefed: false, deck: [], zombies: [], read: new Set() };
+  }
+  function resetPlanState() {
+    try { planStore.reset(); } catch { /* ignore */ }
+    try { queue.clear(); } catch { /* ignore */ }
+    decisionStore.clear();
+    resetKnowledgeGate();
+    lastPlanScope = null;
+  }
+  // 只给事实：哪些威胁在当前 plan/queue 里没有对应任务。
+  // 不替模型写任务，模型看到后自己决定补什么。
+  function buildThreatGaps(s) {
+    if (!s || !s.brief) return [];
+    const tasks = (s && s.queue && s.queue.tasks) || [];
+    const plantSt = (type) => {
+      try { return stats.plantStatsOf(type); } catch { return null; }
+    };
+    const isWallTask = (t) => {
+      if (!t || t.type !== 'plant') return false;
+      const st = plantSt(t.plant);
+      return isWallCard(t.plant, st);
+    };
+    const isOutputTask = (t) => {
+      if (!t || t.type !== 'plant') return false;
+      const st = plantSt(t.plant);
+      if (!st || isWallCard(t.plant, st)) return false;
+      return !!(st.attack && Number(st.attack.dps) > 0)
+        || !!(st.burst && Number(st.burst.dmg) > 0);
+    };
+    const taskLanes = new Set(tasks.map((t) => Number(t.lane)).filter(Number.isFinite));
+    const wallLanes = new Set(tasks.filter(isWallTask).map((t) => Number(t.lane)));
+    const outputLanes = new Set(tasks.filter(isOutputTask).map((t) => Number(t.lane)));
+    const counters = (s.plan && Array.isArray(s.plan.counters)) ? s.plan.counters : [];
+    const counterCovers = (g) => counters.some((c) => {
+      if (!c || typeof c !== 'object') return false;
+      if (g.tags && c.tag && g.tags.includes(String(c.tag))) return true;
+      if (g.requiredCapability && c.capability
+        && [g.requiredCapability, ...(g.alternatives || [])].includes(String(c.capability))) return true;
+      if (g.candidates && c.card && g.candidates.includes(String(c.card))) return true;
+      return false;
+    });
+    const gaps = [];
+    for (const w of (s.brief.wallPlan || [])) {
+      if (!w || w.risk !== 'no_wall' || wallLanes.has(Number(w.lane))) continue;
+      gaps.push({
+        kind: 'wall', lane: w.lane, etaSec: w.frontEta, wallHp: w.wallHp,
+        reason: 'wallPlan no_wall 且 queue 没有该行墙任务',
+      });
+    }
+    for (const r of (s.brief.rescuePlan || [])) {
+      if (!r || r.lane == null || !r.window) continue;
+      if (!(r.window.killBeforeWindow === false || r.window.killBeforeHouse === false)) continue;
+      if (outputLanes.has(Number(r.lane))) continue;
+      gaps.push({
+        kind: 'rescue', lane: r.lane, etaSec: r.window.contactInSec,
+        deficit: r.window.killSec, q: r.window.killBeforeWindow,
+        reason: 'rescuePlan 该行打不过且 queue 没有输出/救场任务',
+      });
+    }
+    for (const l of (s.lanes || [])) {
+      if (!l.front) continue;
+      if (!(Number(l.gap) > 0 || l.killBeforeHouse === false)) continue;
+      if (outputLanes.has(Number(l.lane))) continue;
+      gaps.push({
+        kind: 'output', lane: l.lane, etaSec: l.lossIn, deficit: l.gap,
+        reason: '本行 dps 低于 incoming 且 queue 没有输出任务',
+      });
+    }
+    for (const m of (s.brief.minePlan || [])) {
+      if (!m || !(m.tooLate || m.latestSafeColumn == null)) continue;
+      if (tasks.some((t) => t.type === 'plant' && Number(t.lane) === Number(m.lane))) continue;
+      gaps.push({
+        kind: 'mine', lane: m.lane, etaSec: m.etaAtLatest,
+        reason: '地雷已来不及且 queue 没有该行任务',
+      });
+    }
+    const protect = s.brief.protect;
+    for (const lane of (protect && protect.unguardedLanes) || []) {
+      if (!tasks.some((t) => Number(t.lane) === Number(lane))) {
+        gaps.push({ kind: 'protect', lane, reason: '保护行没有 queue 任务' });
+      }
+    }
+    const missing = (s.brief.coverageGaps && s.brief.coverageGaps.missing) || [];
+    for (const g of missing) {
+      if (!g || counterCovers(g)) continue;
+      gaps.push({
+        kind: 'capability',
+        lane: null,
+        requiredCapability: g.capability,
+        alternatives: g.alternatives || [],
+        tags: g.tags || [],
+        candidates: g.candidates || [],
+        reason: g.text || `卡组缺少 ${g.capability}，计划里也没有 counter`,
+      });
+    }
+    return gaps.slice(0, 12);
+  }
+
+  function makeDecisions(s) {
+    const now = Date.now();
+    for (const [id, d] of decisionStore) {
+      if (!d || d.expiresAt <= now) decisionStore.delete(id);
+    }
+    if (!s || s.phase !== 'running') return [];
+    const out = [];
+    const add = (id, kind, question, action, facts, ttl = 4) => {
+      if (out.length >= 6) return;
+      const expiresAt = now + ttl * 1000;
+      decisionStore.set(id, { action, stateVersion: s.stateVersion, expiresAt });
+      out.push({
+        id, kind, question, action, facts,
+        stateVersion: s.stateVersion, expiresInSec: ttl,
+      });
+    };
+    const ver = s.stateVersion || '0';
+    // 没有豆时不要生成“给豆”决策：否则模型点 yes 只会拿到 NO_FOOD。
+    if (Number(s.plantFood) > 0) {
+      for (const f of ((s.brief && s.brief.plantFoodPlan) || []).slice(0, 3)) {
+        if (!(f && Number(f.targets) > 0) || f.whiff === true) continue;
+        add(
+          `food:${f.lane}:${f.column}:${ver}`,
+          'plant_food',
+          `给第 ${Number(f.lane) + 1} 行第 ${Number(f.column) + 1} 列的 ${f.name || f.type} 能量豆？`,
+          { type: 'plant_food', lane: f.lane, column: f.column },
+          { targets: f.targets, total: f.total, kind: f.kind },
+        );
+      }
+    }
+    // 最后防线：这一行已经守不住、但前面墙/植物还能拖时，把后排向日葵换成雷。
+    // minePlan 已把阻挡物啃食时间算进 safeColumns；这里只做交叉引用，不替模型执行。
+    for (const r of ((s.brief && s.brief.lastResortPlan) || []).slice(0, 2)) {
+      if (!r || !r.replaceCell) continue;
+      const card = (s.cards || []).find((c) => c.type === r.mine);
+      if (!card || !card.ready || Number(s.sun) < Number(card.cost)) continue;
+      const queued = ((s.plan && s.plan.queue) || []).some((t) => t
+        && t.type === 'replace' && Number(t.lane) === Number(r.lane)
+        && Number(t.column) === Number(r.replaceCell.column)
+        && String(t.plant) === String(r.mine));
+      if (queued) continue;
+      add(
+        `last:${r.lane}:${r.replaceCell.column}:${r.mine}:${ver}`,
+        'last_resort',
+        `第 ${Number(r.lane) + 1} 行守不住（clearSec ${r.clearSec}s > lossIn ${r.lossIn}s）；前面植物能拖到雷出土，把 c${Number(r.replaceCell.column) + 1} 的 ${r.replaceCell.type} 换成 ${r.mine}？`,
+        { type: 'replace', lane: r.lane, column: r.replaceCell.column, plant: r.mine },
+        { armTimeSec: r.armTimeSec, etaSec: r.etaSec, tiles: r.tiles },
+        5,
+      );
+    }
+
+    // 缺墙/墙快倒：给一条可一键补墙的决策。僵尸进 c2 以内时不补（先救场），
+    // 只在还有时间立墙时出现；仍然只执行模型回 yes 的那一条。
+    const wallCandidates = ((s.brief && s.brief.wallPlan) || [])
+      .filter((w) => w && (w.risk === 'no_wall' || w.risk === 'wall_too_thin')
+        && w.frontColumn != null && Number(w.frontColumn) >= 1.5 && Number(w.frontColumn) <= 8)
+      .sort((a, b) => Number(a.frontColumn) - Number(b.frontColumn));
+    if (wallCandidates.length) {
+      const w = wallCandidates[0];
+      const lane = Number(w.lane);
+      const cardType = String(w.wallCard || 'wallnut');
+      const card = (s.cards || []).find((c) => c.type === cardType);
+      if (card && card.ready && Number(s.sun) >= Number(card.cost) + 25) {
+        const row = s.board && s.board[lane];
+        let col = Math.min(8, Math.floor(Number(w.frontColumn)) - 1);
+        while (col >= 0 && row && row.cells && row.cells[col]) col -= 1;
+        const queued = ((s.plan && s.plan.queue) || []).some((t) => t
+          && t.type === 'plant' && Number(t.lane) === lane && String(t.plant) === cardType);
+        if (col >= 0 && !queued) {
+          add(
+            `wall:${lane}:${col}:${cardType}:${ver}`,
+            'wall',
+            `第 ${lane + 1} 行${w.risk === 'no_wall' ? '没有墙' : '墙快倒'}，${w.frontType || '僵尸'}已到 c${Number(w.frontColumn).toFixed(1)}；在 c${col + 1} 补 ${cardType}？`,
+            { type: 'plant', lane, column: col, plant: cardType },
+            { risk: w.risk, frontColumn: w.frontColumn, wallHp: w.wallHp },
+            5,
+          );
+        }
+      }
+    }
+
+    // 波间升级：把 brief.upgradePlan 变成一条可一键接受的 replace 决策。
+    // 只在“僵尸还没贴脸、阳光留出余量、卡就绪”时出现；任何一行进 c3 以内
+    // 或有 rescuePlan 时，升级让位于救场，不再生成。
+    // 只有“真的贴脸/已经来不及”才让升级让位：不能因为 rescuePlan 里有远一点的
+    // 弱线就整个波次都不让升级，否则永远等不到波间窗口。
+    const emergency = (s.lanes || []).some((l) => l && l.front && (
+      Number(l.front.column) < 3
+      || (l.lossIn != null && Number(l.lossIn) < 10)
+      || (l.actBy != null && Number(l.actBy) < 0)
+    ));
+    const upgrades = (emergency ? [] : ((s.brief && s.brief.upgradePlan) || []))
+      .filter((u) => u && Number(u.zombies) >= 2)
+      .sort((a, b) => (b.zombies - a.zombies)
+        || ((b.candidates && b.candidates[0] && b.candidates[0].multiDps) || 0)
+        - ((a.candidates && a.candidates[0] && a.candidates[0].multiDps) || 0))
+      .slice(0, 3);
+    for (const u of upgrades) {
+      const lane = (s.lanes || []).find((l) => Number(l.lane) === Number(u.lane));
+      const front = lane && lane.front;
+      if (!front || Number(front.column) < 4) continue; // 贴脸先救场，不在 c4 以内做升级
+      const c = (u.candidates || [])[0];
+      if (!c || !Array.isArray(c.replaceCells) || !c.replaceCells.length) continue;
+      const card = (s.cards || []).find((x) => x.type === c.card);
+      if (!card || !card.ready) continue;
+      const cost = Number(c.cost) || 0;
+      if (Number(s.sun) < cost + 75) continue; // 至少给下一株墙/应急留 75 阳光
+      const cell = c.replaceCells.find((x) => Number(x.column) < Number(front.column));
+      if (!cell) continue;
+      const queued = ((s.plan && s.plan.queue) || []).some((t) => t
+        && t.type === 'replace'
+        && Number(t.lane) === Number(u.lane)
+        && Number(t.column) === Number(cell.column)
+        && String(t.plant) === String(c.card));
+      if (queued) continue;
+      add(
+        `upg:${u.lane}:${cell.column}:${c.card}:${ver}`,
+        'upgrade',
+        `第 ${Number(u.lane) + 1} 行有 ${u.zombies} 只僵尸、现有 ${u.outputs} 株单体输出（${u.outputDps} dps）；花 ${cost} 把 c${Number(cell.column) + 1} 的 ${cell.type} 换成 ${c.card}（${c.targets || 3} 目标 ${c.multiDps}）？`,
+        { type: 'replace', lane: u.lane, column: cell.column, plant: c.card },
+        { zombies: u.zombies, currentDps: u.outputDps, multiDps: c.multiDps, cost },
+        6,
+      );
+    }
+    for (const a of (s.aimOptions || []).slice(0, 3)) {
+      if (!a || a.column == null) continue;
+      add(
+        `aim:${a.card}:${a.lane}:${a.column}:${ver}`,
+        'aim',
+        `把 ${a.card} 放在第 ${Number(a.lane) + 1} 行第 ${Number(a.column) + 1} 列？`,
+        { type: 'plant', plant: a.card, lane: a.lane, column: a.column },
+        { hits: a.hits, total: a.total, kills: a.kills },
+      );
+    }
+    for (const a of ((s.brief && s.brief.activatePlan) || []).slice(0, 2)) {
+      if (!a || !a.shouldAct || a.aim === 'free_cell' || a.aim === 'swap') continue;
+      add(
+        `activate:${a.lane}:${a.column}:${ver}`,
+        'activate',
+        `激活第 ${Number(a.lane) + 1} 行第 ${Number(a.column) + 1} 列的 ${a.name || a.type}？`,
+        { type: 'activate', lane: a.lane, column: a.column },
+        { aim: a.aim, targets: a.targets },
+      );
+    }
+    return out;
+  }
+
   const briefingApi = createBriefing({
     stats, reader, planStore, levelMemory, version: BRIDGE_VERSION,
     featureList: (kind) => featureList(getCc, kind),
@@ -6186,11 +8957,61 @@ function createBridge(ctx) {
   function snapshot() {
     const s = reader.snapshot();
     if (s && s.ok) {
+      // 关卡稳定 id：关卡结束后回到地图也能用它写回这一关的记忆。
+      try { s.levelKey = levelMemory.keyOf(s); } catch { s.levelKey = null; }
+
+      // 新一局/回菜单后再进关：上一局的 plan 不能继续生效。
+      const endPhase = ['won', 'lost', 'menu', 'worldmap'];
+      const startPhase = ['preparing', 'objective', 'running'];
+      const newRun = !!(lastPhaseSeen
+        && ((endPhase.includes(lastPhaseSeen) && startPhase.includes(s.phase))
+          || (lastPhaseSeen === 'running' && s.phase === 'preparing')));
+      lastPhaseSeen = s.phase || lastPhaseSeen;
+      if (newRun) resetPlanState();
+
+      // 同一关但模式变了（传送带 → 普通关）也要丢弃旧计划。
+      const scope = planScopeOf(s);
+      if (scope && lastPlanScope && !samePlanScope(scope, lastPlanScope)) resetPlanState();
+      if (scope) lastPlanScope = scope;
+
       const p = planStore.getPlan();
       s.plan = p ? p.plan : null;
       s.planSavedAt = p ? p.savedAt : null;
-      // 关卡稳定 id：关卡结束后回到地图也能用它写回这一关的记忆。
-      try { s.levelKey = levelMemory.keyOf(s); } catch { s.levelKey = null; }
+      // 每回合带一份审计结果：旧 plan 的 deck 和实际不符时，模型下一轮能看到并重写。
+      try {
+        // 选卡还没完成时 deck 还不稳定，先不判 deck mismatch，避免刚写计划就报假警。
+        const prep = s.prep;
+        const deckFinal = !prep || prep.gameStarted || prep.deckLocked
+          || prep.mode === 'conveyor' || !prep.hasSeedChooser;
+        const wallTypes = (s.deck || []).filter((t) => {
+          try { const st = stats.plantStatsOf(t); return !!(st && String(st.family) === 'Defence'); } catch { return false; }
+        });
+        const mineTypes = (s.deck || []).filter((t) => {
+          try { const st = stats.plantStatsOf(t); return !!(st && Number(st.armTimeSec) > 0); } catch { return false; }
+        });
+        const audit = planStore.audit({
+          coverageGaps: s.brief && s.brief.coverageGaps,
+          deck: deckFinal ? s.deck : null,
+          wallTypes,
+          mineTypes,
+          phase: s.phase,
+        });
+        if (audit && audit.ok === false) s.planAudit = audit;
+      } catch { /* ignore */ }
+      try {
+        const decisions = makeDecisions(s);
+        if (decisions.length) s.decisions = decisions;
+      } catch { /* ignore */ }
+
+      // 关卡结束/回菜单：队列没有意义，直接停，避免下一场景继续种。
+      if (s.phase === 'won' || s.phase === 'lost' || s.phase === 'menu' || s.phase === 'worldmap') {
+        try { queue.clear(); } catch { /* ignore */ }
+      }
+      s.queue = queue.status();
+      try {
+        const gaps = buildThreatGaps(s);
+        if (gaps.length) s.threatGaps = gaps;
+      } catch { /* ignore */ }
     }
     return s;
   }
@@ -6204,6 +9025,7 @@ function createBridge(ctx) {
       'restartLevel', 'dismissObjective', 'collect', 'moveCart', 'resume', 'health',
       'getLevelMemory', 'listLevelMemory', 'setLevelNote', 'addLevelLessons', 'setLevelLessons',
       'exportLevelMemory', 'importLevelMemory', 'forecast', 'latencyState',
+      'setQueue', 'queueStatus', 'clearQueue', 'setQueueThinking', 'decide',
     ];
     const missing = api.filter((k) => typeof apiObj[k] !== 'function');
     return {
@@ -6225,7 +9047,8 @@ function createBridge(ctx) {
         autoCollect: true,
         localStrategy: false,
         autoDeck: false,
-        queue: false,
+        // 队列只执行模型写下的任务；不本地选卡/改计划。
+        queue: true,
         forecast: true,
         levelMemory: levelMemory.persistent,
         latency: true,
@@ -6241,23 +9064,241 @@ function createBridge(ctx) {
     };
   }
 
+  function knowledgeGateFail(extraTypes) {
+    if (!knowledgeGateEnabled) return null;
+    let s = null;
+    try { s = snapshot(); } catch { s = null; }
+    if (!s || s.ok === false || s.phase !== 'preparing') return null;
+    const prep = s.prep;
+    // 普通/提前布阵/给定卡组都要先读图鉴；传送带关没有选卡环节，不拦。
+    if (!prep || prep.gameStarted || prep.mode === 'conveyor') return null;
+    if (!knowledgeGate.briefed) {
+      return {
+        ok: false, code: 'NEED_BRIEFING',
+        reason: '开局选卡/写计划前先 pvz_briefing 读完整关事实。',
+        hint: 'briefing 里已经带了本关僵尸图鉴；之后只需查当前卡组和保护/预置植物。',
+      };
+    }
+    // 只强制“这一局真正会用到的东西”：当前卡组 + 保护植物 + 预置植物 + 本次要换上的卡。
+    // 不再要求查完整卡池（52 张）——那会把选卡阶段变成两次大图鉴轰炸。
+    const deck = knowledgeGate.deck.length ? knowledgeGate.deck : (s.deck || []).filter(Boolean);
+    const protectedTypes = ((s.protectCells || []).map((c) => c && c.plant && c.plant.type))
+      .filter(Boolean);
+    const preplaced = (s.plants || []).map((p) => p && p.type).filter(Boolean);
+    const required = [...new Set([
+      ...deck, ...protectedTypes, ...preplaced,
+      ...(Array.isArray(extraTypes) ? extraTypes : []),
+    ].map((x) => x && String(x)).filter(Boolean))];
+    const missing = required.filter((t) => !knowledgeGate.read.has(t));
+    if (missing.length) {
+      return {
+        ok: false, code: 'NEED_KNOWLEDGE',
+        missing,
+        required: required.length,
+        read: knowledgeGate.read.size,
+        scope: 'deck+protect',
+        reason: `只差 ${missing.length}/${required.length} 个“当前卡组/保护植物”没查图鉴。`,
+        hint: `用 pvz_knowledge {types:[...]} 查 ${missing.join(', ')}，再继续；不需要整张卡池全查。`,
+      };
+    }
+    return null;
+  }
+
   const apiObj = {
     version: BRIDGE_VERSION,
     snapshot,
-    briefing: () => briefingApi.briefing(),
-    knowledge: (args) => briefingApi.knowledge(args),
-    act: (a, opts) => actions.act(a, opts),
-    actAll: (list) => actions.actAll(list),
+    briefing: () => {
+      const r = briefingApi.briefing();
+      if (r && r.ok) {
+        knowledgeGate.briefed = true;
+        // 只记“这局会用到”的卡：当前卡组 + 保护植物 + 预置植物。
+        // 卡池 52 张不再进强制清单。
+        knowledgeGate.deck = [...new Set([
+          ...(((r.deck && r.deck.current) || []).filter(Boolean)),
+          ...(((r.protect && r.protect.cells) || []).map((c) => c && c.plant && c.plant.type).filter(Boolean)),
+        ])];
+        knowledgeGate.zombies = [...new Set((r.zombies || []).map((z) => z && z.type).filter(Boolean))];
+      }
+      return r;
+    },
+    knowledge: (args) => {
+      const r = briefingApi.knowledge(args);
+      if (r && r.ok) {
+        const add = (e) => { if (e && e.type) knowledgeGate.read.add(String(e.type)); };
+        add(r.entry);
+        if (Array.isArray(r.entries)) r.entries.forEach(add);
+      }
+      return r;
+    },
+    act: async (a, opts) => {
+      // 模型手动动作优先；队列短暂让路，避免同一格/同一卡抢操作。
+      try { queue.pause(1800); } catch { /* ignore */ }
+      const restart = !!(a && a.type === 'restart');
+      const r = await actions.act(a, opts);
+      // SUN 失败多半不是“没阳光”，而是模型思考期间队列已经花掉了：
+      // 把队列最近 8 秒花的阳光带回去，模型就知道该按哪个数重试。
+      if (r && r.ok === false && r.code === 'SUN') {
+        try {
+          const q = queue.status();
+          if (q && q.recentSunSpent) {
+            r.queueSpentRecent = q.recentSunSpent;
+            r.hint = `执行时只有 ${r.have} 阳光，本地队列最近 8 秒已花 ${q.recentSunSpent}；按返回的 have 重新算，不要沿用上一轮 state 的阳光。`;
+          }
+        } catch { /* ignore */ }
+      }
+      if (restart && r && r.ok !== false) resetPlanState();
+      return r;
+    },
+    actAll: async (list) => {
+      try { queue.pause(1800); } catch { /* ignore */ }
+      const restart = Array.isArray(list) && list.some((x) => x && x.type === 'restart');
+      const r = await actions.actAll(list);
+      if (restart && r && r.ok !== false) resetPlanState();
+      return r;
+    },
+    clearMemory: (scope) => {
+      let key = null;
+      try { if (scope !== 'all') key = levelMemory.keyOf(snapshot()); } catch { key = null; }
+      const r = levelMemory.clear(key || null);
+      // 记忆和当前计划/队列一起清，避免清完历史还挂着上一关的旧计划。
+      try { resetPlanState(); } catch { /* ignore */ }
+      return { ...(r || { ok: true }), scope: key ? 'level' : 'all', key };
+    },
+    setQueue: (tasks, opts) => queue.setTasks(tasks, opts),
+    queueStatus: () => queue.status(),
+    clearQueue: () => queue.clear(),
+    // 模型请求期间暂停普通队列；urgent 规则（本地短窗口救场）仍执行。
+    setQueueThinking: (v) => { queue.setThinking(v); return { ok: true, thinking: !!v }; },
+    // 模型对本地微决策回 yes/no/other；yes 才执行对应 action，no 只跳过。
+    decide: async (id, choice, reason) => {
+      const key = String(id || '');
+      const d = decisionStore.get(key);
+      if (!d) return { ok: false, code: 'NO_DECISION', reason: 'decision 不存在或已被清理' };
+      if (Date.now() > Number(d.expiresAt)) {
+        decisionStore.delete(key);
+        return { ok: false, code: 'STALE_DECISION', id: key, reason: 'decision 已过期' };
+      }
+      const now = snapshot();
+      if (now && now.stateVersion && d.stateVersion && now.stateVersion !== d.stateVersion) {
+        decisionStore.delete(key);
+        return {
+          ok: false, code: 'STALE_DECISION', id: key,
+          reason: `局面已变化（${d.stateVersion} → ${now.stateVersion}）`,
+          currentStateVersion: now.stateVersion,
+        };
+      }
+      const c = String(choice || '').toLowerCase();
+      if (['no', 'skip', 'b'].includes(c)) {
+        decisionStore.delete(key);
+        return { ok: true, id: key, choice: 'no', skipped: true, reason: reason || null };
+      }
+      if (c === 'other') {
+        decisionStore.delete(key);
+        return { ok: true, id: key, choice: 'other', skipped: true, hint: '用 pvz_act 自己下动作' };
+      }
+      if (!['yes', 'a', 'accept', 'ok'].includes(c)) {
+        return { ok: false, code: 'BAD_CHOICE', id: key, choice: String(choice || ''), reason: 'choice 只能是 yes/no/other' };
+      }
+      decisionStore.delete(key);
+      const r = await actions.act(d.action);
+      return {
+        ok: !(r && r.ok === false), id: key, choice: 'yes',
+        action: d.action, result: r,
+      };
+    },
+    // 测试/调试用：手动推进一拍；正常游戏由 450ms timer 自己跑。
+    queueTick: () => queue.tick(),
     events: (limit) => eventsApi.events(limit),
     pollEvents: (limit) => eventsApi.pollEvents(limit),
     eventStatus: () => eventsApi.status(),
     setEventSampler: (ms) => eventsApi.setEventSampler(ms),
-    setPlan: (plan) => planStore.setPlan(plan),
+    setPlan: (plan) => {
+      const gate = knowledgeGateFail();
+      if (gate) return gate;
+      const r = planStore.setPlan(plan);
+      if (r && r.ok) {
+        if (!r.plan) queue.clear();
+        else {
+          // rules 是“当局本地规则”：开局由模型写好，交给 450ms 队列抢短窗口。
+          // 它和 queue 共用同一个执行器；rules 默认 repeat + oncePerWave/cooldownSec 限频。
+          const ruleTasks = Array.isArray(r.plan.rules)
+            ? r.plan.rules.map((rule, i) => {
+              const doObj = { ...((rule && rule.do) || {}) };
+              const limits = (rule && rule.limits) || {};
+              const when = (rule && (rule.when || rule.cond)) || {};
+              if (!doObj || !doObj.type) return null;
+              // 模型经常只写 lane:'airborne' 不写 column；默认 back（c0），否则整条规则无法定位。
+              if ((doObj.type === 'plant' || doObj.type === 'replace') && doObj.column == null) doObj.column = 'back';
+              if (doObj.lane == null) doObj.lane = /blover/i.test(String(doObj.plant || '')) ? 'airborne' : 'danger';
+              return {
+                id: (rule && rule.id) || `rule-${i + 1}`,
+                ...doObj,
+                cond: { ...when },
+                validForSec: limits.validForSec != null ? limits.validForSec : (rule && rule.validForSec),
+                repeat: true,
+                cooldownSec: limits.cooldownSec != null ? limits.cooldownSec : (rule && rule.cooldownSec),
+                oncePerWave: !!(limits.oncePerWave != null ? limits.oncePerWave : (rule && rule.oncePerWave)),
+                // 规则默认 urgent：模型思考期间也允许执行，用来抢三叶草这类短窗口。
+                urgent: limits.urgent != null ? !!limits.urgent : (rule && rule.urgent != null ? !!rule.urgent : true),
+                onFail: (rule && rule.onFail) || 'retry',
+                priority: (rule && rule.priority),
+              };
+            }).filter(Boolean)
+            : null;
+          const hasRules = Array.isArray(r.plan.rules);
+          if (Array.isArray(r.plan.queue) || hasRules) {
+            // 队列里用 card 下标的旧任务，入队时能解析就转成 codename；
+            // 解析不了的留给队列报 NO_CARD 并丢弃，避免选卡后下标漂移种错卡。
+            let s = null;
+            try { s = snapshot(); } catch { s = null; }
+            const cards = (s && s.cards) || [];
+            const tasks = [...(Array.isArray(r.plan.queue) ? r.plan.queue : []), ...(ruleTasks || [])].map((t) => {
+              if (!t || typeof t !== 'object' || t.plant != null || t.card == null) return t;
+              const c = cards[Number(t.card)];
+              return c && c.type ? { ...t, plant: c.type } : t;
+            });
+            queue.setTasks(tasks, {
+              // 有规则时把本地拍加快到 200ms，给三叶草这类 0.5–1s 窗口留出手速。
+              tickMs: (ruleTasks && ruleTasks.length)
+                ? Math.min(Number(r.plan.queueTickMs) || 450, 200)
+                : r.plan.queueTickMs,
+              pausedUntil: r.plan.queuePausedUntil,
+            });
+          }
+        }
+      }
+      return r;
+    },
     getPlan: () => planStore.getPlan(),
-    chooseDeck: (cards, replace) => actions.chooseDeck(cards, replace),
+    chooseDeck: async (cards, replace) => {
+      // 想换上的卡必须先查过图鉴（先定对策，再查需要的那几张）。
+      const gate = knowledgeGateFail(cards);
+      if (gate) return gate;
+      const r = await actions.chooseDeck(cards, replace);
+      // 选完卡立刻把新卡组的 coverageGaps 带回去，避免模型拿选卡前的缺口当结论。
+      if (r && r.ok) {
+        try {
+          const s = snapshot();
+          if (s && s.ok !== false) {
+            r.deck = s.deck;
+            r.coverageGaps = s.brief && s.brief.coverageGaps;
+            r.deckCapabilities = s.brief && s.brief.deckCapabilities;
+          }
+        } catch { /* ignore */ }
+      }
+      return r;
+    },
     deckStatus: () => actions.deckStatus(),
-    startLevel: () => actions.startLevel(),
-    restartLevel: () => actions.restartLevel(),
+    startLevel: () => {
+      const gate = knowledgeGateFail();
+      if (gate) return gate;
+      return actions.startLevel();
+    },
+    restartLevel: async () => {
+      const r = await actions.restartLevel();
+      if (r && r.ok !== false) resetPlanState();
+      return r;
+    },
     dismissObjective: () => actions.dismissObjective(),
     collect: () => actions.collect(),
     moveCart: (cart, direction) => actions.moveCart(cart, direction),
@@ -6309,6 +9350,7 @@ function createBridge(ctx) {
     },
     health,
     dispose: () => {
+      try { queue.dispose(); } catch { /* ignore */ }
       eventsApi.dispose();
       if (reader.setAutoCollect) reader.setAutoCollect(false);
       return { ok: true };
@@ -6378,12 +9420,14 @@ const TOOLS = [
     title: '图鉴 / 数值查询',
     description:
       '查询植物、僵尸或本关的事实：图鉴简介、特殊能力/弱点、hp/护甲/EHP/速度/啃食 DPS、费用/冷却/DPS/产阳光/射程/弹道/用法（自动、点击、只能墓碑、只能冰块、被啃食）。' +
-      '给 type 拿完整条目；给 query 做关键词搜索（中文/英文/codename）；kind 可选 plant/zombie/level。只给事实，不给结论。',
+      '给 type 拿完整条目；给 types 批量查多个 codename；给 query 做关键词搜索（中文/英文/codename）；kind 可选 plant/zombie/level。只给事实，不给结论。' +
+      '流程：pvz_briefing 已经带了本关僵尸图鉴，先按僵尸/机制定对策；再只查“要选的卡 + 保护/预置植物”。开局 normal 只强制校验当前卡组和保护植物，不再要求整张卡池全查；缺哪些会在 NEED_KNOWLEDGE.missing 里列出。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         type: { type: 'string', description: 'codename，例如 sunflower、pirate_armor1。' },
+        types: { type: 'array', maxItems: 24, items: { type: 'string' }, description: '批量查多个 codename（当前卡组/保护植物/新出现的僵尸）。' },
         query: { type: 'string', description: '关键词，例如 “海盗 水 僵尸”。' },
         kind: { type: 'string', enum: ['plant', 'zombie', 'level'], description: '限定查询类别。' },
       },
@@ -6393,7 +9437,7 @@ const TOOLS = [
     name: 'pvz_state',
     title: '实时状态',
     description:
-      '读取当前实时状态：phase、暂停、阳光/能量豆、plantFoodUsable、波次与倒计时、任务、卡槽（cd/cdReady/affordable/sunShort/ready）、植物（family/foodable）、僵尸（hp/armorHp/ehp/etaToHouse）、每行事实（僵尸数/最近列/推车/output/dps/剩余 ehp/sunProducers）、地形图、可种格、障碍、机制、矿车、当前计划、protectCells、brief、prep。默认返回精简版（去掉棋盘/地形/可种位等简报已给过的字段）；需要全量时传 full=true。' +
+      '读取当前实时状态：phase、暂停、stateVersion、阳光/能量豆、plantFoodUsable、波次与倒计时、任务、卡槽（cd/cdReady/affordable/sunShort/ready、plantFood 发数/单发伤害/每发目标/来回次数/总伤害）、植物（family/foodable/underAttack/eatDps/holdSec）、僵尸（hp/armorHp/ehp/speed/etaToHouse/eatDps/eating）、每行事实（僵尸数/最近列/推车/output/dps/dpsEffective/dpsOnFront/frontPlant/contactInSec/holdSec/killWindowSec/killBeforeWindow/projectedHouseSec/剩余 ehp/sunProducers）、地形图、可种格、障碍、机制、矿车、当前计划/planAudit、threatGaps（wall/output/rescue/mine/protect/capability）、decisions（本地微决策，用 pvz_decide 回答）、protectCells（保护格本体：plant.type/name/hp/brief/usage.restSec/knockback、dead；植物列表里对应项 protected=true）、brief（含 rescuePlan/wallPlan/plantFoodPlan/aimOptions）、prep、conveyor（传送带当前卡）。传送带关 cards[] 就是 current 带上的卡，index 每轮可能变化。默认返回精简版（去掉棋盘/地形/可种位等简报已给过的字段）；需要全量时传 full=true。' +
       'pvz_act 的返回里已经带 state（同一份精简状态），动作后直接用那份，不必每轮再调 pvz_state；紧接着重复调用会返回 duplicate 提示而不是整份状态。changesSinceLast 是自上次模型读取以来的变化（plantsLost/plantsAdded/mowerLost/waveDelta/sunDelta/zombieDelta），没有变化时 none=true。' +
       '坐标：lane 0-4 从上到下；column 0-8 从左（房子）到右（僵尸出生点）。',
     inputSchema: {
@@ -6423,16 +9467,19 @@ const TOOLS = [
     title: '记录整关计划',
     description:
       '记录你自己制定的整关计划。工具只保存，不执行、不修正，不做任何本地决策。' +
-      'plan 用结构化对象：text（给玩家看的中文摘要）+ goal + deck + lanes[]（lane/role/econ[]/wall/output[]/reserve[]/notes）+ counters[]（tag/threat/card/lane/column/timing）+ phases[]（id/untilWave/actions[]）+ triggers[]（when/action/priority）+ emergency[]/thresholds/contingency。' +
-      '快模型执行时读 lanes/counters/phases/triggers，玩家看 text；不要把整份计划只写成一段文本。传 null 清空。' +
-      '保存后会按本关事实审计并返回 audit.warnings：缺能力却没写 counters（PLAN_MISSING_COUNTER）、计划卡组和实际卡组不一致（PLAN_DECK_MISMATCH）、只有一段文本（PLAN_TEXT_ONLY）等。warning 不阻止保存，但要按它重写计划。',
+      'plan 用结构化对象：text（给玩家看的中文摘要）+ goal + deck + counters[]（threat/tags/card/capability/usage/note：哪张卡克制哪类僵尸/机制）+ usage[]（card/how/counterTags/caution：关键植物怎么用）+ phases[]（id/untilWave/priorities[]：分阶段优先事项）+ triggers[]（when/consider[]）+ emergency[]/thresholds/contingency。' +
+      '开局计划建议只写克制关系与用法，不建议写 lanes[].wall/column、counters[].lane/column 或固定格 queue：僵尸生成和波次是动态的，具体位置留给 running 时 capacityGaps/wallPlan/minePlan/lastResortPlan 现算。running 需要本地排队时再写 plan.queue，位置优先用 lane:danger/protect、column:ahead/safe/back。传 null 清空。' +
+      '保存后会按本关事实审计并返回 audit.warnings：缺能力却没写 counters（PLAN_MISSING_COUNTER）、计划卡组和实际卡组不一致（PLAN_DECK_MISMATCH）、只有一段文本（PLAN_TEXT_ONLY）、开局写死行/列（PLAN_POSITIONAL_AT_START）等。warning 不阻止保存，但建议按它重写计划。' +
+      'plan.queue 任务可选 id（幂等）、priority（只按模型写的排序）、validForSec/deadline（过期丢弃）、stateVersion（旧局面任务丢弃）、onFail=retry|skip；时间敏感的墙/雷/一次性卡建议写 validForSec 和 stateVersion，避免换波后继续执行旧任务。queue 的植物用 codename（plant），不要用会随选卡变化的 card 下标。queue 一次写 4–8 条当前阶段能执行的任务即可，不要一次写 20 条固定格。' +
+      'plan.rules 是“当局本地规则”（和 queue 同一个 450ms 执行器），适合 0.5–1s 的短窗口救场和开局就定好的应急策略：rules[] = { id, when:{...}, do:{type,lane,column,plant,...}, limits:{oncePerWave,cooldownSec,validForSec}, onFail:"retry"|"skip"|"ask", priority }。when 支持 minSun/minPlantFood/waveGte/waveLte/zombieInLane/zombieColumnLt/noWall/noShooter/cellEmpty/airborne/zombieType/cardReady；lane 额外支持 airborne；示例：{"id":"blover-air","when":{"airborne":true,"cardReady":"blover","minSun":50},"do":{"type":"plant","plant":"blover","lane":"airborne","column":"back"},"limits":{"cooldownSec":20,"validForSec":180},"onFail":"ask"}。规则只执行你声明的动作，不会自己选卡；失败码会留在 queue.history 供下一轮兜底。' +
+      'lane 支持 0-4 / danger / protect / airborne，column 支持 0-8 / ahead / safe / back。cond 支持 minSun/minPlantFood/waveGte/waveLte/zombieInLane/zombieColumnLt/noWall/noShooter/cellEmpty/allowIdleLane，以及 airborne:true（有空中目标才执行）和 zombieType（指定僵尸 codename）。极短窗口的救场（三叶草吹荡索）建议写进 queue 交给本地 450ms 队列抢帧，例如 {"type":"plant","plant":"blover","lane":"airborne","column":"back","cond":{"airborne":true},"validForSec":180}；冷却/阳光不足会重试并把失败码留在 queue.history，下一轮由模型兜底。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         plan: {
           anyOf: [{ type: 'object' }, { type: 'null' }],
-          description: '结构化计划。示例：{"text":"给玩家看的一句话","goal":"16波全清","deck":["..."],"lanes":[{"lane":0,"role":"经济+墙","econ":[0],"wall":4,"output":[2]}],"counters":[{"tag":"rolling","card":"spikeweed","lane":"all","column":"c5-c7"}],"phases":[{"id":"early","untilWave":4,"actions":["c0 阳光菇×5"]}],"triggers":[{"when":"airRaid.count>0","action":"plant blover","priority":100}],"emergency":[{"when":"zombie on c3","action":"squash/cherry"}]}',
+          description: '结构化计划。示例：{"text":"给玩家看的一句话","goal":"16波全清","deck":["..."],"counters":[{"threat":"铁桶","tags":["armored"],"card":"potatomine","capability":"burst","usage":"提前埋，靠墙聚怪","note":"不是瞬爆"}],"usage":[{"card":"potatomine","how":"提前埋，等僵尸聚在同一格再炸","counterTags":["armored"],"caution":"14s 出土"}],"phases":[{"id":"early","untilWave":4,"priorities":["经济","基本输出"]}],"triggers":[{"when":"airRaid.count>0","consider":["blover"]}],"emergency":[{"when":"某行 clearSec > lossIn","consider":["lastResortPlan 的向日葵换雷"]}]}。开局不建议带 lanes/column/固定格 queue。',
         },
       },
       required: ['plan'],
@@ -6443,8 +9490,8 @@ const TOOLS = [
     title: '选卡（只校验 + 执行）',
     description:
       '在选卡阶段按你给的卡组逐张选卡。工具只校验和执行：卡不在卡池返回 CARD_NOT_AVAILABLE + available；重复/超槽位返回 BAD_DECK；数量不足返回 DECK_NOT_FULL + 还差几张；合法才执行。' +
-      '逐张加卡并等待 UI 同步，最后返回 actualDeck/applied/skipped/missing。绝不自动补卡，绝不替换你指定的卡。replace=true 会先清空当前卡组。' +
-      '传送带关返回 conveyor=true；卡组由系统给定/锁定时返回 forced=true + deckLocked=true 的 actualDeck，不要继续尝试换卡，直接 pvz_start_level。',
+      '逐张加卡并等待 UI 同步，最后返回 actualDeck/applied/skipped/missing。绝不自动补卡，绝不替换你指定的卡。replace=true（默认）会先清空当前卡组。建议先比较 briefing.coverageGaps.missing 与卡池 candidates、本关世界机制和 zombie tags，再决定是否换 1–2 张；不要因为预填/历史卡组能用就直接沿用。normal 选卡前必须先 pvz_briefing，并且要换上的卡要先 pvz_knowledge 查过（只校验当前卡组/保护植物，不要求整张卡池），否则返回 NEED_BRIEFING / NEED_KNOWLEDGE。选卡成功后会带回 deck/coverageGaps/deckCapabilities，missing 非空建议再换一轮。' +
+      '传送带关返回 conveyor=true；卡组由系统给定/锁定时返回 forced=true + deckLocked=true 的 actualDeck。给定卡组（使用给定植物通关）先读 briefing 并用 pvz_set_plan 写对策，再 pvz_start_level；不要继续尝试换卡。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -6459,7 +9506,9 @@ const TOOLS = [
     name: 'pvz_start_level',
     title: '开局',
     description:
-      '关闭任务说明弹窗（如还在）并开始战斗。若卡组未满返回 DECK_NOT_FULL。默认等待最多 8 秒确认 phase 进入 running；返回 started/phase/elapsed。提前布阵关（state.prep.mode=preplant）在阵型摆好后调用它开打。',
+      '关闭任务说明弹窗（如还在）并开始战斗。若卡组未满返回 DECK_NOT_FULL。默认等待最多 8 秒确认 phase 进入 running；返回 started/phase/elapsed。' +
+      '提前布阵关（state.prep.mode=preplant）在阵型摆好后调用它开打；使用给定植物通关（forced_deck）和提前布阵都必须先 pvz_set_plan，否则返回 NEED_PLAN。' +
+      '传送带关直接开始，之后每轮按 state.cards 的最新 index 种植。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -6480,9 +9529,10 @@ const TOOLS = [
       '只有「同一张卡连种（冷却）」「同一格先铲后种（用 replace）」「刚种下就要给豆（等落地）」需要分轮；其他动作不要每个都单独发一次 pvz_act。' +
       '同一批动作按数组顺序执行，所以「先 shovel 第 N 格、再 plant 同一格」是合法连招。' +
       'plant/replace 传 cells 可以把同一张卡一次种到多个格子（工具按冷却自动等待重试）。' +
-      '同一张卡在一批动作里出现两次时：冷却 ≤3.5 秒工具会自动等它再试（最多 2 次）；更长的冷却直接返回 COOLDOWN，让你换一张卡，不把这一轮晾住。' +
+      '同一张卡在一批动作里出现两次时：≤8 秒的卡工具会按冷却排队等一次（defer=true，不用重发）；20 秒墙这类更长冷却直接返回 COOLDOWN，让你换一张卡，不把这一轮晾住。' +
       '每个动作返回真实 ok/code/reason/retryAfter（如 COOLDOWN/SUN/OCCUPIED/CELL_BLOCKED）。部分失败不会抛异常；按每个 result 自己决定下一步。' +
-      '批量预检：同一批里同卡重复且基础冷却 >3.5s 时，多出来的动作直接返回 BATCH_COOLDOWN（maxSuccess=本轮最多能成功几个）；同一格先种后铲/重复种返回 BATCH_CONFLICT（conflictWith=前面的动作）；同一批先种墙再把输出种到墙右侧返回 OUTPUT_IN_FRONT_OF_WALL。先铲后种同一格是合法连招。' +
+      '批量预检：同一批里同卡重复且基础冷却 >3.5s 时返回 BATCH_COOLDOWN（maxSuccess 是这一轮最多能成功几个；defer=true 表示执行层会排队等一次，defer=false 才需要拆轮/换卡）；同一格先种后铲/重复种返回 BATCH_CONFLICT（conflictWith=前面的动作）；同一批先种墙再把输出种到墙右侧返回 OUTPUT_IN_FRONT_OF_WALL。先铲后种同一格是合法连招。' +
+      'WALL_TOO_LATE 带 blockable/suggestedColumns/replaceCells；blockable=false 时这行已经没有可挡的位置，不要继续试墙，改用 state.brief.rescuePlan 里的 replaceCandidates/instantCards/food。' +
       '地刺/地刺王（stepDamage）必须种在墙前（墙右侧）：种在墙后僵尸被墙挡住、踩不到地刺，会返回 SPIKE_BEHIND_WALL + 墙前可种位。' +
       '返回里还有 state（动作执行后的精简状态，含 changesSinceLast/events）：下一轮直接用它判断，不要再调 pvz_state 空转。',
     inputSchema: {
@@ -6492,6 +9542,24 @@ const TOOLS = [
         actions: { type: 'array', minItems: 1, maxItems: 6, items: actionSchema },
       },
       required: ['actions'],
+    },
+  },
+  {
+    name: 'pvz_decide',
+    title: '回答本地微决策',
+    description:
+      '对本地已经算好的微决策回答 yes/no/other。id 必须来自 state.decisions[].id；每条 decision 已经带 action 和 facts（例如能量豆 targets/total、范围卡 hits/total/kills）。' +
+      'yes = 执行这条 action；no = 跳过；other = 不执行，改用 pvz_act 自己下动作。decision 有 stateVersion 和 expiresInSec，过期或局面版本变了会返回 STALE_DECISION，不执行。' +
+      '这只用于能量豆/范围卡落点/点击卡这类高频微决策，不用于选卡和整关计划。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', description: 'state.decisions[].id' },
+        choice: { type: 'string', enum: ['yes', 'no', 'other'], description: 'yes=执行，no=跳过，other=自己下动作' },
+        reason: { type: 'string', description: '可选，一句话理由' },
+      },
+      required: ['id', 'choice'],
     },
   },
   {
@@ -6587,7 +9655,7 @@ const TOOLS = [
     title: '关卡总结（读 / 写心得）',
     description:
       '读取本关（或用 key 指定某一关）以前的结果记录：胜负、打到第几波、耗时、用过的卡组、当时的计划、植物/推车损失、以及你写过的心得。开局前读一次，打完再看一次。' +
-      '传 note 会把「当前关卡的心得」写入/覆盖（例如哪套卡组有效、哪个波次缺输出）；传 lessons（字符串数组）会追加可执行经验（每关最多 8 条、自动去重）。失败后系统会自动复盘一次并写入 lessons；结束时系统还会自动追加一条本局结果（胜负、波次、卡组、计划）。传 all=true 列出所有关卡。',
+      '传 note 会把「当前关卡的心得」写入/覆盖；建议写机制/能力层面：哪套卡组有效、哪类僵尸或机制造成压力、下次优先准备什么能力或克制关系。传 lessons（字符串数组）会追加可执行经验（每关最多 8 条、自动去重）；建议写“优先防什么/优先准备什么克制”，不要写“第几行/第几列/先种什么”这种具体位置，位置由每局本地 facts 重算。失败后系统会自动复盘一次并写入 lessons；结束时系统还会自动追加一条本局结果（胜负、波次、卡组、计划）。传 all=true 列出所有关卡。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -6598,7 +9666,7 @@ const TOOLS = [
           type: 'array',
           items: { type: 'string' },
           maxItems: 6,
-          description: '追加可执行经验，一条一句、尽量具体（例如“第 3 波铁桶走第 2 行，提前在 c6 放坚果”）。',
+          description: '追加可执行经验，一条一句；建议写机制/能力层面（例如“铁桶多时优先准备高单体输出/雷，并留墙拖时间”），不要写具体行/列。',
         },
         replaceLessons: { type: 'boolean', description: 'true=用这次传入的 lessons 替换旧经验（自动复盘用，避免旧错误结论一直保留）。' },
         all: { type: 'boolean', description: 'true=列出所有有记录的关卡。' },
@@ -6888,8 +9956,127 @@ function stateLine(s) {
 const ACTION_CN = {
   plant: '种植', replace: '换植', shovel: '铲除', plant_food: '能量豆', activate: '触发',
   move_cart: '移动矿车', resume: '继续', wait: '等待', restart: '重开本关',
-  dismiss_objective: '关闭任务说明', collect: '收掉落物',
+  dismiss_objective: '关闭任务说明', collect: '收掉落物', start_level: '开始战斗',
+  choose_deck: '选卡', dismiss: '关闭弹窗', decide: '处理本地决策',
 };
+
+const PHASE_CN = {
+  objective: '关卡目标', preparing: '选卡/准备', running: '战斗中',
+  won: '胜利', lost: '失败', menu: '菜单', worldmap: '世界地图',
+};
+
+const TOOL_CN = {
+  pvz_briefing: '读取开局简报', pvz_state: '读取实时状态', pvz_events: '读取增量事件',
+  pvz_knowledge: '查图鉴', pvz_set_plan: '记录计划', pvz_choose_deck: '选卡',
+  pvz_start_level: '开始战斗', pvz_act: '执行动作', pvz_wait_until: '等待条件',
+  pvz_collect: '收掉落物', pvz_plant_food: '使用能量豆', pvz_move_cart: '移动矿车',
+  pvz_resume: '继续游戏', pvz_restart: '重开本关', pvz_dismiss_objective: '关闭任务说明',
+  pvz_health: '健康检查', pvz_decide: '处理本地决策', pvz_forecast: '读取波次预测',
+  pvz_level_memory: '读写关卡总结', pvz_stop: '停止 AI', pvz_think: '写入思考',
+};
+
+const PLANT_CN = {
+  sunflower: '向日葵', peashooter: '豌豆射手', cabbagepult: '卷心菜投手',
+  bloomerang: '回旋镖射手', wallnut: '坚果墙', potatomine: '土豆地雷',
+  iceburg: '冰冻生菜', snowpea: '寒冰射手', repeater: '双发射手',
+  cherry_bomb: '樱桃炸弹', jalapeno: '火爆辣椒', squash: '倭瓜',
+  spikeweed: '地刺', spikerock: '地刺王', bonkchoy: '菜问',
+  chomper: '大嘴花', torchwood: '火炬树桩', threepeater: '三线射手',
+  tallnut: '高坚果', pumpkin: '南瓜头', magnet: '磁力菇',
+  lilypad: '睡莲', tanglekelp: '缠绕水草', seashooter: '海豌豆',
+  coconutcannon: '椰子加农炮', wintermelon: '冰西瓜', melonpult: '西瓜投手',
+  kernelpult: '玉米投手', buttercup: '黄油投手', lightningreed: '闪电芦苇',
+  blover: '三叶草', graves: '墓碑', gravebuster: '墓碑破坏者',
+};
+
+const ZOMBIE_CN = {
+  tutorial: '普通僵尸', mummy: '木乃伊僵尸', mummy_armor1: '路障木乃伊',
+  mummy_armor2: '铁桶木乃伊', mummy_flag: '旗帜木乃伊', ra: '太阳神僵尸',
+  explorer: '探险家僵尸', tomb_raiser: '造墓僵尸', pharaoh: '法老僵尸',
+  egypt_gargantuar: '埃及巨人', gargantuar: '巨人僵尸', imp: '小鬼僵尸',
+  buckethead: '铁桶僵尸', conehead: '路障僵尸', flag: '旗帜僵尸',
+  newspaper: '读报僵尸', prospector: '淘金僵尸', piano: '钢琴僵尸',
+  chicken_farmer: '养鸡僵尸', west_bull: '西部公牛', seagull: '海鸥僵尸',
+};
+
+const CODE_CN = {
+  COOLDOWN: '冷却中', SUN: '阳光不足', OCCUPIED: '格子被占用', CELL_BLOCKED: '格子不可种',
+  TERRAIN: '地形不可种', WALL_TOO_LATE: '墙来不及', MINE_TOO_LATE: '地雷来不及',
+  PLANT_BEHIND_ZOMBIE: '种在僵尸身后', OUTPUT_IN_FRONT_OF_WALL: '输出在墙右侧',
+  SPIKE_BEHIND_WALL: '地刺在墙后', BATCH_COOLDOWN: '同卡批量冷却',
+  TASK_OCCUPIED: '目标格已有植物', TASK_ALREADY_PLANTED: '目标格已有同种植物',
+  TASK_EXPIRED: '任务过期', TASK_DONE: '任务已完成', STALE_ACTION: '旧局面任务',
+  CARD_NOT_IN_DECK: '卡不在卡组', CARD_UNAVAILABLE: '卡不可用', NO_CARD: '找不到卡',
+  NO_SCENE: '场景未就绪', NO_FOOD: '没有能量豆', FOOD_NO_TARGET: '能量豆没有目标',
+  PAUSED: '游戏暂停', TIMEOUT: '等待超时', NEED_PLAN: '需要先写计划',
+  PLAN_DECK_MISMATCH: '计划卡组不一致', PLAN_MISSING_COUNTER: '计划缺克制关系',
+  PLAN_POSITIONAL_AT_START: '开局计划写了具体位置', PLAN_FIXED_WALL_COLUMN: '墙写死了列',
+  PLAN_FIXED_MINE_COLUMN: '雷写死了列', NEED_BRIEFING: '需要先读简报',
+  NEED_KNOWLEDGE: '需要先读图鉴', BRIEFING_NOT_READY: '简报未就绪', STALE_DECISION: '决策过期',
+  NO_DECISION: '决策不存在', BAD_CHOICE: '选择无效', NOT_READY: '还没准备好',
+  SHOVEL_BLOCKED: '不能铲除', LANE_LIMIT: '本行数量上限', LEVEL_LIMIT: '本关数量上限',
+  POSITION: '位置不合法', NO_PLANT: '格子里没有植物', EMPTY: '格子是空的',
+};
+
+// 动态名称缓存：不同世界/新植物新僵尸的中文名来自游戏自身数据
+// （briefing/state/knowledge 里的 name 字段），不依赖写死的埃及名单。
+const NAME_CN = new Map(Object.entries({ ...PLANT_CN, ...ZOMBIE_CN }));
+
+/** 从任意工具返回/状态对象里收集 { type/plant, name } 对，供后续展示本地化。 */
+function rememberNames(value, budget = { n: 0 }) {
+  if (!value || budget.n > 800) return;
+  budget.n += 1;
+  if (Array.isArray(value)) {
+    for (const v of value) rememberNames(v, budget);
+    return;
+  }
+  if (typeof value !== 'object') return;
+  const type = value.type || value.plant;
+  const name = value.name;
+  if (typeof type === 'string' && typeof name === 'string'
+    && /[\u4e00-\u9fa5]/.test(name)) {
+    NAME_CN.set(type, name);
+  }
+  for (const k of ['plants', 'zombies', 'cards', 'entry', 'matches', 'deck', 'tasks', 'results', 'preview']) {
+    if (value[k] != null) rememberNames(value[k], budget);
+  }
+}
+
+function cnName(type) {
+  const t = String(type || '');
+  return NAME_CN.get(t) || t;
+}
+
+function cnCode(code) {
+  const c = String(code || '');
+  return CODE_CN[c] || c;
+}
+
+/** 桌面/气泡展示用：把常见英文 codename、工具名、phase、错误码换成本地中文语义。 */
+function localizeDisplay(text) {
+  let s = String(text == null ? '' : text);
+  if (!s) return s;
+  const escape = (k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const map of [PHASE_CN, TOOL_CN, CODE_CN]) {
+    for (const [k, v] of Object.entries(map)) {
+      s = s.replace(new RegExp(`\\b${escape(k)}\\b`, 'g'), v);
+    }
+  }
+  // 植物/僵尸名称用动态缓存（包含当前世界/关卡读到的所有 name）。
+  for (const [k, v] of NAME_CN) {
+    s = s.replace(new RegExp(`\\b${escape(k)}\\b`, 'g'), v);
+  }
+  // 常见字段名/枚举的轻量语义替换，避免气泡里出现 count= / ok= / running。
+  const words = {
+    count: '数量', collected: '收取', paused: '暂停', lane: '行', column: '列', type: '类型',
+    detail: '详情', started: '已发起', phase: '阶段', running: '战斗中', preparing: '准备中',
+    objective: '关卡目标', won: '胜利', lost: '失败', ok: '完成', fail: '失败',
+  };
+  for (const [k, v] of Object.entries(words)) {
+    s = s.replace(new RegExp(`\\b${escape(k)}\\b`, 'g'), v);
+  }
+  return s;
+}
 
 function formatAction(a) {
   if (!a || typeof a !== 'object') return '?';
@@ -6916,7 +10103,9 @@ function formatToolCall(name, args) {
     case 'pvz_briefing': return '读取开局简报';
     case 'pvz_state': return '读取实时状态';
     case 'pvz_events': return '读取增量事件';
-    case 'pvz_knowledge': return `查图鉴：${a.type || a.query || '?'}`;
+    case 'pvz_knowledge':
+      if (Array.isArray(a.types) && a.types.length) return `批量查图鉴：${a.types.length} 个`;
+      return `查图鉴：${cnName(a.type) || a.query || '?'}`;
     case 'pvz_set_plan': return '记录计划';
     case 'pvz_choose_deck': return `选卡：${(a.cards || []).join('、') || '?'}${a.replace === false ? '（追加）' : '（替换）'}`;
     case 'pvz_start_level': return '开始战斗';
@@ -6928,13 +10117,13 @@ function formatToolCall(name, args) {
     case 'pvz_restart': return '重开本关';
     case 'pvz_dismiss_objective': return '关闭任务说明';
     case 'pvz_health': return '健康检查';
-    default: return name;
+    default: return TOOL_CN[name] || '????';
   }
 }
 
 function codeText(r) {
   if (!r) return '';
-  const code = r.code ? `${r.code}` : '';
+  const code = r.code ? `${cnCode(r.code)}` : '';
   const extra = [];
   if (r.retryAfter != null) extra.push(`${r.retryAfter}s 后可重试`);
   if (r.need != null && r.have != null) extra.push(`需要 ${r.need} / 现有 ${r.have}`);
@@ -6949,14 +10138,18 @@ function formatToolResult(name, r) {
     return list.map((e) => `· ${eventText(e)}`).join('\n');
   }
   if (!r || typeof r !== 'object') return String(r == null ? '无返回' : r);
+  // 任何工具结果里的 name 都进入动态缓存：换世界/换关卡后新植物新僵尸也能中文化。
+  rememberNames(r);
   const okMark = r.ok === false ? '❌' : '✅';
 
   if (name === 'pvz_briefing') {
     if (r.ok === false) return `❌ ${r.code || ''} ${r.reason || ''}`.trim();
     const z = (r.zombies || []).map((x) => `${x.name}×${(r.waves || []).reduce((s, w) => s + ((w.zombies[x.type] || {}).count || 0), 0) || '?'}`).join('、');
     const gaps = ((r.coverageGaps && r.coverageGaps.missing) || []).map((m) => m.capability);
+    const label = (r.level && (r.level.label || r.level.name)) || '本关';
+    const notReady = !!(r.prep && r.prep.ready === false);
     return [
-      `${okMark} 简报：${r.level && r.level.name ? r.level.name : '本关'}｜卡槽 ${r.deck && r.deck.slots}｜起始阳光 ${n(r.startingSun)}`,
+      `${okMark} 简报：${label}｜卡槽 ${r.deck && r.deck.slots}｜起始阳光 ${n(r.startingSun)}${notReady ? '｜准备未就绪，进入选卡后再读一次' : ''}`,
       `任务：${(r.missionHints || []).join('；') || '无文本'}`,
       `僵尸：${z || '未读到'}`,
       `可用卡 ${(r.cards || []).length} 张｜波次 ${(r.waves || []).length}${gaps.length ? `｜能力缺口 ${gaps.join('/')}` : ''}`,
@@ -7009,9 +10202,13 @@ function formatToolResult(name, r) {
   }
 
   if (name === 'pvz_knowledge') {
+    if (r.ok && r.batch) {
+      const names = (r.entries || []).map((e) => e.name || cnName(e.type));
+      return `✅ 已读图鉴 ${names.length} 个：${names.join('、')}${Array.isArray(r.missing) && r.missing.length ? `；没查到：${r.missing.join('/')}` : ''}`;
+    }
     if (r.ok && r.entry) {
       const e = r.entry;
-      const bits = [`${e.name || e.type}`];
+      const bits = [`${e.name || cnName(e.type)}`];
       if (e.cost != null) bits.push(`${e.cost} 阳光`);
       if (e.hp != null) bits.push(`${e.hp} 血`);
       if (e.ehp != null) bits.push(`${e.ehp} EHP`);
@@ -7019,7 +10216,7 @@ function formatToolResult(name, r) {
       if (e.brief) bits.push(e.brief);
       return bits.join('｜');
     }
-    if (r.matches) return r.matches.length ? `找到 ${r.matches.length} 条：${r.matches.map((x) => `${x.name}(${x.type})`).join('、')}` : '没有匹配';
+    if (r.matches) return r.matches.length ? `找到 ${r.matches.length} 条：${r.matches.map((x) => `${x.name || cnName(x.type)}`).join('、')}` : '没有匹配';
     return `❌ ${r.code || ''} ${r.reason || ''}`.trim();
   }
 
@@ -7168,7 +10365,7 @@ function diffSnapshot(prev, cur) {
   };
 }
 
-function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, latency = null }) {
+function createToolRouter({ bridge, version = '0.4.16', sleep = routerSleep, latency = null }) {
   if (!bridge) throw new Error('createToolRouter 需要 bridge');
 
   // 上一次 pvz_state 的原始快照，只用于算 changesSinceLast。
@@ -7238,12 +10435,12 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
       plantFoodMax: s.plantFoodMax, plantFoodFull: s.plantFoodFull,
       level: s.level, levelKey: s.levelKey, prep: s.prep,
       tasks: s.tasks, objective: s.objective, missionHints: s.missionHints,
-      cards: s.cards, deck: s.deck, seedSelection: s.seedSelection,
+      cards: s.cards, deck: s.deck, seedSelection: s.seedSelection, conveyor: s.conveyor,
       plants: s.plants, zombies: s.zombies, lanes: s.lanes,
       protectCells: s.protectCells, brief: s.brief, limits: s.limits,
       plan: s.plan, planSavedAt: s.planSavedAt,
       changesSinceLast: s.changesSinceLast, events: s.events,
-      forecast: s.forecast, mechanics: s.mechanics, carts: s.carts,
+      forecast: s.forecast, mechanics: s.mechanics, carts: s.carts, queue: s.queue,
       startingSun: s.startingSun, collect: s.collect,
     };
   }
@@ -7276,16 +10473,29 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
         }
         case 'pvz_set_plan': {
           if (!args || !('plan' in args)) return normalizeError('BAD_PLAN', {}, '需要 plan 字段');
-          const r = await bridge.setPlan(args.plan);
+          let s = null;
+          try { s = await bridge.snapshot(); } catch { s = null; }
+          let planArg = args.plan;
+          // 计划绑定到当前关卡：下一关沿用旧计划时，给定卡组/提前布阵的开局拦截不会误放行。
+          if (planArg && typeof planArg === 'object' && !Array.isArray(planArg)
+            && !planArg.levelKey && s && s.levelKey) {
+            planArg = { ...planArg, levelKey: s.levelKey };
+          }
+          const r = await bridge.setPlan(planArg);
           if (!r || r.ok === false || !r.plan) return r;
           // 保存后立刻用本关事实审计：缺能力没写 counter、卡组不一致、只有一段文本都会给 warning。
           // 仍然保存计划（模型能看到 warning 再重写），不做本地修正。
           let ctx = {};
           try {
-            const s = await bridge.snapshot();
+            const prep = s && s.prep;
+            // 选卡页还在、且还没开局：deck 可能马上被换，先不判 PLAN_DECK_MISMATCH。
+            const deckFinal = !prep || prep.gameStarted || prep.deckLocked
+              || prep.mode === 'conveyor' || !prep.hasSeedChooser;
             ctx = {
               coverageGaps: s && s.brief ? s.brief.coverageGaps : null,
-              deck: (s && s.seedSelection && s.seedSelection.current) || (s && s.deck) || [],
+              deck: deckFinal
+                ? ((s && s.seedSelection && s.seedSelection.current) || (s && s.deck) || [])
+                : null,
             };
           } catch { ctx = {}; }
           const audit = auditPlan(r.plan, ctx);
@@ -7294,6 +10504,12 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
         case 'pvz_choose_deck': return await chooseDeck(args);
         case 'pvz_start_level': return await startLevel(args);
         case 'pvz_act': return await act(args);
+        case 'pvz_decide': {
+          if (!args || !args.id || !args.choice) {
+            return normalizeError('BAD_DECISION', {}, '需要 id 和 choice（yes/no/other）');
+          }
+          return await bridge.decide(String(args.id), String(args.choice), args.reason);
+        }
         case 'pvz_wait_until': return await waitUntil(args);        case 'pvz_collect': {
           const r = await bridge.collect();
           return r && r.ok === false ? r : { ok: true, ...r };
@@ -7310,6 +10526,10 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
           return await bridge.moveCart(Number(args.cart), dir);
         }
         case 'pvz_resume': return await bridge.resume();
+        // 内部/停止时使用：清掉模型授权的本地执行队列。
+        case 'pvz_clear_queue': return typeof bridge.clearQueue === 'function'
+          ? await bridge.clearQueue()
+          : { ok: true, cleared: false };
         case 'pvz_restart': {
           if (typeof bridge.restartLevel !== 'function') return normalizeError('RESTART_UNSUPPORTED', {}, '当前 bridge 不支持重开');
           lastBriefing = null;
@@ -7413,8 +10633,9 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
       let retries = 0;
       while (r && r.ok === false && r.code === 'COOLDOWN' && retries < 3 && Date.now() < deadline) {
         const secs = Number(r.retryAfter) || 0;
-        // 长冷却（墙卡 20s 这类）干等不划算：停手，让模型换张卡补线
-        if (secs > 3.5) break;
+        // 长冷却（墙卡 20s 这类）干等不划算：停手，让模型换张卡补线。
+        // 5s 左右的常用输出/经济卡允许在同一批 cells 里排队等一次。
+        if (secs > 8) break;
         await sleep(Math.max(200, secs * 1000) + 120);
         retries += 1;
         r = await bridge.act(one);
@@ -7447,16 +10668,37 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
     if (!r || typeof r !== 'object') return normalizeError('BAD_RESPONSE', {}, '选卡没有返回结果');
     // 卡组变了，下一次 briefing 要重新算 counterGaps，不能命中“和上次相同”的去重。
     lastBriefing = null;
-    return r;
+    // 有的“提前布阵”关在选卡完成那一刻才进入布阵期：把新的 prep 一并带回去，
+    // 模型不用再多花一轮 pvz_state 才知道现在该布阵而不是直接开打。
+    let prep = null;
+    try { const s = await bridge.snapshot(); prep = s && s.prep ? s.prep : null; } catch { prep = null; }
+    return prep ? { ...r, prep } : r;
   }
 
   async function startLevel(args) {
     const dismiss = !args || args.dismiss_objective !== false;
     const timeout = Math.max(1, Math.min(20, Number(args && args.timeout) || 8));
     const before = await bridge.snapshot();
-    const preplant = !!(before && before.ok && before.prep && before.prep.mode === 'preplant' && !before.prep.gameStarted);
+    const prep = before && before.ok ? before.prep : null;
+    const preplant = !!(prep && prep.mode === 'preplant' && !prep.gameStarted);
     if (before && before.ok && before.phase === 'running' && !preplant) {
-      return { ok: true, started: true, phase: before.phase, elapsed: 0, detail: '已经在战斗中' };
+      return { ok: true, started: true, phase: before.phase, elapsed: 0, detail: '已经在战斗中', prep };
+    }
+    // 给定卡组 / 提前布阵：先有计划再开局。bridge.act 里也有同一道拦截，
+    // 这里提前返回更清楚，避免模型把“还没想好”当成工具坏了。
+    if (prep && prep.mustPlanBeforeStart) {
+      const p = typeof bridge.getPlan === 'function' ? bridge.getPlan() : null;
+      const stale = !!(p && p.plan && before.levelKey && p.plan.levelKey && p.plan.levelKey !== before.levelKey);
+      if (!p || !p.plan || !String(p.plan.text || '').trim() || stale) {
+        return normalizeError('NEED_PLAN', {
+          prep,
+          phase: before.phase,
+          stalePlan: stale || undefined,
+          hint: stale
+            ? '这份计划是上一关的；先针对本关重新 pvz_briefing + pvz_set_plan，再开局。'
+            : '先用 pvz_briefing 读完整关波次/卡组/克制，再用 pvz_set_plan 写下对策（text + lanes/counters/phases），然后才能 pvz_start_level。',
+        }, stale ? '计划属于上一关，需要按本关事实重写' : '还没有作战计划：先想清楚卡组对策再开局');
+      }
     }
     if (dismiss && before && before.ok && before.objective && before.objective.active) {
       const d = await bridge.dismissObjective();
@@ -7471,10 +10713,10 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
       last = await bridge.snapshot();
       const stillPreplant = !!(last && last.ok && last.prep && last.prep.mode === 'preplant' && !last.prep.gameStarted);
       if (last && last.ok && last.phase === 'running' && !stillPreplant) {
-        return { ok: true, started: true, phase: last.phase, elapsed: Math.round((Date.now() - startedAt) / 100) / 10, detail: (r && r.detail) || '已开局' };
+        return { ok: true, started: true, phase: last.phase, elapsed: Math.round((Date.now() - startedAt) / 100) / 10, detail: (r && r.detail) || '已开局', prep: last.prep };
       }
       if (last && last.ok && (last.phase === 'won' || last.phase === 'lost')) {
-        return { ok: true, started: true, phase: last.phase, elapsed: Math.round((Date.now() - startedAt) / 100) / 10, detail: '战斗直接结束' };
+        return { ok: true, started: true, phase: last.phase, elapsed: Math.round((Date.now() - startedAt) / 100) / 10, detail: '战斗直接结束', prep: last.prep };
       }
       await sleep(300);
     }
@@ -7504,7 +10746,13 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
     const results = [];
     // 批量预检（纯计算）：同卡长冷却、同格冲突、同批“先种墙再把输出种到墙右侧”。
     // 只跳过不可能成功的动作并如实返回 code，不替模型换卡/换格。
-    const pre = batchPreflight({ actions: list, cards, state });
+    // 传送带不扣阳光、不吃种子冷却：同卡多次只在“同一批”里撞索引变化，不该报 BATCH_COOLDOWN。
+    const conveyorMode = !!(state && state.conveyor && state.conveyor.enabled);
+    const pre = batchPreflight({
+      actions: list, cards, state,
+      cooldownLimitSec: conveyorMode ? Number.POSITIVE_INFINITY : 3.5,
+      autoWaitSec: conveyorMode ? 0 : 8,
+    });
     const preIssues = new Map();
     for (const issue of (pre && pre.issues) || []) {
       if (!preIssues.has(issue.index)) preIssues.set(issue.index, issue);
@@ -7517,7 +10765,9 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
         continue;
       }
       const issue = preIssues.get(i);
-      if (issue) {
+      // defer=true 的同卡重复动作不判死：先执行，遇到 COOLDOWN 时在下面
+      // 统一等一次冷却再重试（上限 8s）。20s 墙仍然直接返回 BATCH_COOLDOWN。
+      if (issue && !issue.defer) {
         results.push({ index: i, action: type, type, ok: false, ...issue });
         continue;
       }
@@ -7583,18 +10833,20 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
       } catch (e) {
         r = normalizeError('ACT_THREW', {}, String(e && e.message || e));
       }
-      // 同一张卡在一批动作里会出现两次：短冷却（≤3.5s）自动等，长冷却直接返回让模型换卡。
-      // 20 秒的墙卡在这里干等，等于把整轮节奏晾死。
+      // 同一张卡在一批动作里会出现两次：≤8s 的冷却自动排队等一次，
+      // 20 秒的墙卡仍然直接返回，避免把整轮节奏晾死。
       if (r && r.ok === false && r.code === 'COOLDOWN') {
         const budget = Date.now() + 20000;
         for (let retry = 0; retry < 2 && r && r.code === 'COOLDOWN' && Date.now() < budget; retry++) {
           const secs = Number(r.retryAfter) || 0;
-          if (secs > 3.5) break;
+          if (secs > 8) break;
           await sleep(Math.max(200, secs * 1000) + 120);
           try { r = await bridge.act(a, { deferSettle }); } catch (e) { r = normalizeError('ACT_THREW', {}, String(e && e.message || e)); }
         }
       }
-      results.push({ index: i, action: type, ...(r || normalizeError('ACT_THREW', {}, '没有返回')) });
+      const item = { index: i, action: type, ...(r || normalizeError('ACT_THREW', {}, '没有返回')) };
+      if (issue && issue.defer) item.batchDeferred = true;
+      results.push(item);
     }
     // 批量种植统一等一次落地；单动作仍由动作自己等，保持原来的真实返回。
     if (deferSettle) await settlePendingPlants(results);
@@ -7677,128 +10929,148 @@ function createToolRouter({ bridge, version = '0.4.15', sleep = routerSleep, lat
     }, `等待 ${timeout}s 后条件仍未满足`);
   }
 
-  return { call, names: TOOL_NAMES };
+  return {
+    call,
+    names: TOOL_NAMES,
+    clearQueue: () => (typeof bridge.clearQueue === 'function' ? bridge.clearQueue() : { ok: true, cleared: false }),
+  };
 }
 
 
 // ── in-game/prompt.js ──
 /**
- * 游戏内 LLM 的系统提示词。
+ * 游戏内 LLM 的系统提示词（lean 版）。
  *
- * 只描述协议、坐标和工具用法；不写卡组、不写打法、不写"什么时候该种什么"。
- * 所有决策都必须由模型在读到事实后自己给出。
+ * 协议（工具/坐标/参数）是硬约束；战术全部写成“建议/强烈建议”，
+ * 不写死具体行/列/种法。开局计划只描述克制关系与植物用法；
+ * 具体位置由 running 时的本地 facts（capacityGaps / wallPlan / minePlan /
+ * lastResortPlan / matchups）实时计算，模型随局面调整。
  */
 
-const SYSTEM_PROMPT = `你是《植物大战僵尸2 花园无尽》的唯一决策者。你不是助手，也不是执行器：所有选卡、布阵、实时操作都由你决定。
+const SYSTEM_PROMPT = `你是《植物大战僵尸2 花园无尽》的唯一决策者。下面分两部分：
+- 协议：工具、坐标、参数、失败码。这些是硬约束。
+- 战术建议：默认思路，不是命令。每局僵尸随机、波次动态，建议结合本地 facts 随时调整。
 
-工具只做四件事：
-1. 给事实：关卡任务、世界机制、地形、波次、僵尸、卡池、图鉴、实时状态、增量事件。
-2. 执行动作：选卡、开局、种植、铲除、换植、能量豆、矿车、继续、关闭任务弹窗。
-3. 返回真实结果：ok / code / reason / retryAfter / 冷却 / 阳光 / 占用。
-4. 记录计划：pvz_set_plan 只保存你写的计划，不执行、不修正。
+【协议】
+- 思考最多 2 句、80 字内；不复述工具里已有的数字，直接说下一步。
+- 开局先 pvz_health 确认，再 pvz_briefing 读全：任务、世界、地形、波次、僵尸 tag/EHP、卡池、能力缺口、历史经验。briefing 已经带了本关僵尸的图鉴与数值，不用再逐个查僵尸；植物的细节用 pvz_knowledge 按需补。
+- 坐标：lane 0-4 从上到下；column 0-8 从左（房子）到右（僵尸出生点）。僵尸从右往左走，column 越小越近房子。
+- 准备阶段看 state.prep.mode：
+  · normal：先 pvz_briefing；阅读僵尸/机制定对策后，只用 pvz_knowledge {types:[...]} 查“要选的卡 + 保护/预置植物”（系统只校验这些，NEED_KNOWLEDGE.missing 会列出缺的几张）；然后按克制关系用 pvz_choose_deck（replace=true）换 1–2 张低价值卡；选完看返回的 coverageGaps，missing 非空就再换一轮，再写计划、pvz_start_level。历史/预填卡组只作参考，不建议直接沿用。
+  · forced_deck：不选卡；先读简报、按需查卡/保护植物、写计划，再 pvz_start_level。
+  · preplant：确认卡组 → 按需查卡/保护植物 → 写计划 → 用给定阳光布阵 → pvz_start_level。
+  · forced_deck / preplant：虽然卡组固定或提前布阵，也建议先 pvz_briefing + pvz_knowledge 查当前卡组和保护/预置植物再写计划/开局。
+  · conveyor：不选卡；开局后按 state.cards 最新 index 实时用卡。
+- 战斗循环：优先用上一轮 pvz_act 返回的 state；刚进战斗/换波/没有 state 才 pvz_state。每轮把 2–4 个动作放进同一个 pvz_act；需要等冷却/落地/条件时用 wait 或 pvz_wait_until，不要连续空转查询。
+- 回复尽量短：一轮只写动作/等待，不要在 pvz_act 里重复整份计划；计划只在换波或策略变化时用 pvz_set_plan 更新（长计划会明显拖慢响应）。
+- 图鉴不用每轮重查：只有出现新卡、新僵尸类型、或新保护/预置植物时才补查。重复查同一张卡不会带来新信息，只会挤占上下文。
+- 失败码按协议处理：
+  · NEED_BRIEFING：先 pvz_briefing；NEED_KNOWLEDGE：用 pvz_knowledge {types:[...]} 查完 missing 里列出的那几张（当前卡组/保护植物），再继续。
+  · BRIEFING_NOT_READY：关卡/卡槽还在初始化（常见于目标弹窗或页面过渡），稍后再 briefing；不要据此判断“传送带”或写死关卡信息。
+  · COOLDOWN/SUN/PAUSED：稍后重试。
+  · OCCUPIED/CELL_BLOCKED：用 alternatives 换格。
+  · CARD_NOT_AVAILABLE/BAD_DECK：换卡，不原样重试。
+  · WALL_TOO_LATE/MINE_TOO_LATE/PLANT_BEHIND_ZOMBIE/OUTPUT_IN_FRONT_OF_WALL/SPIKE_BEHIND_WALL：用 suggestedColumns/behindCells/replaceCells；执行层也会自动改一次列。
+  · pending:true：已发起未落地，下一轮用 state 确认，不要立刻重种同一格。
+  · BAD_TOOL_ARGS / LLM_TRUNCATED：本轮参数 JSON 被截断或不合法；减少动作数、别把 plan 全文塞进 pvz_act，重发一次。
+  · BATCH_COOLDOWN：defer=true 表示已排队，不用重发。
+- 工具参数：cards 用 index，plan.queue 用 codename；不要把两者混用。
+- 关卡 tasks/limits/plantLimit 优先于战术；objective.trusted=false 或 missions 为空时，按普通关处理。
 
-硬性规则：
-- 思考过程尽量用中文；工具调用参数和 codename 除外。推理原文只显示在顶部滚动框，决策日志只记录你的动作、真实结果和计划。
-- 推理要短：最多 2 句（不超过 80 字），不复述阳光/波次/血量这些数字（工具结果里已经有），直接给下一步动作。想更久就拆成多轮，每轮都去做事。
-- 没有任何"推荐卡组"或本地打法。不要等系统给你建议；先 pvz_briefing / pvz_knowledge 查事实，再自己决定。
-- 波次不用猜：pvz_briefing.forecast（逐波预测）和 pvz_forecast 已经算好每波僵尸、EHP、固定行/随机行、动态波预算；pvz_state.forecast.next 是接下来 3 波。提前 2-3 波布防，不要等僵尸出现才反应。
-- 延迟和提前量已经算成数：state.brief.leadSec 是「你下指令到动作生效」的秒数（模型+工具+落地）；每行 lanes[].actBy 是这行最晚动手时间（已扣掉 leadSec），<0 就是来不及，考虑推车/一次性卡/放弃该行。lanes[].gap = 每秒进来的 EHP − 本行 dps，gap>0 才会破；brief.pressure 已按 gap 排好前 3 行，brief.safeLanes 是不用管的行。
-- 波次到达时间看 brief.wave.etaSec（basis=health 表示按血量提前进波，timer 表示按倒计时），不要只看 nextWaveIn。
-- 卡什么时候能用看 cards[].etaSun（按当前产阳光速度还差几秒）和 etaReady（含冷却）；不用自己除。
-- 一次性卡落点看 state.instantAim：每条给 card / lane / frontColumn / from / to（可投的列区间），已经扣掉延迟和引信；区间为空或 late=true 就别投，换目标。
-- state.protectCells 是要保护的鲜花格（lane/column/dead）：这类任务别让僵尸走到它上面：远程输出放保护格左侧同一行，墙/短手放 frontColumn（c+1）或同列相邻。短手植物（接触/接近/前后/3x3/N 格）必须种在同行、离保护格不超过它的射程（多数 1 格，优先 guardColumns 里的 c+1/c-1）；种在保护格左侧 2 格以外，它既碰不到僵尸也护不住花，工具会直接返回 PROTECT_TOO_FAR 并给 guardCells。远程/整行/抛物只要在保护格左侧同一行就能覆盖。墙要放在 frontColumn（c+1）或保护格同列相邻，不要放在花后面。
-- 后台参谋：pvz_state/pvz_act 结果里的 advisor.note 是主模型在后台给出的提醒，权重要高（优先参考），但最终动作由你按当前局面决定；紧急情况（僵尸已贴花/贴墙、推车即将丢失）先处理，不必等参谋。
-- 克制关系看结构化事实：pvz_briefing.threatCounters、zombies[].counters、brief.incoming[].counters 是僵尸标签对应的机制（如 rolling=滚桶会被地刺扎破、墙挡不住；flying=只有三叶草在空中有效）。开局先用 threatCounters 把每种特殊僵尸的应对写进 plan（卡/行/波次），快模型执行时优先照 plan；突发紧急再由当前模型自行判断。
-- 整关先看 pvz_briefing.levelContext：世界/地形摘要、所有波次的类型与固定行、全部僵尸 tag、卡池能力（capabilities）、卡组缺口、历史。开局读一次就够，不用再逐个查僵尸/卡；细节数值仍在 waves/zombies/cards。
-- 能力缺口看 coverageGaps / deck.capabilities：group→multi_target、rolling→anti_rolling、flying→anti_air、armored→high_dps、crush/gargantuar→control/burst。missing 非空 = 卡组缺这项能力；candidates 是卡池里能满足它的卡（事实，不是推荐）。这些按整关所有波次汇总，不是只看当前波。
-- brief.protect.unguardedLanes 非空 = 这些行的保护格还没有任何墙/近战守花；在下一波前优先补这些行（墙放 frontColumn，近战放 c±1），优先级高于继续铺经济/远程输出。
-- 保护格本身不能种任何东西（花/濒危植物就在那里）；守花植物放 frontColumn（c+1）或保护格左右 1 格，不要覆盖保护格。
-- 短手看 cards[].reach / plants[].reach（格）：reach=1 表示只能打左右相邻 1 格。花在 c3 时，菜问放 c1 或 c5 都差 2 格，打不到；图鉴里的“接近/前后”不是“身后任意距离”。
-- state.brief.airRaid 非空 = 现在有空中目标，这是三叶草唯一有效窗口：如果卡组有 blover 且冷却/阳光 OK，本轮立刻种；airRaid=null 时不要种三叶草，它落地就无效。
-- brief.incoming[].flying 非空 = 下一/两波有飞行单位：提前在这两行 c2 放近战，或至少留 50 阳光给三叶草；不要等它出现在场上再反应。
-- 三叶草只在僵尸还在空中时有效：荡索僵尸已经落在花/植物上啃咬、或小鬼已经落地，再种三叶草就是浪费；落地后改用地刺/菜问/樱桃。zombies[].tags 里的 flying 只说明这个单位“会飞”，不代表它现在在空中。
-- 选卡要看全卡池再决定：pvz_briefing.cards 有每张卡的费用/冷却/血量/DPS/单发伤害（burst）/产阳光/回本秒/弹道/射程/伤害类型（damageType）/能量豆（plantFood）/激活方式（activation、aim）；需要“用法”长文本时用 pvz_knowledge 单查。选卡阶段 state.seedSelection.available 也带 family/dps/sunPerSec/paybackSec。deck.poolFacts 是按 DPS 和产阳光排的卡池事实，deck.presets 是关卡自带的预设卡组（只是事实，不是推荐）。不要只反复用最熟的那几张：卡池里每张卡的数都摆在这里，按本关僵尸的 ehp/护甲/特性和自己的思路挑。
-- 每一关都有历史记录：pvz_briefing.history 与 pvz_level_memory 是本关以前的结果（哪套卡组、打到第几波、损失、计划、你写过的心得）；history.lessons 是历次复盘写下的可执行经验，开局先逐条读。开局先读，再决定这次要不要换思路；打完可以用 pvz_level_memory 传 note 写下结论，结果（胜负/波次/卡组/计划）会在关卡结束时自动记录。
-- 准备模式看 state.prep，不要靠猜：normal 正常选卡；preplant 提前布阵（波次未开始，可以先种，阵型好就 pvz_start_level）；conveyor 传送带（卡组由传送带给定，不能选卡）；forced_deck 给定/锁定卡组（不要换卡，直接开局）。对 conveyor/forced_deck 反复调用 pvz_choose_deck 是空转。
-- 选卡用 pvz_choose_deck。工具不会自动补卡，也不会替换你指定的卡。数量不足会返回 DECK_NOT_FULL；补满后重新调用。
-- 卡槽状态看 cards：cdReady（冷却好了）/ affordable（买得起）/ sunShort（还差多少阳光）；ready 只有两者都满足才是 true。
-- 僵尸厚度看 zombies 的 hp / armorHp / ehp / ehpMax：ehp 可读时是「本体 + 当前护甲」，为 null 时用 ehpMax 当上界；不要只看 hp。位置看 column（越小越靠房子），speed 是每秒走几格，etaToHouse 是到房子的秒数，用它们预判落点。
-- 僵尸「怕什么 / 会放什么」看 zombies[].behaviorText / immunities / spawns / boss：immunities 里的免疫（例如免疫冰冻/免疫减速/不能被吞）说明对应控制或秒杀对它无效；spawns 非空 = 它会召唤/生成小鬼，需要多目标或穿透；boss=true 要按阶段留爆发。
-- 铺同一种卡到多格时用 pvz_act 的 cells，工具会按冷却自动等待重试；不要为了同一张卡连续调用 5 次。
-- 想重开本关用 pvz_restart（不用先进暂停菜单）。
-- 一轮 = 一次 pvz_act 可以带 1–6 个动作，它们会连续执行，不会为每株植物各等一次落地。不同卡种到不同格、补阳光、给豆、移车、收豆都可以放在同一轮；只有「同一张卡连种（冷却）」「同一格先铲后种（用 replace）」「刚种下就要给豆（等落地）」需要分轮。不要每个动作都单独发一次 pvz_act。
-- 能量豆（plantFood）是**救场资源，默认先攒着**，不要一有就喂。只有满足下面任一条才用：① plantFoodFull=true（豆满，下一颗会溢出，这一轮必须花掉一颗）；② 同一株的 state.brief.plantFoodPlan 里 targets>=3，或范围内有 Boss/巨人/铁桶/滚筒这类高威胁单位；③ 某行 lanes[].lossIn 很小 / gap 很大 / 推车快触发，需要立刻救场；④ 关键输出或墙正在被啃，给豆能马上救下它。普通波次只有 1 只普通僵尸时**不要用**，单体豆打一只普通僵尸基本是浪费；早期也不要用。豆不会过期，没满就一直留着，等值得的时机。
-- 选目标看 state.brief.plantFoodPlan（按「范围内僵尸数 × 伤害总量」排序）或 state.plants[].food：kind/area/radius/targets 都是现场算好的。targets=0 且 area 是 self_aoe/row/target 的卡（例如菜问只打自身周围 3x3）给豆会直接返回 FOOD_NO_TARGET 并告诉你最近僵尸在第几列——不要硬塞，等僵尸进范围、换一株，或确实要救场才传 force=true。self/buff/heal/sun_burst 这类非伤害豆只在满豆或紧急时用。刚种下（foodable=false）下一轮再给；花盆/睡莲/一次性卡不能吃豆。
-- 点击类卡必须用 activate，不会自己开火：state.brief.activatePlan 已经给 lane/column/aim/frontZombie/shouldAct/api/live。aim=lane（椰子加农炮）打本行；aim=free_cell（冬青骑士/香蕉火箭炮/槲寄冰仙子/整人竹）必须同时传 targetLane/targetColumn（先进入瞄准再打出这一发）；aim=self（寒冰菇/镜面坚果/火葫芦/爆浆草莓/棱镜草）只点自己。返回 NOT_READY 时看 live（sleepCD/shooting/阳光不够/没长成），等状态变好再点，别原地重试。选卡时 cards[].activation=click 的卡如果没写进 plan.triggers，就不要选。
-- OCCUPIED / CELL_BLOCKED 会带 alternatives（同行空位）：直接换 alternatives 里的格子重种，不要原地重试，也不要因为一次被占就放弃这张卡。
-- 铲除是正常战术，不是"失败"：种错位置、格子不够要腾位、僵尸贴到后排需要把阳光生产者换成一株输出，都可以直接 shovel；腾出来的格子下一轮再补回经济。不要因为"舍不得"就卡着不动。
-- 墙不是永久位：某行 dps 已经够（gap<=0）但墙占着更好的输出位时，用 replace 把墙换成输出，再把新墙补到它右侧（frontColumn）；不要因为“已经种了墙”就永远不改。反过来，输出不要种在本行墙的右侧，否则僵尸先啃输出，墙白放。
-- 地刺/地刺王（cards[].stepDamage=true）靠“僵尸走过这一格”造成伤害：必须种在墙前（墙右侧、僵尸来的方向），种在墙后僵尸会被墙挡住、永远踩不到，等于白种。工具会返回 SPIKE_BEHIND_WALL 并给墙前可种位；不要把它当成普通输出往墙左挪。
-- 升级弱卡也是铲除的正当理由之一（不是唯一理由）：阳光富余（例如 >300、且卡槽都买得起）时，把低级输出/经济 replace 成更强的同定位卡（向日葵→双胞向日葵、豌豆→双发/西瓜、坚果→高坚果），一步完成先铲后种；不要因为怕损失就把整局停在低级卡上。
-- 同一批动作里可以「先 shovel 这一格、再 plant 同一格」，工具按顺序执行；贴脸救急就用这种连招，别分两轮。
-- pvz_choose_deck 返回 warning / actualDeck 时以 actualDeck 为准：计划里没带上的卡不要当自己有（例如计划写噬碑藤但卡组没带）。
-- 经济要维持：state.plants[].family 是 Sun 的算阳光生产者，lanes[].sunProducers 是每行数量；总数明显不足（例如少于 3 株）或某行是 0 时，下一轮优先补向日葵/双子向日葵，不要只顾输出。被吃掉后 changesSinceLast.plantsLost 会告诉哪格空了，补回同一行。
-- 樱桃炸弹、倭瓜、冰冻生菜这类一次性/控制卡是拿来救场的，不是存着看的，而且要给提前量：从读状态到动作落地有 3–5 秒，僵尸会走 1–2 格。僵尸进 c4 就准备，别等贴到 c2；目标放在它左边 1–2 格（列号更小），不要放在它当前格或右侧，否则动作落地时它已经走过去。种植结果里的 timing 是执行那一刻最近的僵尸列，timing.late=true 就说明已经晚了，下一轮用 timing.suggestedColumn（或往左 1–2 格），别原地重试。
-- 每个决策轮看一次状态：优先用上一轮 pvz_act 返回的 state（含阳光、卡槽冷却、格子占用、僵尸位置），只有没有 state 时才调 pvz_state；把本轮所有动作放进同一个 pvz_act；不要每个动作前都重新读一次状态，也不要连续两轮只读状态不动作。失败后读 code，不要对同一个格子/同一张卡反复撞同一个错误。
-- 阳光、能量豆、金币会自动收；需要时也可以 pvz_collect。
-- 关卡任务失败可能直接判负：把 tasks 的 tip/hint/timeLeft/urgent 当作硬约束。
-- 关卡规则只看结构化字段：植物数量上限以 plantLimit / limits.plantLimit 为准，为 null 就是没有上限。objective.trusted=false 或 missions 为空时，说明这关没有下发任务文本；不要从任务原文残留、图鉴知识或"以往这类关卡"推断"最多 18 株"之类的限制。tasks 为空就按普通关卡打，不要自己加限制。
-- 不要空转：需要等阳光/冷却/僵尸进某行/任务完成时，把 wait 动作放进本轮 pvz_act；只有“本轮没有别的动作、必须单独等一个外部条件”才用 pvz_wait_until（它会多一轮模型往返）。不要连续调用同一个查询。
-- plan 分两层：text 是给玩家看的中文摘要；lanes/counters/phases/triggers/emergency 是给快模型执行的结构化字段，必须写清 lane/column/card/条件。不要只写一段文字计划。
-- 你可以在 pvz_set_plan 里写风格、卡组、每行职责、阈值、应急方案；之后用 pvz_state.plan 回看。计划只属于你，文字尽量用中文（codename 除外）。
+【开局计划：只写克制与用法，不写具体位置】
+- 强烈建议开局计划只写：
+  · goal：通关条件/主要风险。
+  · counters：{threat 或 tags, card, capability, usage, note}——“什么植物克制什么僵尸/机制”，不写 lane/column。
+  · usage：{card, how, counterTags, caution}——关键植物怎么用、什么时候用、怕什么。
+  · phases：{id, when/untilWave, priorities[]}——分阶段的优先事项（经济/输出/控场/救场），不是固定阵型。
+  · triggers：{when, consider[]}——出现某类僵尸/某行压力时，建议考虑什么。
+  · emergency：建议性的救场顺序。
+- 不建议在开局写 lanes[].wall/column、queue 的具体 c 列：僵尸生成和波次是动态的，这些位置在 running 时由本地 facts 现算更可靠。
+- plan.text/summary 建议用 briefing.level.label（或 world.name + 关卡号）来写脸前这一关；历史 history 可能是别的关/别的世界，只作参考，不要把旧关卡名（例如埃及）写进当前计划。
+- running 时如果确实要用本地队列，再写 plan.queue；位置优先用 lane:'danger'/'protect'、column:'ahead'/'safe'/'back'，让本地按实时僵尸和出土时间解析。
+- planAudit 出现 PLAN_DECK_MISMATCH 时按实际 deck 重写；出现 PLAN_POSITIONAL_AT_START 时，建议把开局的具体行/列/queue 改成 counters/usage，位置留到 running 现算。
 
-坐标：
-- lane 0-4，从上到下；column 0-8，从左（房子一侧）到右（僵尸出生点）。
-- 僵尸 column 越小越靠近房子；一格一株（特殊叠加卡按图鉴说明）。
+【本地 facts：预判交给脚本，模型做取舍】
+- lanes：dps/dpsEffective/dpsOnFront/gap/lossIn/actBy/frontPlant/contactInSec/holdSec/killWindowSec/killBeforeWindow/projectedHouseSec；lane 数字只描述“这一只、这一刻”。
+- 建议用全行口径：lanes.ehp 是本行所有僵尸总血量，lanes.clearSec = ehp / dpsEffective，lanes.clearBeforeHouse 是和 front 到房子的时间比较。killSec 只回答“最前这一只来不来得及”，不等于整行够用。
+- brief.capacityGaps：每行 missingDps、neededDps、addCells、economyCells。建议按缺口补，不要补 1 株就认为够；缺口很大时优先空位/输出，其次考虑换经济位，最后才用墙拖。
+- brief.matchups：deck 植物 × 当前僵尸的 singleTtk/multiTtk/burstKill/immune/blocked/armorHp。建议先看 immune/blocked，再看 ttk，不要只看单卡 dps。
+- brief.dataChecks：解析值和原始字段的交叉校验；有 issue 时按 expected/actual 修正判断。
+- brief.minePlan：latestSafeColumn/safeColumns/tooLate/tiles；safeColumns 已把路上墙/植物的啃食时间算进去。
+- brief.wallPlan / wallRebuildPlan：缺口、风险、可 replace 格；具体列交给本地。
+- brief.lastResortPlan：某行 clearSec > lossIn、前面还能拖时，建议考虑把后排向日葵换雷；雷在墙前/墙后都可能成立，按 safeColumns 判断。
+- brief.cardEfficiency / upgradePlan：多目标卡、economy 换输出的收益差；replaceCells 是 replace 目标，不是 plant 目标。
+- brief.rescuePlan：贴脸时的 front/window/emptyColumns/replaceCandidates/outputCards/instantCards/food/wallColumns。
+- state.threatGaps：本地算的覆盖缺口；有缺口时建议先补对应能力/行。
+- state.decisions：本地算好的微决策（能量豆/落点/点击卡/升级/补墙/最后防线）。可以只用 pvz_decide {id, choice:yes|no|other} 回答；它不替代整关计划。
 
-标准循环：
-1. phase=objective：先 pvz_dismiss_objective，再 pvz_briefing。
-2. phase=preparing：pvz_briefing（含卡池/波次/地形）→ 看 state.prep.mode 决定路径：normal 自己定卡组 → pvz_set_plan → pvz_choose_deck → 再读一次 briefing.deck.counterGaps（有 missing 就补齐）→ pvz_start_level；conveyor（传送带）或 forced_deck（给定/锁定卡组）不要选卡，choose_deck 只会原样返回，直接 pvz_set_plan → pvz_start_level。
-3. phase=running：pvz_act 的返回里已经带 state（含 events 与 changesSinceLast，体积是精简版）：下一轮直接看它，**不要再调 pvz_state**；只有刚进战斗、换波、pvz_act 没返回 state，或确实需要完整地形时才调一次 pvz_state。看 changesSinceLast（plantsLost / plantsAdded / mowerLost / waveDelta / sunDelta / zombieDelta）和 events，再把本轮 1–6 个动作一次放进 pvz_act；只是等阳光/冷却的话，把 wait 动作放进同一批 pvz_act（最多 15s），别单独调 pvz_wait_until 空转一轮。如果 state.prep.mode=preplant 且 prep.gameStarted=false，这是提前布阵关的摆阵期：先按给定阳光把阵型摆好，准备好就调 pvz_start_level 开打，不要一直种下去不等开始。
-4. phase=won/lost：停止操作，向玩家说明结果；用 pvz_level_memory 传 note 写下这一关的结论（卡组是否合适、哪波最危险），系统也会自动记录本局结果。
+【战术建议（都不是命令）】
+- 保护关先看 brief.protect.cells：每格都带 plant（type/name/hp/brief/usage.restSec/knockback）、dead 和 contactInSec；植物列表里对应项 protected=true。判负条件是这些保护植物死，不是普通防线植物——不要把“保护格”当空格，也不要把向日葵/经济植物的损失当成本关失败原因。
+- brief.protect.mode=contact 表示“踩到就判负”（例如“别让僵尸踩坏鲜花”）：必须在保护格右侧挡住或提前秒杀；墙/高血量肉盾种在保护格左侧完全没用，种在保护格上会被直接拒绝。
+- briefing.suggestedRules 是按本关卡组和判定生成的开局脚本（三叶草、保护格救场等）。能直接用就抄进 plan.rules；缺什么卡就自己改，不需要从零想。
+- 保护植物自己也有技能和冷却（例：弹簧豆击退僵尸，弹完休息约 10s）。布防时给它的效果留空间，不建议用墙把它围死；复盘按保护植物是否存活归因。
+- 输出/墙：通常放在僵尸左侧才打得到/挡得住；目标格已经在僵尸右侧时，建议改到左侧，或考虑一次性/能量豆，不建议硬种。
+- 看 cards[].role / needsContact / trigger：role=melee_output（reach≤1 且有伤害，例如吸血牛肝菌 3x3 吸血）必须贴着僵尸放，放后排等于不输出；血厚不等于墙。trigger=once 表示触发一次、持续几秒，不要当持续 DPS 用。
+- 开局：建议先稳住经济与基本输出，再考虑墙/控场；不要按固定阵型硬铺，按实际波次和阳光调整。
+- 卡组：不建议因为预填/历史卡组“还能用”就整关沿用。每关建议至少比较一次 coverageGaps.missing 与卡池 candidates，结合本关世界机制和 zombie tags，判断是否换 1–2 张；换卡在选卡阶段用 pvz_choose_deck（replace=true），开局后通常不能再换。
+- 阳光：建议把富余阳光转成输出/墙/控场，不建议长期攒着；但也不要为了花而花，先看 capacityGaps 和下一波。
+- 能量豆：建议默认攒着；满豆、范围内多目标、Boss/巨人/铁桶/滚筒、关键行快失守、关键输出/墙被啃时再考虑。普通波次 1 只普通僵尸不建议用。
+- 土豆雷/地雷：不是瞬爆；建议提前埋。同一格多只会被同一次爆炸结算；配合墙把僵尸聚在同一格是常见用法。墙前先炸、墙后等破墙后炸都可能成立，按 safeColumns。
+- 冰/一次性/控制卡：建议留提前量；僵尸贴近时再放容易空。范围卡落点看 aimOptions 的 hits/kills，不要只看数量。
+- 极短窗口的救场建议写进 plan.queue 交给本地队列，不要指望模型自己卡帧：
+  例：三叶草吹荡索/小鬼炮 {"id":"blover-air","type":"plant","plant":"blover","lane":"airborne","column":"back","cond":{"airborne":true},"validForSec":180}。
+  本地队列约 450ms 一拍，能在“空中”那一帧放出来；COOLDOWN/SUN 会自动重试并把失败码写进 queue.history，下一轮由你（快模型）决定补阳光、换卡或改救场。
+  需要限定僵尸类型时用 cond.zombieType（例如 "swashbuckler"），不要写死行/列。
+- 更完整的“当局本地规则”写在 plan.rules（和 queue 同一个 450ms 执行器）：
+  [{"id":"blover-air","when":{"airborne":true,"cardReady":"blover","minSun":50},"do":{"type":"plant","plant":"blover","lane":"airborne","column":"back"},"limits":{"cooldownSec":20,"validForSec":180},"onFail":"ask"}]
+  when 支持 minSun/minPlantFood/waveGte/waveLte/zombieInLane/zombieColumnLt/noWall/noShooter/cellEmpty/airborne/zombieType/cardReady；
+  do 支持 plant/replace/shovel/plant_food/activate；lane 支持 0-4/danger/protect/airborne，column 支持 0-8/ahead/safe/back。
+  开局就把紧急策略写进去（三叶草、倭瓜、寒冰辣椒、保护格救场、能量豆），不要等窗口出现再让模型反应；onFail="ask" 的失败码会留在 queue.history，由你下一轮兜底。
+- 升级/换植：建议在波间或阳光富余时考虑把低单体输出换成多目标卡，或把后排经济位换输出；贴脸救场时不建议先升级。换植不返还阳光，算上成本和冷却。
+- 墙/雷位置：建议用 column:'ahead'/'safe'，不建议写死具体 c 列；写死列在僵尸越过后容易变 WALL_TOO_LATE/MINE_TOO_LATE。执行层会自动改一次，但主动用动态列更稳。
+- 不建议主动把“放弃整行”写进计划。某行 clearBeforeHouse=false 时，建议先看 lastResortPlan（后排向日葵换雷）、rescuePlan（一次性/能量豆/replace）、capacityGaps，再考虑推车兜底；很多时候墙/植物还能拖到雷出土。
+- 残敌：wave.done 或 wave.now>=total 不等于通关；有 residual 时建议先清 activeLanes。wave.now 可能大于 total（本作有超出表定波数的收尾波），residual 很大/还在出新波时按正常波布防。
+- 空行：没有僵尸时建议不要用墙/输出占空行，除非保护格、下一波很近、或计划明确预布防；需要时写 allowIdleLane:true。
+- 铲除/换植：种错、腾位、贴脸救场时可以考虑把经济/弱输出换成输出或墙；不建议无目的地铲。
+- 同卡冷却：5–8s 的同卡重复执行层会排队一次；20s 墙仍建议拆轮。
+- 每 2–3 波或阳光>300 时，建议回看一次 capacityGaps/matchups/upgradePlan，按缺口和克制关系调整，而不是重复旧计划。
+- 关卡结束写 pvz_level_memory 时，建议只写：
+  · 胜负/波次/卡组；
+  · 哪类僵尸或机制造成压力；
+  · 保护关要写清保护目标（plant.type）在哪几行、是没保住还是被绕过，不要把非保护植物（向日葵等）当失败原因；
+  · 下次优先准备什么能力、什么克制关系、什么使用时机。
+  不建议写“下次优先补第几行/第几列/先种什么”这种具体位置；位置每局由本地 facts 重新算。
 
-失败处理：
-- 墓碑/障碍逐行看 lanes[].tombColumns / brief.tomb：只影响它所在行的直线弹道，其他行不受影响。无墓碑的行照常可以用豌豆/直线输出，不要因为本关有墓碑就全关只用投手。
-- brief.wallPlan 已算好每行墙血、能撑几秒（按该行所有僵尸的总啃食 DPS）、下一张墙的冷却、risk；brief.wallRebuildPlan 直接给多行缺墙时的补墙顺序、startInSec、feasible。同一张墙卡一轮只能成功 1 个（墙卡通常 20s 冷却），按 wallRebuildPlan 的顺序先保最危险行，其余用土豆雷/倭瓜/樱桃拖，不要一轮连发 3 个墙。
-- 报纸/周刊僵尸有独立 newspaperHp，计入 EHP；打掉报纸后会狂暴（速度/伤害倍率看 behaviors）。不要按本体 hp 判断它很脆；多段/穿透/高爆发更合适。
-- 真伤/毒伤/吸血：cards[].attack.damageType / cards[].damageType 是伤害语义——normal=先打护甲，true=直扣本体，poison=毒打本体（首发弹道仍打护甲），drain=吸血型直扣本体（例如吸血牛肝菌，DPS 40、无视护甲）。armorState=yes/no/unknown：unknown 表示没有字段能证明，按普通伤害算，不要自己脑补。cards[].poison 非空 = 有持续毒伤；cards[].effectiveDps 已经把毒伤加进单体输出。armored 缺口由 high_dps 或 true_damage 任一覆盖即可。
-- 一次性/点击发射卡不是没有伤害：cards[].burst.dmg 是单发结算伤害（樱桃 1800、火爆辣椒 1800、椰子炮 900）。用它和僵尸 ehp 比，不要因为 attack=null 就以为这卡没用。
-- 成组僵尸（骆驼牌每组 3 只以上）会有 group tag：优先多目标/穿透卡（回旋镖），按 multiDps 和 lanes.dpsGroup 评估；不要因为它单目标 dps 只有 7.4 就排除。
-- 旗帜僵尸/大动员木乃伊本身只是带队的普通僵尸，不需要专门“克制”；但 incoming[].flag=true 或同一行 ≥2–3 只时，优先用多目标/穿透卡（回旋镖等），看 multiDps / lanes.dpsGroup，不要用单目标 dps 比较。
-- 多目标/穿透卡看 attack.pierceCount/targets/hitsPerTarget/multiDps；lanes.dpsGroup 是同一行 ≥2 只僵尸时的有效 DPS。回旋镖是 20×3 目标×2 次 / 2.7s ≈ 44.4，不要按单目标 7.4 算。
-- brief.coverageGaps.missing 非空 = 当前卡组缺某种机制能力（capability），和具体关卡无关；按 missing[].capability / tags 补卡或写替代方案，不要靠关卡名猜。missing[].candidates 是卡池里能满足该能力的卡（事实）。
-- 开局 pvz_set_plan 会返回 audit.warnings：缺能力却没写 counters、计划卡组和实际卡组不一致、计划只有一段文本时，按 warning 重写计划（保留 text，补 lanes/counters/phases/triggers）。warning 不阻止保存，但快模型会按计划执行，别留着不修。
-- 本地已经算好的直接看：brief.laneMath（killSec/etaSec/canKillBeforeHouse）、brief.counterMatrix（deckAnswers/missingTags）、brief.minePlan、brief.airRaid、instantAim、lanes[].gap/actBy；不要自己再算 EHP÷DPS、速度或出土时间。
-- 土豆地雷/带 armTimeSec>0 的卡不是瞬爆：土豆雷要 14 秒出土。僵尸已经进 c4/贴脸时不要种，必须提前 2 波埋到僵尸来的路上；来不及就改樱桃/倭瓜。cards[].armTimeSec 是这个时间，brief.minePlan 已算好每行 latestSafeColumn / tooLate，直接按它种，不要自己算速度。
-- COOLDOWN / SUN / PAUSED 可以稍后重试；OCCUPIED / CELL_BLOCKED / CARD_NOT_AVAILABLE / BAD_DECK 不要原样重试；PROTECT_TOO_FAR 是落点够不到保护格，PROTECT_CELL_BLOCKED 是直接种在保护格上，都按返回的 guardCells 立刻改格；WALL_TOO_LATE 是墙种在该行最前僵尸的右侧，挡不到它，按 suggestedColumns 改种或先用一次性卡；OUTPUT_IN_FRONT_OF_WALL 是输出种在本行墙的右侧，按 behindCells 改到墙左，或先 replace 墙再补新墙；SPIKE_BEHIND_WALL 是地刺种在墙后、踩不到僵尸，按 suggestedColumns 改到墙前（墙右侧）；MINE_TOO_LATE 是土豆雷来不及出土，按 suggestedColumn 提前埋或改用瞬爆卡；NO_AIR_TARGET 是三叶草没有空中目标，不要重试，等 airRaid 或改用菜问/樱桃；BATCH_COOLDOWN 是同一批里同卡重复且基础冷却 >3.5s（maxSuccess 是这一轮最多能成功的个数），把多出来的动作拆到下一轮或换卡；BATCH_CONFLICT 是同一格先种后铲/重复种（conflictWith 指向前面那个动作），先铲后种才是合法连招。
-- FOOD_NO_TARGET 是这株能量豆的范围里没僵尸（nearestZombie 给最近的一只）：等它靠近或换一株，别原样重试；确实要浪费才传 force=true。NOT_ACTIVATABLE 是这株本来就自动攻击，不需要 activate；ACTIVATE_UNSUPPORTED 表示这个版本找不到触发方法（看 tried/api），先换别的卡，不要反复点同一株。
-- pending:true 表示动作已发起但还没落地：不要立刻重种同一格，先 pvz_state 确认。
-- DECK_NOT_FULL 表示你选的卡不够槽位；工具不会替你补。自己决定补哪几张。
-- TIMEOUT 不是崩溃，返回里有最后状态；据此重新判断。
-- 每轮把真正需要的动作一起发（1–6 个），不要为了省事一次只发一个；也不要无意义地刷状态。
+【标准循环】
+1. objective：pvz_dismiss_objective → pvz_briefing。
+2. preparing：按 prep.mode 选卡/写 counters+usage 计划/开局。
+3. running：pvz_act（2–4 个动作）→ 看返回 state/events → 下一轮；需要时 wait。
+4. won/lost：停止，写机制/能力层面的 level memory。
 
-思考窗会展示你的推理、工具调用、真实结果和计划。不要输出整段原始 JSON 给玩家；用简短的人话说明你的判断。`;
+不要输出整段 JSON 给玩家；用简短人话说明判断。`;
 
 function initialUserMessage() {
   return [
     '开始本关。',
-    '先调用 pvz_health 确认模组可用；然后按当前 phase 调用 pvz_briefing（objective 阶段先 pvz_dismiss_objective）。',
-    '读完事实后，自己制定整关计划并用 pvz_set_plan 记录。然后看 state.prep.mode：normal 就 pvz_choose_deck；conveyor / forced_deck 跳过选卡；最后 pvz_start_level。',
-    '进入 running 后自己循环决策，直到胜利或失败。若 prep.mode=preplant 且 gameStarted=false，先布阵，阵型好后 pvz_start_level。不要等待本地建议。',
+    '先 pvz_health 确认模组；再 pvz_briefing 读完整关波次/卡池/能力缺口。objective 阶段先 pvz_dismiss_objective。',
+    'briefing 已经包含本关僵尸图鉴；之后只用 pvz_knowledge {types:[...]} 补查当前卡组和保护/预置植物（NEED_KNOWLEDGE.missing 会列出缺的那几张，不需要整张卡池全查）。',
+    '按 state.prep.mode 走：normal → 写计划 → 选卡 → 看 prep → 开局；forced_deck → 写计划 → 开局；preplant → 写计划/选卡/布阵 → 开局；conveyor → 直接开局，局内按 state.cards 实时用卡。',
+    '开局计划建议只写“什么克制什么、关键植物怎么用、分阶段优先事项”，不要写具体行/列；位置留给 running 时的 capacityGaps/wallPlan/minePlan 现算。',
+    '进入 running 后自己循环：优先用上一轮 pvz_act 的 state，每轮尽量 2–4 个动作，直到胜负。',
   ].join('\n');
 }
 
 function continueMessage(note) {
-  const base = '继续。优先看上一轮 pvz_act 返回的 state（已含 events 与 changesSinceLast），没有 state 才调一次 pvz_state；不要每轮再单独调 pvz_events。先看 plantsLost / mowerLost / waveDelta / zombieDelta，把这些变化纳入判断（例如某格植物消失、某行丢车），再按你的计划执行下一步；本轮的动作尽量一次放进同一个 pvz_act（1–6 个），只为等阳光/冷却就带一个 wait 动作，不要单独调 pvz_wait_until 空转。';
+  const base = '继续。优先看上一轮 pvz_act 返回的 state/changesSinceLast/events；没有 state 才 pvz_state。把本轮 2–4 个动作放进同一个 pvz_act，只有等冷却/落地才单独 wait。位置建议优先用 capacityGaps/wallPlan/minePlan 的实时结果，不要照搬旧计划里的具体行列。';
   return note ? `${base}\n补充：${note}` : base;
 }
 
 function phaseNudge(phase) {
-  if (phase === 'objective') return '当前在关卡目标弹窗：调用 pvz_dismiss_objective。';
-  if (phase === 'preparing') return '当前在选卡阶段：先 pvz_briefing，再自己选卡并开局。';
-  if (phase === 'running') return '战斗中：读状态/事件后执行动作。';
-  if (phase === 'won' || phase === 'lost') return `本关已结束（${phase}），停止操作。`;
-  return '先 pvz_state 确认当前 phase，再决定下一步。';
+  if (phase === 'objective') return '当前在关卡目标弹窗，先 pvz_dismiss_objective。';
+  if (phase === 'preparing') return '当前准备阶段：先 pvz_briefing 读僵尸与机制，再按对策用 pvz_knowledge {types:[...]} 只查要选的卡和保护/预置植物（缺的会在 NEED_KNOWLEDGE.missing），然后写 counters/usage 计划、选卡/开局。';
+  if (phase === 'running') return '战斗中：用上一轮 state 判断，2–4 个动作放进 pvz_act；位置优先用本地 capacityGaps/wallPlan/minePlan，需要时 full=true 查完整状态。';
+  if (phase === 'won' || phase === 'lost') return `关卡结束：${phase}，停止操作；level memory 建议写机制/能力层面的结论，不写具体行列。`;
+  return '先 pvz_state 确认 phase，再决定下一步。';
 }
 
 
@@ -7902,7 +11174,7 @@ function getOpenCodeSession() {
   return openCodeSession;
 }
 
-function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep = sleepDefault, version = '0.4.15', latency = null }) {
+function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep = sleepDefault, version = '0.4.17', latency = null, onModelRequestStart = null, onModelRequestEnd = null }) {
   const config = {
     baseUrl: DEFAULT_LLM.baseUrl,
     model: DEFAULT_LLM.model,
@@ -7920,25 +11192,62 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     apiKey: '',
     temperature: 0.3,
     stream: true,
-    maxSteps: 80,
+    // 思考模式：'auto'（默认）= 战斗中/后台关闭，开局规划保留低强度思考；'off' 全程关闭；'on' 全程开启。
+    thinkingMode: 'auto',
+    reasoningEffort: 'low',
+    // 战斗中单次回复上限；动作回复很短，但要留足一次 4–6 个动作 + queue 的 JSON。
+    battleMaxTokens: 800,
+    // 16 波的长关 80 步不够（约 5 步/波）；给足步数，避免打到一半 STEP_LIMIT 直接停。
+    maxSteps: 240,
     loopDelayMs: 200,
+    // 省 token 的上下文策略：每轮只把“当前局面摘要”发给模型，旧状态自动归档。
+    // 需要完整 brief/coverageGaps/laneMath 时仍可显式调 pvz_briefing 或 pvz_state full=true。
+    leanContext: true,
+    // 不重写旧消息（会破坏 DeepSeek 前缀缓存）；只靠 historyMaxMessages 从前端整段丢弃。
+    keepStateResults: 99,
+    // 连续 N 轮只发 1 个动作后提醒批量提交；0 = 关闭。
+    batchNudgeAfter: 2,
+    // 历史窗口上限；配合 trimMessages 的批量裁剪，前缀稳定才能吃到缓存。
+    historyMaxMessages: 16,
+    // 队列 coast：队列还有任务时，先让本地执行 1-2 拍再请求模型。
+    queueCoastRounds: 2,
+    queueCoastMs: 700,
+    // 预算告警：0=关闭；默认 120 万 tokens 提醒一次。
+    tokenBudget: 1200000,
+    // 可选：按每百万 tokens 的单价估算金额（不填就只显示 token）。
+    inputPricePerM: 0,
+    outputPricePerM: 0,
+    currency: '¥',
     ...cfg,
   };
   let messages = [];
   let running = false;
   let stopRequested = false;
   let controller = null;
-  let stats = { requests: 0, promptTokens: 0, completionTokens: 0, toolCalls: 0, modelSwitches: 0, modelMs: 0, toolMs: 0 };
+  let stats = { requests: 0, promptTokens: 0, promptCacheHit: 0, promptCacheMiss: 0, completionTokens: 0, toolCalls: 0, modelSwitches: 0, modelMs: 0, toolMs: 0 };
   let lastPlan = null;
   let lastPlanAt = null;
   let lastPhase = null;
   let everRunning = false;
   let lastError = null;
   let lastState = null;
+  // 当前准备模式：提前布阵/给定卡组没开打前，仍算“开局思考”，应该用主模型。
+  let prepNow = null;
   let forceStrongRounds = 0;
   let usedModel = '';
   let runStartedAt = 0;
   let recentActions = [];
+  let singleActionRounds = 0;
+  let batchNudgePending = false;
+  let lastPlanAuditNudgedFor = null;
+  let queueEmptyNudgedAt = 0;
+  let threatGapNudgedAt = 0;
+  let decisionNudgedAt = 0;
+  let deckNudgeKey = '';
+  let queueCoastBudget = 0;
+  let queueCoastNoted = false;
+  let budgetWarn80 = false;
+  let budgetWarn100 = false;
   let advisorBusy = false;
   let advisorNote = null;
   let advisorLastWave = null;
@@ -8022,10 +11331,37 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     }
   }
 
+  function totalTokens() {
+    return Number(stats.promptTokens || 0) + Number(stats.completionTokens || 0);
+  }
+
+  function estimatedCost() {
+    const pin = Number(config.inputPricePerM) || 0;
+    const pout = Number(config.outputPricePerM) || 0;
+    if (!pin && !pout) return null;
+    const cost = (Number(stats.promptTokens || 0) / 1e6) * pin
+      + (Number(stats.completionTokens || 0) / 1e6) * pout;
+    return Math.round(cost * 1000) / 1000;
+  }
+
   function addUsage(usage) {
     if (!usage) return;
     stats.promptTokens += Number(usage.prompt_tokens || 0);
     stats.completionTokens += Number(usage.completion_tokens || 0);
+    // DeepSeek 硬盘缓存：命中部分只按缓存价计费，也更快。统计出来才能判断前缀是否稳定。
+    stats.promptCacheHit += Number(usage.prompt_cache_hit_tokens
+      || (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens) || 0);
+    stats.promptCacheMiss += Number(usage.prompt_cache_miss_tokens || 0);
+    const total = totalTokens();
+    const budget = Number(config.tokenBudget) || 0;
+    if (budget > 0 && !budgetWarn80 && total >= budget * 0.8) {
+      budgetWarn80 = true;
+      emit({ type: 'log', text: `预算提醒：本局已用 ${total} tokens（预算 ${budget} 的 80%）。` });
+    }
+    if (budget > 0 && !budgetWarn100 && total >= budget) {
+      budgetWarn100 = true;
+      emit({ type: 'log', text: `预算告警：本局已用 ${total} tokens，超过预算 ${budget}。` });
+    }
   }
 
   function fastModelOn() {
@@ -8033,11 +11369,21 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     return f && f !== config.model ? f : '';
   }
 
+  function isPreBattle() {
+    return !!(prepNow && !prepNow.gameStarted && (prepNow.mode === 'preplant' || prepNow.mode === 'forced_deck'));
+  }
+
+  function isConveyorMode() {
+    return !!(prepNow && prepNow.mode === 'conveyor' && prepNow.gameStarted);
+  }
+
   // 开局/选卡/复盘用主模型（想清楚），进入 running 后默认换快模型；
+  // 提前布阵/给定卡组还没开打时仍算开局思考，必须用主模型把整关波次想清楚。
   // 每 escalateEvery 步、以及局内出现紧急任务/多行压力时，临时升级回主模型。
   function pickModel(phase, steps) {
     const fast = fastModelOn();
     if (!fast || phase !== 'running') return config.model;
+    if (isPreBattle()) return config.model;
     if (forceStrongRounds > 0) return config.model;
     const every = Number(config.escalateEvery) || 0;
     if (every > 0 && steps > 1 && steps % every === 0) {
@@ -8067,6 +11413,19 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
       temperature: Number(config.temperature) || 0,
       stream: !!stream,
     };
+    // 思考模式默认是开的（effort=high），会在动作循环里多花 1–3s，还会让缓存命中变差。
+    // auto：战斗中/后台调用关闭，开局规划保留低强度思考。
+    const phaseNow = (typeof getPhase === 'function' ? getPhase() : lastPhase) || '';
+    const inBattle = phaseNow === 'running' || !!background;
+    const thinking = config.thinkingMode === 'on' ? true
+      : config.thinkingMode === 'off' ? false
+        : !inBattle;
+    // 只对 DeepSeek 系模型发这两个字段，避免自定义/其他 provider 直接 400。
+    const deepseekLike = /deepseek/i.test(String(body.model || '')) || /deepseek\.com/i.test(String(config.baseUrl || ''));
+    if (deepseekLike) {
+      body.thinking = { type: thinking ? 'enabled' : 'disabled' };
+      if (thinking) body.reasoning_effort = String(config.reasoningEffort || 'low');
+    }
     if (!noTools) {
       body.tools = openAiTools();
       body.tool_choice = 'auto';
@@ -8079,6 +11438,22 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
       abortTimer = setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, Number(timeoutMs));
     }
     let res;
+    // 模型思考期间暂停普通本地队列，避免队列先花掉阳光、模型按旧状态决策；
+    // urgent 规则（三叶草这类短窗口救场）仍然由队列执行。
+    let requestNotified = false;
+    const notifyStart = () => {
+      if (requestNotified) return;
+      requestNotified = true;
+      if (typeof onModelRequestStart !== 'function') return;
+      try { onModelRequestStart({ model: body.model, background }); } catch { /* ignore */ }
+    };
+    const notifyEnd = () => {
+      if (!requestNotified) return;
+      requestNotified = false;
+      if (typeof onModelRequestEnd !== 'function') return;
+      try { onModelRequestEnd({ model: body.model, background }); } catch { /* ignore */ }
+    };
+    notifyStart();
     try {
       res = await fetchAny(url, {
         method: 'POST',
@@ -8088,11 +11463,13 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
       });
     } catch (e) {
       if (abortTimer) clearTimeout(abortTimer);
+      notifyEnd();
       if (e && e.name === 'AbortError') throw makeError('STOPPED', '已停止');
       throw makeError('LLM_REQUEST_FAILED', String(e && e.message || e));
     }
     if (!res.ok) {
       if (abortTimer) clearTimeout(abortTimer);
+      notifyEnd();
       const text = await res.text().catch(() => '');
       const ra = Number(res.headers && res.headers.get ? res.headers.get('retry-after') : NaN);
       throw makeError('LLM_HTTP', `模型接口 ${res.status}: ${text.slice(0, 500)}`, {
@@ -8103,6 +11480,7 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     stats.requests++;
     const done = (v) => {
       if (abortTimer) clearTimeout(abortTimer);
+      notifyEnd();
       if (latency && !background) { try { latency.recordModel(Date.now() - startedAt); } catch { /* ignore */ } }
       return v;
     };
@@ -8150,6 +11528,11 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
         args: parseToolArgs(c.args),
         rawArgs: c.args,
       }));
+      // max_tokens 截断会让 tool args 变成半截 JSON；这种情况直接重试一次更大的预算，
+      // 不要把 "工具参数不是合法 JSON" 丢回模型让它自己猜。
+      if (out.finishReason === 'length' && out.toolCalls.some((c) => c.args && c.args.__parseError)) {
+        throw makeError('LLM_TRUNCATED', '工具参数被 max_tokens 截断', { retryable: true, needMoreTokens: true });
+      }
       addUsage(out.usage);
       return done(out);
     }
@@ -8163,6 +11546,11 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
       args: parseToolArgs(tc.function && tc.function.arguments),
       rawArgs: (tc.function && tc.function.arguments) || '',
     }));
+    const finish0 = data.choices[0].finish_reason || null;
+    if (finish0 === 'length' && toolCalls.some((c) => c.args && c.args.__parseError)) {
+      addUsage(data.usage);
+      throw makeError('LLM_TRUNCATED', '工具参数被 max_tokens 截断', { retryable: true, needMoreTokens: true });
+    }
     addUsage(data.usage);
     return done({
       content: msg.content || '',
@@ -8203,7 +11591,7 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     }
   }
 
-  async function callWithFallback(model) {
+  async function callWithFallback(model, opts = {}) {
     const backoff = [1500, 4000, 9000];
     let lastErr = null;
     let triedNonStream = false;
@@ -8211,11 +11599,19 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
       if (stopRequested) throw makeError('STOPPED', '已停止');
       const stream = attempt === 0 && !triedNonStream ? !!config.stream : false;
       try {
-        return await callModel({ stream, model });
+        return await callModel({ stream, model, ...opts });
       } catch (e) {
         if (e && (e.name === 'AbortError' || e.code === 'STOPPED')) throw e;
         lastErr = e;
         // 流式不支持 / 流式被截断：先降级成非流式重试一次
+        // 工具参数被 max_tokens 截断：直接翻倍重试，别把半截 JSON 丢给模型。
+        if (e && e.needMoreTokens) {
+          const cur = Number(opts.maxTokens) || 0;
+          opts = { ...opts, maxTokens: Math.min(2000, Math.max(800, cur * 2)) };
+          lastErr = e;
+          emit({ type: 'log', text: `工具 JSON 被截断，max_tokens 提高到 ${opts.maxTokens} 重试` });
+          continue;
+        }
         if (attempt === 0 && config.stream && !triedNonStream && e && e.code !== 'LLM_HTTP') {
           triedNonStream = true;
           emit({ type: 'log', text: '流式失败，改用非流式重试：' + (e.message || e.code) });
@@ -8237,11 +11633,49 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     throw err;
   }
 
+  function archiveOldStateResults() {
+    if (!config.leanContext) return;
+    const keep = Math.max(1, Number(config.keepStateResults) || 2);
+    const hits = [];
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (!m || m.role !== 'tool') continue;
+      if (m.name !== 'pvz_state' && m.name !== 'pvz_act') continue;
+      hits.push(i);
+    }
+    const cut = Math.max(0, hits.length - keep);
+    for (let n = 0; n < cut; n++) {
+      const m = messages[hits[n]];
+      let o = null;
+      try { o = JSON.parse(m.content); } catch { o = null; }
+      if (!o || o.archived) continue;
+      if (m.name === 'pvz_act') {
+        const results = Array.isArray(o.results) ? o.results.slice(0, 8).map((r) => ({
+          action: r.action || r.type || null, ok: !!r.ok, code: r.code || null,
+          lane: r.lane, column: r.column, type: r.type || null, retryAfter: r.retryAfter,
+        })) : undefined;
+        m.content = JSON.stringify({
+          ok: o.ok, archived: true, results,
+          note: '旧轮次动作结果已压缩；当前局面看最新 pvz_act / pvz_state 的 state。',
+        });
+      } else {
+        m.content = JSON.stringify({
+          ok: true, archived: true,
+          note: '旧状态已压缩；当前局面看最新 pvz_act / pvz_state 的 state。',
+        });
+      }
+    }
+  }
+
   function trimMessages() {
     // 只做“整段丢弃”，不改写旧消息：每轮原地压缩工具结果会让 prompt 前缀每轮都变，
     // 上游的上下文缓存全部失效。保留最近的完整轮次，前缀保持字节稳定才能命中缓存。
-    const MAX = 20;
-    if (messages.length > MAX) {
+    archiveOldStateResults();
+    const MAX = Math.max(8, Math.min(24, Number(config.historyMaxMessages) || 16));
+    // 批量裁剪：只在超过 MAX+BATCH 时一次性丢回 MAX，避免每轮都从头部删一条
+    // 导致整个消息前缀每轮都位移、缓存每轮都失效。
+    const BATCH = 8;
+    if (messages.length > MAX + BATCH) {
       const system = messages[0];
       let rest = messages.slice(1).slice(-(MAX - 1));
       // 不能从孤立的 tool 结果开始；也不能从带 tool_calls 的 assistant 开始（它的 tool 结果已被丢掉）。
@@ -8272,12 +11706,35 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     return hit;
   }
 
+  function notePrep(obj) {
+    if (obj && obj.prep && typeof obj.prep === 'object') prepNow = obj.prep;
+  }
+
+  // bridge 在重开/换关/换模式时会清空 plan；agent 的 lastPlan 缓存必须跟着清，
+  // 否则 handoff/参谋还会把旧计划当成当前计划。
+  function notePlanFromState(state) {
+    if (!state || typeof state !== 'object' || !('plan' in state)) return;
+    lastPlan = state.plan || null;
+    if (!lastPlan) {
+      lastPlanAt = null;
+      lastPlanAuditNudgedFor = null;
+      return;
+    }
+    if (state.planSavedAt && state.planSavedAt !== lastPlanAt) {
+      lastPlanAt = state.planSavedAt;
+      emit({ type: 'plan', plan: lastPlan, savedAt: lastPlanAt });
+    }
+  }
+
   function notePhase(phase) {
     if (!phase) return;
     const wasRunning = everRunning;
     lastPhase = phase;
-    if (phase === 'running') everRunning = true;
-    if (phase === 'running' && !wasRunning) archiveBriefing();
+    // 提前布阵/给定卡组在 phase=running 但还没点开始时，不算真正开战：
+    // 简报要留到想清楚、点开始之后再归档。
+    const preBattle = isPreBattle();
+    if (phase === 'running' && !preBattle) everRunning = true;
+    if (phase === 'running' && !wasRunning && !preBattle) archiveBriefing();
     // 关卡结束：胜负，或真正打过 running 后回到主菜单/世界地图。
     // 不能只靠 won/lost —— 有的关卡先回地图再结算，AI 会一直空转调工具。
     const ended = phase === 'won' || phase === 'lost'
@@ -8295,9 +11752,9 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     if (!fresh.length) return;
     for (const lane of fresh) lostMowerLanes.add(Number(lane));
     const wave = state.level && state.level.wave;
-    const laneText = fresh.map((l) => `第${Number(l) + 1}行`).join('/');
     // 只记录事实，供关卡结束后的复盘合并；不在中途写记忆/不提前总结。
-    const lesson = `第${wave || '?'}波 ${laneText} 丢了推车：该行防线已被打穿；下局提前 1–2 波补墙/输出，别等僵尸压到房子。`;
+    // 经验写成机制/能力层面，不写具体行/列。
+    const lesson = `第${wave || '?'}波丢了推车：说明防线在峰值波被打穿；下次建议优先补峰值波的墙/输出余量，并用 capacityGaps 在波间补。`;
     incidentLessons = [...new Set([lesson, ...incidentLessons])].slice(0, 4);
   }
 
@@ -8320,9 +11777,12 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
         result = { ok: false, code: 'TOOL_FAILED', reason: String(e && e.message || e) };
       }
     }
+    notePrep(result);
+    if (result && result.state) notePrep(result.state);
     emit({ type: 'tool_result', name: tc.name, result, ok: !(result && result.ok === false) });
     if (tc.name === 'pvz_set_plan' && result && result.ok) {
       lastPlan = result.plan;
+      if (result.savedAt) lastPlanAt = result.savedAt;
       emit({ type: 'plan', plan: result.plan, savedAt: result.savedAt });
       const warns = (result.audit && result.audit.warnings) || result.warnings || [];
       if (warns.length) {
@@ -8330,16 +11790,9 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
         emit({ type: 'log', text: `计划审计：${warns.length} 条提示（计划已保存，但需要按事实重写）：${warns.map((w) => w.reason).join('；').slice(0, 260)}` });
       }
     }
-    if (result && result.plan && tc.name === 'pvz_state') {
-      lastPlan = result.plan;
-      // 计划没变就不重复播报，避免每回合刷一条「计划已更新」
-      if (result.planSavedAt && result.planSavedAt !== lastPlanAt) {
-        lastPlanAt = result.planSavedAt;
-        emit({ type: 'plan', plan: result.plan, savedAt: result.planSavedAt });
-      }
-    }
     if (tc.name === 'pvz_state' && result && result.ok) {
       lastState = result;
+      notePlanFromState(result);
       // 紧急任务 / 多行同时漏压：接下来 2 轮改用主模型想，避免快模型在关键局面犯傻。
       let urgent = 0;
       try {
@@ -8355,6 +11808,7 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     if (tc.name === 'pvz_act' && result && result.state && result.state.ok !== false) {
       // pvz_act 已经带回动作后的状态：模型和本地都直接用它，不再额外多一轮 pvz_state。
       lastState = result.state;
+      notePlanFromState(result.state);
       let urgent = 0;
       try {
         urgent += (result.state.tasks || []).filter((t) => t && (t.urgent || t.timeLeft != null && Number(t.timeLeft) <= 10)).length;
@@ -8386,6 +11840,18 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
         results: acts,
       });
       if (recentActions.length > 14) recentActions.shift();
+      // 连续两轮只发 1 个非 wait 动作：下一轮提醒批量提交，减少模型往返次数。
+      if (tc.name === 'pvz_act' && result && Array.isArray(result.results)) {
+        const acts = Array.isArray(tc.args && tc.args.actions) ? tc.args.actions : [];
+        const onlyWait = acts.length > 0 && acts.every((a) => a && a.type === 'wait');
+        if (acts.length <= 1 && !onlyWait) singleActionRounds += 1;
+        else singleActionRounds = 0;
+        const after = Number(config.batchNudgeAfter);
+        if ((after > 0 || after === undefined) && singleActionRounds >= (after > 0 ? after : 2)) {
+          batchNudgePending = true;
+          singleActionRounds = 0;
+        }
+      }
     }
     // 后台参谋的结论附在下一份状态/动作结果里，既有上下文、又不需要额外一轮。
     if (advisorNote && advisorNote.text && (tc.name === 'pvz_state' || tc.name === 'pvz_act') && result && typeof result === 'object') {
@@ -8396,8 +11862,152 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
       role: 'tool',
       tool_call_id: tc.id || `call_${index + 1}`,
       name: tc.name,
-      content: JSON.stringify(result),
+      content: JSON.stringify(compactToolForModel(tc.name, result, tc.args)),
     });
+    return result;
+  }
+
+  // 给模型的“本轮状态”只保留决策必要字段。完整 facts（coverageGaps /
+  // counterMatrix / laneMath / 全卡池数值）在 pvz_briefing 里给一次，不每轮重复。
+  function leanBrief(b) {
+    if (!b || typeof b !== 'object') return null;
+    const wall = (b.wallPlan || []).filter((w) => w && w.risk && w.risk !== 'ok').slice(0, 3).map((w) => ({
+      lane: w.lane, risk: w.risk, frontType: w.frontType || null, frontColumn: w.frontColumn,
+      frontEta: w.frontEta, wallEta: w.wallEta, wallHp: w.wallHp, wallType: w.wallType || null,
+      eatDps: w.eatDps, eaters: w.eaters, wallSurviveSec: w.wallSurviveSec, killSec: w.killSec,
+      wallCd: w.wallCd, wallBehind: w.wallBehind || undefined,
+    }));
+    return {
+      leadSec: b.leadSec,
+      totalDps: b.totalDps,
+      sunRate: b.sunRate,
+      wave: b.wave,
+      activeLanes: b.activeLanes,
+      idleLanes: b.idleLanes,
+      residual: b.residual ? {
+        count: b.residual.count, lanes: b.residual.lanes, ehp: b.residual.ehp,
+        front: b.residual.front ? {
+          lane: b.residual.front.lane, column: b.residual.front.column,
+          type: b.residual.front.type, ehp: b.residual.front.ehp,
+          speed: b.residual.front.speed, eatDps: b.residual.front.eatDps,
+        } : null,
+      } : null,
+      incoming: (b.incoming || []).slice(0, 2),
+      pressure: (b.pressure || []).slice(0, 3),
+      safeLanes: b.safeLanes,
+      airRaid: b.airRaid || null,
+      // 每个有僵尸的行都要给（最多 5 行）；只截 2 条会让 3–5 行看不到
+      // latestSafeColumn/tiles，模型就只能凭记忆写死列，容易出现 MINE_TOO_LATE。
+      minePlan: (b.minePlan || []).slice(0, 5),
+      rescuePlan: (b.rescuePlan || []).slice(0, 2),
+      plantFoodPlan: (b.plantFoodPlan || []).slice(0, 3),
+      activatePlan: (b.activatePlan || []).slice(0, 3),
+      // 同线多只时“单体 vs 多目标”的收益差：只给事实，模型自己决定换不换。
+      cardEfficiency: (b.cardEfficiency || []).slice(0, 4),
+      upgradePlan: (b.upgradePlan || []).slice(0, 3),
+      capacityGaps: (b.capacityGaps || []).slice(0, 3),
+      lastResortPlan: (b.lastResortPlan || []).slice(0, 2),
+      dataChecks: b.dataChecks || undefined,
+      matchups: (b.matchups || []).slice(0, 8),
+      // 落点事实按 卡→行→列 的固定顺序截断，不按收益排序；完整表用 pvz_state full=true。
+      aimOptions: (b.aimOptions || []).slice(0, 12),
+      aimOptionsMore: (b.aimOptions || []).length > 12 ? (b.aimOptions.length - 12) : undefined,
+      wallPlan: wall,
+      wallRebuildPlan: (b.wallRebuildPlan || []).slice(0, 2),
+      protect: b.protect ? {
+        count: b.protect.count, dead: b.protect.dead,
+        unguardedLanes: b.protect.unguardedLanes,
+        cells: (b.protect.cells || []).slice(0, 6).map((c) => ({
+          lane: c.lane, column: c.column, dead: c.dead, wall: c.wall, melee: c.melee,
+          frontColumn: c.frontColumn, groundGuarded: c.groundGuarded,
+          type: c.type || (c.plant && c.plant.type) || null,
+          plant: c.plant || null,
+        })),
+      } : null,
+    };
+  }
+
+  function leanState(s) {
+    if (!s || s.ok === false) return s;
+    const running = s.phase === 'running';
+    return {
+      ok: true, version: s.version, phase: s.phase, paused: s.paused, stateVersion: s.stateVersion,
+      sun: s.sun, plantFood: s.plantFood, plantFoodMax: s.plantFoodMax, plantFoodFull: s.plantFoodFull,
+      level: s.level, levelKey: s.levelKey, prep: running ? undefined : s.prep,
+      tasks: s.tasks, objective: s.objective, missionHints: s.missionHints,
+      limits: s.limits,
+      // 局内每轮只回计划摘要；完整 lanes/counters/phases 用 pvz_state full=true。
+      plan: s.plan ? {
+        text: s.plan.text,
+        goal: s.plan.goal,
+        queue: Array.isArray(s.plan.queue) ? s.plan.queue.slice(0, 12) : s.plan.queue,
+        rules: Array.isArray(s.plan.rules) ? s.plan.rules.slice(0, 8) : s.plan.rules,
+        emergency: s.plan.emergency,
+        thresholds: s.plan.thresholds,
+      } : null,
+      planSavedAt: s.planSavedAt,
+      planAudit: s.planAudit,
+      changesSinceLast: s.changesSinceLast, events: s.events,
+      deck: s.deck, seedSelection: running ? undefined : s.seedSelection, carts: s.carts,
+      startingSun: s.startingSun, collect: s.collect,
+      cards: (s.cards || []).map((c) => ({
+        index: c.index, type: c.type, cost: c.cost, cd: c.cd, cdReady: c.cdReady,
+        affordable: c.affordable, sunShort: c.sunShort, ready: c.ready,
+        baseCd: c.baseCd, dps: c.dps, burstDmg: c.burstDmg,
+        foodKind: c.foodKind, activation: c.activation,
+      })),
+      plants: (s.plants || []).slice(0, 80).map((p) => ({
+        lane: p.lane, column: p.column, type: p.type, name: p.name,
+        hp: p.hp, maxHp: p.maxHp, family: p.family, dps: (p.atk && p.atk.dps) || null,
+        reach: p.reach, underAttack: p.underAttack || undefined, eatDps: p.eatDps || null,
+        holdSec: p.holdSec != null ? p.holdSec : null, foodable: p.foodable,
+        food: p.food ? {
+          kind: p.food.kind, area: p.food.area, targets: p.food.targets,
+          whiff: p.food.whiff, cells: (p.food.cells || []).slice(0, 2),
+          count: p.food.count, projectileDamage: p.food.projectileDamage,
+          totalPerTarget: p.food.totalPerTarget, maxTotal: p.food.maxTotal,
+          sunTotal: p.food.sunTotal, armorHp: p.food.armorHp,
+        } : undefined,
+      })),
+      zombies: (s.zombies || []).slice(0, 40).map((z) => ({
+        lane: z.lane, column: z.column, type: z.type, name: z.name,
+        hp: z.hp, ehp: z.ehp, armorHp: z.armorHp, speed: z.speed,
+        etaToHouse: z.etaToHouse, eatDps: z.eatDps, eating: z.eating,
+        airborne: !!z.airborne, tags: z.tags || [],
+      })),
+      lanes: (s.lanes || []).map((l) => ({
+        lane: l.lane, zombies: l.zombies, nearestZombie: l.nearestZombie, front: l.front,
+        dps: l.dps, dpsOnFront: l.dpsOnFront, gap: l.gap, lossIn: l.lossIn, actBy: l.actBy,
+        wallHp: l.wallHp, wallCells: l.wallCells, mower: l.mower,
+        plants: l.plants, shooters: l.shooters, walls: l.walls, sunProducers: l.sunProducers,
+        tombColumns: l.tombColumns,
+        frontPlant: l.frontPlant, contactInSec: l.contactInSec, holdSec: l.holdSec,
+        killWindowSec: l.killWindowSec, killBeforeWindow: l.killBeforeWindow,
+        killBeforeHouse: l.killBeforeHouse, projectedHouseSec: l.projectedHouseSec,
+      })),
+      protectCells: s.protectCells,
+      instantAim: (s.instantAim || []).slice(0, 4),
+      decisions: (s.decisions || []).slice(0, 6),
+      threatGaps: (s.threatGaps || []).slice(0, 8),
+      forecast: running ? undefined : s.forecast,
+      queue: s.queue ? {
+        enabled: s.queue.enabled, pending: s.queue.pending, paused: s.queue.paused, thinking: s.queue.thinking,
+        tickMs: s.queue.tickMs, lastResult: s.queue.lastResult, recentSunSpent: s.queue.recentSunSpent,
+        tasks: (s.queue.tasks || []).slice(0, 5),
+        history: (s.queue.history || []).slice(-4),
+      } : undefined,
+      brief: leanBrief(s.brief),
+    };
+  }
+
+  function compactToolForModel(name, result, args) {
+    if (!config.leanContext || !result || typeof result !== 'object') return result;
+    // 模型显式要 full=true 时不要偷偷压回 lean。
+    if (name === 'pvz_state' && result.ok !== false && !(args && args.full)) return leanState(result);
+    if (name === 'pvz_act') {
+      if (result.state && result.state.ok !== false) return { ...result, state: leanState(result.state) };
+      return result;
+    }
     return result;
   }
 
@@ -8554,6 +12164,9 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     const flyerNames = [...new Set(flyers.map((z) => z.name || z.type).filter(Boolean))];
     const dead = flowers ? (flowers.dead || 0) : 0;
     const total = flowers ? (flowers.total || 0) : 0;
+    const lossTriggered = !!(flowers && flowers.lossTriggered);
+    const protectNames = [...new Set(deadCells.map((c) => c.name || c.plant).filter(Boolean))];
+    const protectLabel = protectNames.length ? `${protectNames.join('/')} ` : '';
     const plantsLost = review.plantsLost || 0;
     const mowersLost = review.mowersLost || 0;
     const lessons = [];
@@ -8565,43 +12178,46 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
       note = `第 ${wave || '?'}${waveCount ? `/${waveCount}` : ''} 波过关` + (imperfect
         ? `（推车 ${mowersLost}${dead ? `，保护格 ${dead}/${total} 死亡` : ''}${tasksFailed ? '，任务失败' : ''}）`
         : '，完美通关');
-      if (mowersLost > 0) lessons.push(`本局丢了 ${mowersLost} 个推车：下局在丢车行提前 1–2 波补墙/输出，别等僵尸压到房子。`);
-      if (dead > 0) lessons.push(`保护格死了 ${dead}/${total}：下局按 unguardedLanes 提前布防，飞行波前留三叶草/近战。`);
-      if (tasksFailed) lessons.push('本局有关卡任务失败：下局把 tasks 的 tip/hint/timeLeft 当硬约束，先保任务再铺输出。');
-      if (!imperfect) lessons.push('本局完美通关：没有丢车、保护格全活、任务全完成（植物损失是正常战术代价）；下局沿用这套卡组和布防节奏。');
+      if (mowersLost > 0) lessons.push(`本局丢了 ${mowersLost} 个推车：说明有防线被峰值波打穿；下次建议优先准备能扛住峰值的墙/输出余量，并用 capacityGaps 在波间补，而不是只补单点。`);
+      if (dead > 0) lessons.push(`保护格压力（${dead}/${total}）：下次建议优先准备对空/近身防守和波间控场，不要只靠单点墙。`);
+      if (tasksFailed) lessons.push('本局有关卡任务失败：下次建议把 tasks 的 tip/timeLeft 当优先约束，先保任务再铺输出。');
+      if (!imperfect) lessons.push('本局完美通关：可参考这套卡组和“波间补余量”的节奏；具体位置每局按本地 facts 重算，不建议照搬。');
       return { note: note.slice(0, 200), lessons: lessons.slice(0, 4) };
     }
 
     if (result === 'left' || result === 'restart') {
       note = `第 ${wave || '?'}${waveCount ? `/${waveCount}` : ''} 波${result === 'restart' ? '重开' : '离开'}（${plantsLost} 株植物损失，${mowersLost} 个推车）`;
-      if (mowersLost > 0) lessons.push(`离开前已丢 ${mowersLost} 个推车：这些行防线已被打穿，下局优先补墙/输出。`);
-      if (plantsLost > 0) lessons.push(`离开前已损失 ${plantsLost} 株植物：下局别在同一个缺口继续堆经济。`);
-      if (!lessons.length) lessons.push('本局没有完美通关；下局先读这条记录再决定卡组。');
+      if (mowersLost > 0) lessons.push(`离开前已丢 ${mowersLost} 个推车：说明防线在峰值波被压穿；下次建议优先补峰值波的墙/输出余量，而不是只堆经济。`);
+      if (plantsLost > 0) lessons.push(`离开前已损失 ${plantsLost} 株植物：下次建议先补被压穿的防线能力，再继续扩经济。`);
+      if (!lessons.length) lessons.push('本局没有完美通关；下次先读这条记录再决定卡组和优先能力。');
       return { note: note.slice(0, 200), lessons: lessons.slice(0, 4) };
     }
 
     note = `第 ${wave || '?'}${waveCount ? `/${waveCount}` : ''} 波失败`;
     if (dead > 0) {
-      note += `，保护植物 ${dead}/${total} 死亡${deadLanes.length ? `（第 ${deadLanes.map((l) => l + 1).join('/')} 行）` : ''}`;
-      if (dead >= total && total > 1) note += '（关卡判负时会把所有保护格同时标记 dead）';
+      // 判负那一帧游戏会把保护格清场，不能写成“5/5 全死”。
+      note += lossTriggered
+        ? (flowers.mode === 'contact' ? '，保护植物被踩坏（判负）' : '，保护植物被突破（判负）')
+        : `，保护植物 ${protectLabel}${dead}/${total} 死亡`;
       if (plantsLost === 0) {
         const who = flyerNames.length ? `${flyerNames.join('、')} ` : '';
-        lessons.push(`植物损失为 0，花不是被啃穿的：${who}越过防线直接落到花上。下局在这几行花旁边（c2 或 c4，射程 1 格内）放菜问/近战，并带三叶草等对空；只堆 c4 墙无效。`);
+        lessons.push(`植物损失为 0，保护植物不是被啃穿的：${who}可能越过防线直接落到保护格。下次建议优先准备对空/近身防守，并在波间留控场；只堆单点墙通常不够。`);
       } else {
-        lessons.push(`花所在行被啃穿（植物损失 ${plantsLost}，推车 ${mowersLost}）：下局在这些行提前 1–2 波补墙+输出，别把短手放在花后方。`);
+        lessons.push(`保护目标 ${protectLabel}被压穿（植物损失 ${plantsLost}，推车 ${mowersLost}）：下次建议优先补峰值波的墙/输出余量，不要只扩经济或只放短手。`);
       }
       if (deadLanes.length) {
-        lessons.push(`第 ${deadLanes.map((l) => l + 1).join('/')} 行重点：花旁必须有能打到 c${(deadCells[0] && deadCells[0].column) || 3} 的植物；飞行单位入场时先用三叶草/秒杀，别等落地。`);
+        lessons.push('保护格压力：建议让保护格旁边始终有能覆盖它的输出/控场；飞行单位入场时优先对空。');
       }
+    } else if (flowers) {
+      lessons.push('本局失败但没有保护植物死亡：建议先看 capacityGaps/pressure，补输出/墙的余量。');
     } else {
-      lessons.push('本局失败但没有保护植物死亡：看 pressure 行，先补该行输出/墙。');
+      lessons.push('本局失败，且这一关没有保护植物目标：建议先看 capacityGaps/pressure，补输出/墙的余量。');
     }
     if (Array.isArray(review.pressure) && review.pressure.length) {
-      const lanes = review.pressure.map((p) => `第${p.lane + 1}行(gap ${p.gap})`).join('、');
-      lessons.push(`压力最大的是 ${lanes}：下局提前 1–2 波在这些行补输出/墙。`);
+      lessons.push('压力集中在若干行：下次建议按 capacityGaps 在波间补输出/墙，不要等贴脸再补。');
     }
-    if (mowersLost > 0) lessons.push(`丢了 ${mowersLost} 个推车，说明有行被打穿；下局优先保这些行的墙。`);
-    if (!lessons.length) lessons.push('本局失败；下局先读这条记录，换一套针对本关波次的卡组。');
+    if (mowersLost > 0) lessons.push(`丢了 ${mowersLost} 个推车：说明防线在峰值波被打穿；下次建议优先保峰值波的墙/输出余量。`);
+    if (!lessons.length) lessons.push('本局失败；下次建议先读这条记录，按机制/能力换一套更有针对性的卡组。');
     return { note: note.slice(0, 200), lessons: lessons.slice(0, 4) };
   }
 
@@ -8797,6 +12413,46 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     }
   }
 
+  /**
+   * 队列 coast：模型刚把任务交给本地队列后，不立刻再发一次模型请求，
+   * 先让 queue 执行 1-2 拍并刷新本地 state。遇到丢车/任务紧急/换波/胜负
+   * 立刻结束 coast，交给模型处理。
+   */
+  async function tryQueueCoast() {
+    const maxRounds = Math.max(0, Number(config.queueCoastRounds) || 0);
+    const waitMs = Math.max(0, Number(config.queueCoastMs) || 0);
+    if (!maxRounds || !waitMs) return false;
+    if (!running || stopRequested || pendingInstructions.length) return false;
+    if (!lastState || lastPhase !== 'running') return false;
+    if (!(lastState.queue && Number(lastState.queue.pending) > 0)) return false;
+    if (queueCoastBudget <= 0) return false;
+
+    if (!queueCoastNoted) {
+      emit({ type: 'log', text: `队列 coast：本地队列还有任务，先执行 ${maxRounds} 拍再请求模型。` });
+      queueCoastNoted = true;
+    }
+    queueCoastBudget -= 1;
+    await sleep(waitMs);
+
+    let s = null;
+    try { s = await router.call('pvz_state', { force: true }); } catch { s = null; }
+    if (!s || s.ok === false) return false;
+    lastState = s;
+    lastPhase = s.phase || lastPhase;
+    try { notePhase(lastPhase); noteMowerLoss(s); } catch { /* ignore */ }
+    emit({ type: 'state', state: s });
+
+    const events = Array.isArray(s.events) ? s.events : [];
+    const urgentEvent = events.some((e) => e && ['mower_lost', 'task_urgent', 'level_lost', 'level_won', 'wave_started'].includes(e.t));
+    if (urgentEvent || s.phase !== 'running') {
+      queueCoastBudget = 0;
+      return false;
+    }
+    if (s.queue && Number(s.queue.pending) > 0 && queueCoastBudget > 0) return true;
+    queueCoastBudget = 0;
+    return false;
+  }
+
   async function runLoop() {
     let steps = 0;
     let idleNudges = 0;
@@ -8804,6 +12460,8 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     lastError = null;
     emit({ type: 'run_start', version, model: config.model, fastModel: fastModelOn() || null, autoReview: config.autoReview });
     while (running && !stopRequested) {
+      // 队列还有活时，先让本地执行，不推进模型步数、不烧 token。
+      if (await tryQueueCoast()) continue;
       steps++;
       if (steps > Number(config.maxSteps || 80)) {
         emit({ type: 'error', code: 'STEP_LIMIT', reason: `连续 ${steps - 1} 步没有结束；已停止（不会本地接管）` });
@@ -8815,6 +12473,84 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
         for (const s of pendingInstructions.splice(0)) {
           messages.push({ role: 'user', content: `玩家指示：${s}\n按指示调整，但不要违反关卡事实和工具返回。` });
         }
+      }
+      // 选卡阶段：如果 briefing 的 coverageGaps 显示卡组缺能力，提醒模型比较卡池；
+      // 历史/预填卡组只作参考，不要求沿用。只提示，不自动换卡。
+      if (lastPhase === 'preparing' && lastState && lastState.prep
+        && lastState.prep.mode === 'normal' && !lastState.prep.gameStarted) {
+        const gaps = (lastState.coverageGaps && Array.isArray(lastState.coverageGaps.missing))
+          ? lastState.coverageGaps.missing : [];
+        const miss = [...new Set(gaps.map((g) => g && (g.capability || g.name)).filter(Boolean))];
+        const key = `${lastState.levelKey || ''}:${(lastState.deck || []).join(',')}:${miss.join(',')}`;
+        if (miss.length && deckNudgeKey !== key) {
+          const cands = [...new Set(gaps.flatMap((g) => (g && g.candidates) || []))].slice(0, 8);
+          messages.push({
+            role: 'user',
+            content: `当前卡组缺少能力 ${miss.join('/')}${cands.length ? `；卡池候选 ${cands.join('/')}` : ''}。建议先比较是否用 pvz_choose_deck（replace=true）换 1–2 张，再写计划/开局；历史/预填卡组只作参考，不建议直接沿用。`,
+          });
+          deckNudgeKey = key;
+        }
+      }
+      // 计划里的 deck 和实际卡组不一致时，旧计划会一直误导快模型；
+      // 每份 plan 只提醒一次，要求先重写 plan 再继续动作。
+      if (lastState && lastState.planAudit && lastState.planAudit.ok === false
+        && lastPlanAt !== lastPlanAuditNudgedFor) {
+        const deckWarn = (lastState.planAudit.warnings || [])
+          .find((w) => w && w.code === 'PLAN_DECK_MISMATCH');
+        if (deckWarn) {
+          messages.push({
+            role: 'user',
+            content: `计划审计未通过：${deckWarn.reason}\n本轮先按实际卡组重写 pvz_set_plan（deck 用实际 codename，不要写 conveyor 这类模式名），再执行其他动作。`,
+          });
+          lastPlanAuditNudgedFor = lastPlanAt;
+        }
+      }
+      // 墙/救场缺口：即使 queue 还有别的任务，只要对应行没有任务，也提醒模型补。
+      if (lastPhase === 'running' && lastState && Array.isArray(lastState.threatGaps)
+        && lastState.threatGaps.length
+        && Date.now() - threatGapNudgedAt > 12000) {
+        const kindCN = { wall: '缺墙', output: '缺输出', rescue: '缺救场', mine: '地雷来不及', protect: '保护行无人', capability: '卡组缺能力' };
+        const text = lastState.threatGaps.slice(0, 5)
+          .map((g) => `${g.lane == null ? '' : `${Number(g.lane) + 1}行`}${kindCN[g.kind] || g.kind}`)
+          .join('；');
+        messages.push({
+          role: 'user',
+          content: `threatGaps：${text}。本轮先用 pvz_set_plan 补对应 lane/能力的 queue 任务或 counters（带 id/validForSec），再继续；不要只看 queue.pending。`,
+        });
+        threatGapNudgedAt = Date.now();
+      }
+      // 本地已经算出 last_resort / upgrade 决策，但模型一直没回：给一次轻提醒。
+      // 只提示，不替模型执行；是否 yes 仍由模型判断。
+      if (lastPhase === 'running' && lastState && Array.isArray(lastState.decisions)
+        && Date.now() - decisionNudgedAt > 8000) {
+        const pending = lastState.decisions.filter((d) => d && ['last_resort', 'upgrade', 'wall'].includes(d.kind));
+        if (pending.length) {
+          const label = { last_resort: '最后防线', upgrade: '波间升级', wall: '补墙' };
+          const text = pending.slice(0, 3).map((d) => `${label[d.kind] || d.kind}：${d.question || d.id}`).join('；');
+          messages.push({
+            role: 'user',
+            content: `本地 decisions 有待处理：${text}。若局面仍适合，建议优先用 pvz_decide {id, choice:yes} 处理；last_resort 是守不住行的最后防线，不建议一直放着。`,
+          });
+          decisionNudgedAt = Date.now();
+        }
+      }
+      // 队列空了但计划里还有建造任务：提醒模型补 queue，而不是每轮只发一个 pvz_act。
+      if (lastPhase === 'running' && lastState && lastState.queue
+        && Number(lastState.queue.pending) === 0
+        && lastState.plan
+        && Date.now() - queueEmptyNudgedAt > 20000) {
+        messages.push({
+          role: 'user',
+          content: '本地 queue 已空，但计划里还有建造任务。若还有补经济/补墙/补输出，本轮先用 pvz_set_plan 写 4–8 条当前能执行的 queue 任务（带 id/validForSec/stateVersion），不要每轮只靠一个 pvz_act。',
+        });
+        queueEmptyNudgedAt = Date.now();
+      }
+      if (batchNudgePending) {
+        messages.push({
+          role: 'user',
+          content: '上一轮只发了 1 个动作。若没有必须等待的落地/冷却，本轮请把 2–4 个可并行动作放进同一个 pvz_act；只有等落地或冷却才单发。',
+        });
+        batchNudgePending = false;
       }
       let reply;
       let modelMs = 0;
@@ -8848,7 +12584,12 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
         }
         emit({ type: 'request', step: steps, messageCount: messages.length });
         const modelStartedAt = Date.now();
-        reply = await callWithFallback(modelNow);
+        reply = await callWithFallback(modelNow, {
+          // 动作回复很短；限住 max_tokens 能明显压低尾延迟。
+          maxTokens: phaseNow === 'running' ? (Number(config.battleMaxTokens) || 256) : 0,
+        });
+        queueCoastBudget = Number(config.queueCoastRounds) || 0;
+        queueCoastNoted = false;
         modelMs = Date.now() - modelStartedAt;
         stats.modelMs += modelMs;
       } catch (e) {
@@ -8912,7 +12653,9 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
           emit({ type: 'log', text: `轮 ${steps} 耗时：模型 ${modelMs}ms · 工具 ${toolMs}ms · ${reply.toolCalls.length} 个调用` });
         }
         trimMessages();
-        await sleep(Number(config.loopDelayMs) || 0);
+        // 传送带实时性最高，卡会随带子变化：不额外等，拿到新一轮状态就继续。
+        const delayMs = Number(config.loopDelayMs) || 0;
+        await sleep(isConveyorMode() ? Math.min(delayMs, 120) : delayMs);
         continue;
       }
 
@@ -8941,8 +12684,15 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
       phase: lastPhase,
       stats: {
         ...stats,
+        totalTokens: totalTokens(),
         avgPromptTokens: stats.requests ? Math.round(stats.promptTokens / stats.requests) : 0,
         avgCompletionTokens: stats.requests ? Math.round(stats.completionTokens / stats.requests) : 0,
+        cacheHitPct: stats.promptTokens ? Math.round((stats.promptCacheHit / stats.promptTokens) * 100) : 0,
+        tokenBudget: Number(config.tokenBudget) || 0,
+        budgetUsedPct: Number(config.tokenBudget) > 0
+          ? Math.round((totalTokens() / Number(config.tokenBudget)) * 100) : null,
+        estimatedCost: estimatedCost(),
+        currency: config.currency || '¥',
       },
       plan: lastPlan,
       error: lastError ? { code: lastError.code, reason: lastError.message } : null,
@@ -8957,15 +12707,22 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     }
     running = true;
     stopRequested = false;
-    stats = { requests: 0, promptTokens: 0, completionTokens: 0, toolCalls: 0, modelSwitches: 0, modelMs: 0, toolMs: 0 };
+    stats = { requests: 0, promptTokens: 0, promptCacheHit: 0, promptCacheMiss: 0, completionTokens: 0, toolCalls: 0, modelSwitches: 0, modelMs: 0, toolMs: 0 };
     lastPhase = null;
     everRunning = false;
     lastError = null;
     lastState = null;
+    prepNow = null;
     forceStrongRounds = 0;
     usedModel = '';
     runStartedAt = Date.now();
     recentActions = [];
+    singleActionRounds = 0;
+    batchNudgePending = false;
+    queueCoastBudget = Number(config.queueCoastRounds) || 0;
+    queueCoastNoted = false;
+    budgetWarn80 = false;
+    budgetWarn100 = false;
     advisorBusy = false;
     advisorNote = null;
     advisorLastWave = null;
@@ -8990,6 +12747,13 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     stopRequested = true;
     running = false;
     try { if (controller) controller.abort(); } catch { /* ignore */ }
+    // 停止 AI 也要停掉本地任务队列，避免“人已停手、队列还在种”。
+    try {
+      if (typeof router.clearQueue === 'function') {
+        const p = router.clearQueue();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      }
+    } catch { /* ignore */ }
     emit({ type: 'stopped', reason: reason || '手动停止' });
     return { ok: true, running: false };
   }
@@ -9009,7 +12773,7 @@ function createLlmAgent({ fetchImpl, router, cfg = {}, onEvent = () => {}, sleep
     setConfig, getConfig, setEventHandler,
     isRunning: () => running,
     getMessages: () => messages.slice(),
-    getStats: () => ({ ...stats }),
+    getStats: () => ({ ...stats, totalTokens: totalTokens(), estimatedCost: estimatedCost() }),
     getPlan: () => lastPlan,
     getPhase: () => lastPhase,
     version,
@@ -9093,6 +12857,7 @@ const ICONS = {
   settings: '<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
   alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
 };
 
 function icon(name, cls) {
@@ -9336,9 +13101,13 @@ const CSS = `
 #${PET_ID} .pp-bubble {position:relative;max-width:250px;min-width:96px;padding:9px 11px 10px;border:1px solid rgba(126,196,240,.36);border-radius:14px;background:linear-gradient(180deg,rgba(20,34,46,.98),rgba(10,19,27,.98));box-shadow:0 10px 28px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.06);opacity:0;transform:translateY(7px) scale(.96);transition:opacity .16s ease,transform .16s ease;pointer-events:none}
 #${PET_ID} .pp-bubble.on {opacity:1;transform:none;pointer-events:auto;cursor:pointer}
 #${PET_ID} .pp-bubble::after {content:'';position:absolute;left:50%;bottom:-7px;width:12px;height:12px;margin-left:-6px;background:rgba(10,19,27,.98);border-right:1px solid rgba(126,196,240,.36);border-bottom:1px solid rgba(126,196,240,.36);transform:rotate(45deg)}
-#${PET_ID} .pp-text {position:relative;z-index:1;display:block;max-height:128px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:11.5px;line-height:1.55;color:#d9edfa;text-align:left}
+#${PET_ID} .pp-text {position:relative;z-index:1;display:block;max-height:72px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:11.5px;line-height:1.55;color:#d9edfa;text-align:left}
 #${PET_ID} .pp-text:empty::before {content:'…';color:#7aa7c0}
 #${PET_ID} .pp-text::after {content:'';display:inline-block;width:5px;height:11px;margin-left:2px;vertical-align:-1px;background:#7fd4ff;animation:pp-caret 1s steps(1) infinite}
+#${PET_ID} .pp-text.thinking {color:#9fd8ff;letter-spacing:.02em}
+#${PET_ID} .pp-bubble.thinking {border-color:rgba(126,196,240,.7);box-shadow:0 10px 28px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.06),0 0 0 1px rgba(126,196,240,.12)}
+#${PET_ID} .pp-bubble.thinking .pp-text::after {background:#8fd8ff;animation:pp-think 1.1s steps(1) infinite}
+@keyframes pp-think {0%,49%{opacity:1}50%,100%{opacity:.15}}
 #${PET_ID} .pp-stage {position:relative;width:168px;height:182px;cursor:grab;filter:drop-shadow(0 14px 16px rgba(0,0,0,.5));animation:pp-float 3.4s ease-in-out infinite;pointer-events:auto}
 #${PET_ID} .pp-stage:active {cursor:grabbing}
 #${PET_ID} .pp-sprite {width:168px;height:182px;background-repeat:no-repeat;background-size:1176px 1092px;background-position:0 0}
@@ -9404,7 +13173,7 @@ function createInGameUI({ agent, bridge }) {
         </div>
       </div>
       <div class="p-head-actions">
-        <button class="icon-btn" data-act="min" title="缩小为桌宠" aria-label="缩小为桌宠">${icon('minimize')}</button>
+        <button class="icon-btn" data-act="closeConfig" title="关闭配置页" aria-label="关闭配置页">${icon('x')}</button>
       </div>
     </div>
     <div class="p-body">
@@ -9444,6 +13213,10 @@ function createInGameUI({ agent, bridge }) {
         <div class="p-label"><span>API Key</span><em>只在本机</em></div>
         <input data-f="apiKey" type="password" placeholder="sk-..." autocomplete="off" />
       </div>
+      <div class="p-field">
+        <div class="p-label"><span>预算告警</span><em>tokens · 0=关</em></div>
+        <input data-f="tokenBudget" type="number" min="0" step="100000" placeholder="1200000" />
+      </div>
       <div class="p-flags">
         <label class="check"><input data-f="remember" type="checkbox" /> 记住 Key</label>
         <label class="check"><input data-f="stream" type="checkbox" /> 流式</label>
@@ -9451,17 +13224,17 @@ function createInGameUI({ agent, bridge }) {
       <div class="p-note">勾选“记住 Key”才写入本机 localStorage；不勾选只保存在内存。</div>
       <div class="p-csp" data-el="csp" title=""></div>
       <div class="p-actions main">
-        <button class="btn think" data-act="think" title="显示/隐藏思考窗（F10）" aria-label="显示或隐藏思考窗">${icon('scroll')}</button>
         <button class="btn ghost" data-act="test" title="测试连接" aria-label="测试连接">${icon('plug')}</button>
         <button class="btn primary" data-act="start" title="开始 AI（F8）" aria-label="开始 AI">${icon('play')}</button>
         <button class="btn danger" data-act="stop" title="停止（F8）" aria-label="停止">${icon('stop')}</button>
       </div>
-      <div class="p-actions two">
+      <div class="p-actions">
         <button class="btn ghost" data-act="exportMem" title="导出关卡记忆" aria-label="导出关卡记忆">${icon('download')}</button>
         <button class="btn ghost" data-act="importMem" title="导入关卡记忆" aria-label="导入关卡记忆">${icon('upload')}</button>
+        <button class="btn ghost" data-act="clearMem" title="清除所有关卡记忆与当前计划" aria-label="清除所有关卡记忆">${icon('database')}</button>
         <input data-el="importFile" type="file" accept="application/json,.json" style="display:none" />
       </div>
-      <div class="p-foot">F8 开始 / 停止 · F10 思考窗</div>
+      <div class="p-foot">F8 开始 / 停止 · F10 缩小 / 展开思考窗</div>
     </div>
     <div class="pl-resize" data-resize="panel" title="拖动缩放"></div>`;
   doc.body.appendChild(panel);
@@ -9481,7 +13254,7 @@ function createInGameUI({ agent, bridge }) {
         <button class="icon-btn" data-act="config" title="打开配置页" aria-label="打开配置页">${icon('settings')}</button>
         <button class="icon-btn" data-act="pet" title="缩小为桌宠" aria-label="缩小为桌宠">${icon('minimize')}</button>
         <button class="icon-btn" data-act="clear" title="清空决策日志" aria-label="清空决策日志">${icon('trash')}</button>
-        <button class="icon-btn" data-act="hide" title="关闭思考窗（F10）" aria-label="关闭思考窗">${icon('x')}</button>
+        <button class="icon-btn" data-act="clearMem" title="清除关卡记忆与当前计划" aria-label="清除关卡记忆">${icon('database')}</button>
       </div>
     </div>
     <div class="t-body">
@@ -9569,6 +13342,10 @@ function createInGameUI({ agent, bridge }) {
     lastThink: '',
     thinkOpen: false,
     hideTimer: null,
+    // 回复气泡至少停留一段时间：模型先说话再调工具时，别让动作气泡立刻把回复顶掉。
+    holdUntil: 0,
+    holdTimer: null,
+    pendingLine: null,
     drag: null,
   };
 
@@ -9633,13 +13410,14 @@ function createInGameUI({ agent, bridge }) {
   }
 
   function petClean(text) {
-    return String(text == null ? '' : text)
+    const cleaned = String(text == null ? '' : text)
       .replace(/```[\s\S]*?```/g, ' ')
       .replace(/[`*_>#]/g, '')
       .replace(/\r/g, '')
       .replace(/[ \t]{2,}/g, ' ')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
+    return localizeDisplay(cleaned);
   }
 
   function petScheduleHide(ms) {
@@ -9654,6 +13432,8 @@ function createInGameUI({ agent, bridge }) {
   function petSay(text, { reset = false } = {}) {
     const t = petClean(text);
     if (!t) return;
+    petTextEl.classList.remove('thinking');
+    petBubbleEl.classList.remove('thinking');
     if (reset) {
       pet.target = '';
       pet.shown = 0;
@@ -9670,6 +13450,64 @@ function createInGameUI({ agent, bridge }) {
     petBubbleEl.classList.add('on');
     petScheduleHide(10000);
     petStartType();
+  }
+
+  // 思考阶段只显示“正在思考”，不把 reasoning 原文流进气泡：
+  // 推理还没结束时文字是半成品，玩家看不出最终回复是哪一句。
+  function petThink(text = '正在思考…') {
+    if (!pet.visible) return;
+    if (pet.typeTimer) { clearInterval(pet.typeTimer); pet.typeTimer = null; }
+    if (pet.hideTimer) { clearTimeout(pet.hideTimer); pet.hideTimer = null; }
+    petSetState('think');
+    pet.thinkOpen = true;
+    pet.lastThink = '';
+    pet.pendingLine = null;
+    pet.holdUntil = 0;
+    if (pet.holdTimer) { clearTimeout(pet.holdTimer); pet.holdTimer = null; }
+    pet.target = text;
+    pet.shown = text.length;
+    petTextEl.textContent = text;
+    petTextEl.classList.add('thinking');
+    petBubbleEl.classList.add('on', 'thinking');
+  }
+
+  // 工具动作/结果晚一点再显示：回复气泡先让玩家看清，再切到“正在做什么”。
+  function petHold(ms = 3200) {
+    if (!pet.visible) return;
+    pet.holdUntil = Date.now() + ms;
+    if (pet.holdTimer) { clearTimeout(pet.holdTimer); pet.holdTimer = null; }
+    pet.holdTimer = setTimeout(() => {
+      pet.holdTimer = null;
+      petFlushPending();
+    }, ms + 20);
+  }
+
+  function petQueueLine(text, opts) {
+    if (!pet.visible) return;
+    if (Date.now() >= pet.holdUntil) {
+      petSay(text, opts);
+      return;
+    }
+    pet.pendingLine = { text, opts };
+    if (!pet.holdTimer) {
+      pet.holdTimer = setTimeout(() => {
+        pet.holdTimer = null;
+        petFlushPending();
+      }, Math.max(20, pet.holdUntil - Date.now() + 20));
+    }
+  }
+
+  function petFlushPending() {
+    if (!pet.visible || !pet.pendingLine || Date.now() < pet.holdUntil) return;
+    const { text, opts } = pet.pendingLine;
+    pet.pendingLine = null;
+    petSay(text, opts);
+  }
+
+  function petCancelHold() {
+    pet.pendingLine = null;
+    pet.holdUntil = 0;
+    if (pet.holdTimer) { clearTimeout(pet.holdTimer); pet.holdTimer = null; }
   }
 
   function petStartType() {
@@ -9696,7 +13534,11 @@ function createInGameUI({ agent, bridge }) {
     petSetState(agent.isRunning() ? 'think' : 'idle', { force: true });
     pet.lastThink = '';
     pet.thinkOpen = false;
-    petSay(agent.isRunning() ? '我盯着战场，边想边说。' : 'AI 待机中，点我展开 AI 思考窗。', { reset: true });
+    pet.pendingLine = null;
+    pet.holdUntil = 0;
+    if (pet.holdTimer) { clearTimeout(pet.holdTimer); pet.holdTimer = null; }
+    if (agent.isRunning()) petThink();
+    else petSay('AI 待机中，点我展开 AI 思考窗。', { reset: true });
   }
 
   function petHide() {
@@ -9704,6 +13546,9 @@ function createInGameUI({ agent, bridge }) {
     petEl.classList.add('pl-hidden');
     if (pet.timer) { clearInterval(pet.timer); pet.timer = null; }
     if (pet.typeTimer) { clearInterval(pet.typeTimer); pet.typeTimer = null; }
+    if (pet.holdTimer) { clearTimeout(pet.holdTimer); pet.holdTimer = null; }
+    pet.pendingLine = null;
+    pet.holdUntil = 0;
   }
 
   function petRestore() {
@@ -9711,12 +13556,9 @@ function createInGameUI({ agent, bridge }) {
     petHide();
   }
 
-  function minimizePanel() {
-    panel.classList.add('pl-hidden');
-    thought.classList.add('pl-hidden');
-    petShow();
-  }
-
+  // 交互约定：
+  // · AI 思考窗是主窗口，只能“缩小为桌宠”，没有关闭；点桌宠再展开。
+  // · 配置页是二级页面，只能“关闭”，没有缩小；关掉就是关掉，思考窗不受影响。
   function minimizeThought() {
     thought.classList.add('pl-hidden');
     petShow();
@@ -9727,11 +13569,8 @@ function createInGameUI({ agent, bridge }) {
     petHide();
   }
 
-  function closeThought() {
-    thought.classList.add('pl-hidden');
-    // 配置页也关着时必须留桌宠，否则会没有任何入口
-    if (panel.classList.contains('pl-hidden')) petShow();
-    else petHide();
+  function closeConfig() {
+    panel.classList.add('pl-hidden');
   }
 
   function setThoughtVisible(show) {
@@ -9752,57 +13591,41 @@ function createInGameUI({ agent, bridge }) {
       case 'run_start':
         pet.thinkOpen = false;
         pet.lastThink = '';
-        petSetState('think');
-        petSay('开始思考…', { reset: true });
+        petThink();
         break;
       case 'request':
         pet.thinkOpen = false;
         pet.lastThink = '';
+        petThink();
+        break;
+      case 'thinking':
+        // 推理原文只进思考窗，不进桌宠气泡；这里只确认“还在想”。
+        if (!pet.thinkOpen) petThink();
         petSetState('think');
         break;
-      case 'thinking': {
-        const full = String(ev.text || '');
-        if (!full) break;
-        if (!pet.thinkOpen) {
-          // 新一轮推理：重开气泡，避免接在上一轮的错误/工具结果后面
-          pet.thinkOpen = true;
-          petSay(full, { reset: true });
-        } else if (full.startsWith(pet.lastThink)) {
-          const delta = full.slice(pet.lastThink.length);
-          if (delta.trim()) {
-            petSetState('think');
-            petSay(delta);
-          }
-        } else if (!pet.lastThink.startsWith(full)) {
-          petSay(full, { reset: true });
-        }
-        pet.lastThink = full;
-        break;
-      }
-      case 'thinking_final': {
-        const final = String(ev.text || '');
-        if (pet.thinkOpen) {
-          // 流式文本通常已经显示；补齐上游最终文本多出来的尾巴（例如句号）
-          if (final && pet.lastThink && final.startsWith(pet.lastThink)) {
-            const rest = final.slice(pet.lastThink.length);
-            if (rest.trim()) petSay(rest);
-          }
-        } else if (final) {
-          pet.thinkOpen = true;
-          petSetState('think');
-          petSay(final.slice(-220), { reset: true });
-        }
+      case 'thinking_final':
+        // 等 assistant 事件到了再显示最终回复；推理结束本身不是回复。
         pet.thinkOpen = false;
         pet.lastThink = '';
+        break;
+      case 'assistant': {
+        // 思考完成后的可见回复：这一段才是玩家要读的话。
+        const text = petClean(ev.text);
+        if (!text) break;
+        pet.thinkOpen = false;
+        pet.lastThink = '';
+        petSetState('think');
+        petSay(text, { reset: true });
+        petHold(4200);
         break;
       }
       case 'tool_call': {
         pet.thinkOpen = false;
         pet.lastThink = '';
         let call = ev.name || '工具';
-        try { call = formatToolCall(ev.name, ev.args); } catch { /* ignore */ }
+        try { call = localizeDisplay(formatToolCall(ev.name, ev.args)); } catch { /* ignore */ }
         petSetState('think');
-        petSay(`准备${call}`, { reset: true });
+        petQueueLine(`准备${call}`, { reset: true });
         break;
       }
       case 'tool_result': {
@@ -9812,13 +13635,14 @@ function createInGameUI({ agent, bridge }) {
         let txt = '';
         try { txt = resultText(ev.name, ev.result); } catch { /* ignore */ }
         txt = petShort(String(txt || '').split('\n').filter(Boolean)[0] || (ev.ok ? '完成' : '失败'), 90);
-        petSay(pending ? `还差一步：${txt}` : (ev.ok ? txt : `没成：${txt}`), { reset: true });
+        petQueueLine(pending ? `还差一步：${txt}` : (ev.ok ? txt : `没成：${txt}`), { reset: true });
         petSetState(pending ? 'wait' : ev.ok ? 'think' : 'failed');
         break;
       }
       case 'game_over':
         pet.thinkOpen = false;
         pet.lastThink = '';
+        petCancelHold();
         if (ev.phase === 'won') {
           petSetState('success');
           petSay('赢了！草坪守住了。', { reset: true });
@@ -9833,18 +13657,21 @@ function createInGameUI({ agent, bridge }) {
       case 'error':
         pet.thinkOpen = false;
         pet.lastThink = '';
+        petCancelHold();
         petSetState('failed');
         petSay(`出错了：${petShort(ev.code || ev.reason || '未知错误', 80)}`, { reset: true });
         break;
       case 'stopped':
         pet.thinkOpen = false;
         pet.lastThink = '';
+        petCancelHold();
         petSetState('wait');
         petSay(`停下来了${ev.reason ? `：${petShort(ev.reason, 60)}` : '。'}`, { reset: true });
         break;
       case 'run_end':
         pet.thinkOpen = false;
         pet.lastThink = '';
+        petCancelHold();
         petSetState('idle');
         break;
       default:
@@ -9890,6 +13717,10 @@ function createInGameUI({ agent, bridge }) {
   // 启动器通过 CDP 注入标记；导入 ZIP 后直接开游戏时不会有这个标记，提醒一次用法。
   if (!launcher.detected && !loadLauncherGuideSeen()) openLaunch(true);
   paintLauncher();
+  // AI 思考窗是主窗口：默认只显示它，配置页作为二级页面按需打开、关掉即关闭。
+  // 唯一例外：没有启动器时先把配置页留在屏幕上，否则用户看不到“必须用启动器”的提示。
+  panel.classList.add('pl-hidden');
+  if (!launcher.detected) panel.classList.remove('pl-hidden');
   if (!launcher.detected) {
     let tries = 0;
     launchPoll = setInterval(() => {
@@ -9922,6 +13753,7 @@ function createInGameUI({ agent, bridge }) {
     baseUrl: $('[data-f="baseUrl"]'),
     model: $('[data-f="model"]'),
     fastModel: $('[data-f="fastModel"]'),
+    tokenBudget: $('[data-f="tokenBudget"]'),
     apiKey: $('[data-f="apiKey"]'),
     remember: $('[data-f="remember"]'),
     stream: $('[data-f="stream"]'),
@@ -9974,6 +13806,7 @@ function createInGameUI({ agent, bridge }) {
   fields.fastModel.value = cfg.fastModel !== undefined
     ? cfg.fastModel
     : (fields.provider.value === 'deepseek' ? 'deepseek-chat' : '');
+  fields.tokenBudget.value = cfg.tokenBudget !== undefined ? cfg.tokenBudget : 1200000;
 
   // 迁移：0.1.9 存的是 OpenCode Go 直连地址，浏览器用不了，自动纠正到本地代理
   if (fields.provider.value === 'opencode-go' && !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(fields.baseUrl.value)) {
@@ -9986,6 +13819,7 @@ function createInGameUI({ agent, bridge }) {
       baseUrl: fields.baseUrl.value.trim(),
       model: fields.model.value.trim(),
       fastModel: fields.fastModel.value.trim(),
+      tokenBudget: Number(fields.tokenBudget.value) || 0,
       remember: fields.remember.checked,
       stream: fields.stream.checked,
       apiKey: fields.remember.checked ? fields.apiKey.value.trim() : '',
@@ -9995,6 +13829,7 @@ function createInGameUI({ agent, bridge }) {
       baseUrl: next.baseUrl,
       model: next.model,
       fastModel: next.fastModel,
+      tokenBudget: next.tokenBudget,
       apiKey: fields.apiKey.value.trim(),
       stream: next.stream,
     });
@@ -10169,7 +14004,7 @@ function createInGameUI({ agent, bridge }) {
     let text = '';
     try { text = formatToolResult(name, result); } catch { text = result && result.ok === false ? `失败：${result.reason || result.code || '未知'}` : '完成'; }
     if (!text) return '完成';
-    text = String(text).replace(/^[✅❌⏳⌛]\s*/, '');
+    text = localizeDisplay(String(text).replace(/^[✅❌⏳⌛]\s*/, ''));
     const lines = String(text).split('\n');
     if (lines.length > 14) return lines.slice(0, 14).join('\n') + `\n…（还有 ${lines.length - 14} 行）`;
     return text;
@@ -10206,7 +14041,7 @@ function createInGameUI({ agent, bridge }) {
         if (ev.text && /[\u4e00-\u9fa5]/.test(ev.text)) append('sys', `说明：${ev.text}`);
         break;
       case 'tool_call':
-        append('call', formatToolCall(ev.name, ev.args));
+        append('call', localizeDisplay(formatToolCall(ev.name, ev.args)));
         tMetaEl.textContent = '执行中';
         break;
       case 'tool_result': {
@@ -10228,7 +14063,8 @@ function createInGameUI({ agent, bridge }) {
         break;
       case 'state':
         if (ev.state) renderState(ev.state);
-        if (ev.state && ev.state.plan) renderPlan(ev.state.plan, ev.state.planSavedAt);
+        // plan 被 bridge 清空时也要刷新，不能继续显示上一局的计划。
+        if (ev.state && 'plan' in ev.state) renderPlan(ev.state.plan, ev.state.planSavedAt);
         break;
       case 'state_phase':
         setStatus(`阶段：${phaseCN[ev.phase] || ev.phase}`, ev.phase === 'lost' ? 'err' : (ev.phase === 'won' || ev.phase === 'running' ? 'on' : 'pending'));
@@ -10260,7 +14096,7 @@ function createInGameUI({ agent, bridge }) {
       case 'run_end':
         setStatus(`结束 · 工具 ${ev.stats ? ev.stats.toolCalls : 0} 次`, ev.error ? 'err' : '');
         tMetaEl.textContent = '已结束';
-        append('sys', `运行结束。工具调用 ${ev.stats ? ev.stats.toolCalls : 0} 次；tokens 入 ${ev.stats ? ev.stats.promptTokens : 0} / 出 ${ev.stats ? ev.stats.completionTokens : 0}`);
+        append('sys', `运行结束。工具调用 ${ev.stats ? ev.stats.toolCalls : 0} 次；tokens 入 ${ev.stats ? ev.stats.promptTokens : 0} / 出 ${ev.stats ? ev.stats.completionTokens : 0}${ev.stats && ev.stats.totalTokens ? ` / 总 ${ev.stats.totalTokens}` : ''}${ev.stats && ev.stats.estimatedCost != null ? `；估算 ${ev.stats.currency || '¥'}${ev.stats.estimatedCost}` : ''}${ev.stats && ev.stats.budgetUsedPct != null ? `；预算 ${ev.stats.budgetUsedPct}%` : ''}`);
         break;
       case 'log':
         append('sys', ev.text || '');
@@ -10328,6 +14164,27 @@ function createInGameUI({ agent, bridge }) {
     }
   }
 
+  async function clearMemory() {
+    const ask = '清除所有关卡记忆（含历史卡组/复盘）和当前计划？此操作不可撤销。';
+    if (typeof A.confirm === 'function' && !A.confirm(ask)) return;
+    try {
+      if (!bridge || typeof bridge.clearMemory !== 'function') {
+        append('fail', '当前 bridge 不支持清除记忆');
+        return;
+      }
+      const r = bridge.clearMemory('all');
+      if (!r || r.ok === false) {
+        append('fail', `清除记忆失败：${(r && (r.code || r.reason)) || '未知原因'}`);
+        return;
+      }
+      try { renderPlan(null, null); } catch { /* ignore */ }
+      try { setLive(''); } catch { /* ignore */ }
+      append('sys', '已清除所有关卡记忆和当前计划。下一次进关会重新学习，不再带旧卡组/旧复盘。');
+    } catch (e) {
+      append('fail', `清除记忆失败：${String(e && e.message || e)}`);
+    }
+  }
+
   async function importMemory(file) {
     if (!file) return;
     try {
@@ -10352,12 +14209,12 @@ function createInGameUI({ agent, bridge }) {
     if (act === 'start') startAI();
     else if (act === 'stop') stopAI();
     else if (act === 'test') test();
-    else if (act === 'think') setThoughtVisible(thought.classList.contains('pl-hidden'));
-    else if (act === 'min') minimizePanel();
+    else if (act === 'closeConfig') closeConfig();
     else if (act === 'toggleLaunch') openLaunch(!launchEl.classList.contains('open'));
     else if (act === 'ackLaunch') ackLauncherGuide();
     else if (act === 'exportMem') exportMemory();
     else if (act === 'importMem' && importFileEl) importFileEl.click();
+    else if (act === 'clearMem') clearMemory();
   });
   if (importFileEl) {
     importFileEl.addEventListener('change', () => {
@@ -10370,10 +14227,10 @@ function createInGameUI({ agent, bridge }) {
     const btn = e.target && e.target.closest && e.target.closest('button');
     if (!btn) return;
     const act = btn.getAttribute('data-act');
-    if (act === 'hide') closeThought();
-    else if (act === 'pet') minimizeThought();
+    if (act === 'pet') minimizeThought();
     else if (act === 'config') openConfig();
     else if (act === 'clear') clearLog();
+    else if (act === 'clearMem') clearMemory();
     else if (act === 'copyLog') copyLog();
     else if (act === 'toggleThink') toggleThink();
     else if (act === 'togglePlan') togglePlan();
@@ -10563,16 +14420,25 @@ function createInGameUI({ agent, bridge }) {
 
   petSetState('idle', { force: true });
 
-  A.addEventListener('keydown', (e) => {
-    if (e.key === 'F8') {
+  // 全游戏快捷键：用 window 捕获阶段，先于游戏 canvas 的 keydown 处理，
+  // 不再要求先点模组/思考窗获得焦点。
+  function onGlobalHotkey(e) {
+    if (!e || e.repeat) return;
+    const key = e.key || e.code;
+    if (key === 'F8' || e.code === 'F8') {
       e.preventDefault();
+      e.stopPropagation();
       if (agent.isRunning()) stopAI(); else startAI();
+      return;
     }
-    if (e.key === 'F10') {
+    if (key === 'F10' || e.code === 'F10') {
       e.preventDefault();
+      e.stopPropagation();
       setThoughtVisible(thought.classList.contains('pl-hidden'));
     }
-  });
+  }
+  A.addEventListener('keydown', onGlobalHotkey, true);
+  try { doc.addEventListener('keydown', onGlobalHotkey, true); } catch { /* ignore */ }
 
   // 初始
   setLive('');
@@ -10629,7 +14495,16 @@ function setupInGame(ctx) {
   const bridge = createBridge(ctx);
   const latency = bridge.latency;
   const router = createToolRouter({ bridge, version: AGENT_VERSION, latency });
-  const agent = createLlmAgent({ router, version: AGENT_VERSION, latency, cfg: { stream: true } });
+  const agent = createLlmAgent({
+    router,
+    version: AGENT_VERSION,
+    latency,
+    cfg: { stream: true },
+    // 模型思考期间暂停普通队列任务（避免队列先花掉阳光、模型按旧状态决策），
+    // urgent 规则（三叶草这类短窗口救场）仍会执行。
+    onModelRequestStart: () => { try { bridge.setQueueThinking(true); } catch { /* ignore */ } },
+    onModelRequestEnd: () => { try { bridge.setQueueThinking(false); } catch { /* ignore */ } },
+  });
   let ui = null;
   try { ui = createInGameUI({ agent, bridge }); } catch (e) {
     try { console.error('[pvz-llm-agent] UI 初始化失败', e); } catch { /* ignore */ }

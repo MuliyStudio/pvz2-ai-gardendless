@@ -65,6 +65,75 @@ test('state 给出 family / sunProducers / speed / etaToHouse', async () => {
   } finally { teardown(bridge); }
 });
 
+test('state 救场事实：贴脸僵尸的啃咬时间 / dpsOnFront / rescuePlan 替换格', async () => {
+  const { game, bridge } = setup({
+    slots: 3,
+    zombies: [
+      { lane: 0, type: 'tutorial', health: 190, column: 1.2 },
+      { lane: 0, type: 'tutorial', health: 190, column: 8 },
+    ],
+  });
+  try {
+    game.grid[0][0].addPlant('sunflower');
+    game.grid[0][1].addPlant('peashooter');
+    const s = await bridge.snapshot();
+    assert.equal(s.ok, true, JSON.stringify(s));
+    const lane = s.lanes[0];
+    assert.equal(lane.frontPlant.type, 'peashooter');
+    assert.equal(lane.frontPlant.underAttack, true);
+    assert.equal(lane.contactInSec, 0);
+    assert.equal(lane.holdSec, 3, '300 HP / 100 eatDps');
+    assert.equal(lane.dpsOnFront, 0, '输出在僵尸右侧，打不到贴脸僵尸');
+    assert.equal(lane.killWindowSec, 3);
+    assert.ok(lane.projectedHouseSec > lane.killWindowSec, '后面还有向日葵可拖时间');
+    assert.equal(s.brief.rescuePlan[0].lane, 0);
+    assert.deepEqual(s.brief.rescuePlan[0].emptyColumns, []);
+    assert.equal(s.brief.rescuePlan[0].replaceCandidates[0].column, 0);
+    assert.equal(s.brief.rescuePlan[0].replaceCandidates[0].plant.type, 'sunflower');
+  } finally { teardown(bridge); }
+});
+
+test('state 波次到底但有残敌：activeLanes/residual 明确，idleLanes 不应被当成威胁', async () => {
+  const { game, bridge } = setup({
+    slots: 3,
+    zombies: [
+      { lane: 0, type: 'tutorial', health: 190, column: 2 },
+      { lane: 2, type: 'tutorial', health: 190, column: 5 },
+    ],
+  });
+  try {
+    game.levelController.currentWave = 1; // wave = 2 / 2，计数已到底
+    const s = await bridge.snapshot();
+    assert.equal(s.brief.wave.done, true);
+    assert.deepEqual(s.brief.activeLanes, [0, 2]);
+    assert.deepEqual(s.brief.idleLanes, [1, 3, 4]);
+    assert.equal(s.brief.residual.count, 2);
+    assert.deepEqual(s.brief.residual.lanes, [0, 2]);
+    assert.equal(s.brief.residual.front.lane, 0, 'residual.front 指向最靠房子的僵尸');
+  } finally { teardown(bridge); }
+});
+
+test('state 墙支撑时间只算贴住墙的僵尸，不把同行远处僵尸的 eatDps 也算进去', async () => {
+  const { game, bridge } = setup({
+    slots: 3,
+    zombies: [
+      { lane: 0, type: 'tutorial', health: 190, column: 2.6 },
+      { lane: 0, type: 'tutorial', health: 190, column: 8 },
+    ],
+  });
+  try {
+    const wallPlant = game.grid[0][2].addPlant('wallnut');
+    wallPlant.health = 4000;
+    wallPlant.toughness = 4000;
+    const s = await bridge.snapshot();
+    const wall = s.brief.wallPlan[0];
+    assert.equal(wall.wallType, 'wallnut');
+    assert.equal(wall.eaters, 1, '只有 c2.6 的僵尸贴住墙');
+    assert.equal(wall.eatDps, 100);
+    assert.equal(wall.wallSurviveSec, 40, '4000 HP / 100 eatDps');
+  } finally { teardown(bridge); }
+});
+
 test('种植结果带 timing：种在僵尸当前列会标 late，往前留一格不标', async () => {
   const { game, bridge, router } = setup({
     slots: 3,

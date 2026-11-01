@@ -4,6 +4,44 @@
 
 ---
 
+## v0.4.17
+
+**世界识别 / 保护格 / 本地规则 / 数据语义 / 响应速度**
+
+- **世界识别不再看资源名**：优先用 `levelController._levelWorldName` 和 `levelNameString`，关卡资源名（`egypt1` 这种模板名）只作兜底 id；修复自定义海盗关被标成“神秘埃及 16”。
+- **传送带判定改用关卡字段**：读 `levelDefinition.Modules` / `StageModule`，只有模块里出现 `Conveyor` 才算传送带；不再因为“选卡过渡帧卡槽为空 + 场景有 Conveyor 组件”把普通关误判成传送带。
+- **保护格带本体和判定**：`protectCells[].plant` 给出 type/name/hp/brief/usage.restSec/knockback 与 `contactInSec`；`protect.mode=contact` 表示“碰到即判负”（如踩坏鲜花）。保护植物死亡后整格消失也按 `dead` 上报（`missing:true`），复盘能点名具体植物；判负清场不再谎报“5/5 全死”。
+- **保护格种植规则修正**：地块装饰型保护格允许种植（只在真有植物实体时拒绝）；高血量墙/肉盾种在保护格左侧会被 `WALL_BEHIND_PROTECT` 拒绝；守卫格不再把保护格自己当推荐位。
+- **当局本地规则 `plan.rules`**：和 queue 共用 450ms 执行器，开局由模型写好紧急策略。`when` 支持 airborne/zombieType/cardReady/minSun/protectContactLt/…，`lane` 支持 `airborne`/`protect`；规则落点被占时自动挪到同行空格，不会触发一次就消失。`briefing.suggestedRules` 会按卡组和判定自动给出三叶草/保护格救场模板。
+- **三叶草短窗口**：`airborne` 改用游戏真实状态 `swinging/_flying`（旧逻辑只按列 ≥4.5，荡索在 c4 时被误判成落地）。有规则时队列拍 450ms → 200ms。
+- **数据语义补全**：范围从 `RANGE.SORT` 读取（修复 3x3 群伤被当成单体）；新增 `attack.trigger=once/repeat`（`DPS + AttackDuration` 且无 `AttackInterval` = 触发一次）；`role/needsContact` 标出近身输出（吸血牛肝菌必须贴脸，血厚不等于墙）。
+- **模型响应优化**：战斗中关闭思考模式（`thinking: disabled`）、`max_tokens` 800、历史批量裁剪保前缀缓存、不再重写旧消息、统计 `promptCacheHit/Miss`；结束日志显示缓存命中率。
+- **其他修复**：`maxSteps` 80 → 240（16 波关不会再半路 STEP_LIMIT）；工具 JSON 被截断时自动提高 `max_tokens` 重试；SUN 失败带 `queueSpentRecent`，不再误判“阳光被自动收走”；思考窗改为主窗口，配置页只能关闭、不能缩小。
+- 测试 216 项通过。
+
+## v0.4.16
+
+**桌宠思考提示 / 给定卡组 / 提前布阵 / 传送带**
+
+- 桌宠思考时只显示“正在思考…”，思考结束才显示回复文本气泡；回复会停留几秒再被工具动作替换，推理原文仍只进思考窗。
+- “使用给定植物通关”：识别无选卡页的给定卡组；开局前必须先读整关简报并写 `pvz_set_plan` 对策，否则 `pvz_start_level` 返回 `NEED_PLAN`。
+- “提前布阵击败僵尸”：开局就带整关波次数据，计划先写、布阵后 `pvz_start_level` 点“开始！”；支持多种开始入口，未写计划同样拦截。
+- 传送带关：读取真实 `Conveyor` 组件，`state.cards` 是当前带上的卡，按最新 index 或 codename 种植，不扣阳光/不吃冷却；实时循环提速。
+- 种植错误：修复 `WALL_TOO_LATE` 把当前目标格当可改种位导致的“种 c1 → 可改种 c1”死循环；新增 `replaceCells/blockable`，并避免用一面注定失败的墙误杀同批输出。5–8s 同卡重复改为执行层排队，20s 墙仍然拒绝。
+- 贴脸救场：`state.brief.rescuePlan` 给出可 replace 的低价值植物、可打到僵尸的输出/一次性卡、接触倒计时、前方植物能拖几秒、击杀窗口；`dpsOnFront` 只算僵尸左侧真正能打到它的植物。
+- 啃咬与墙：`zombies[].eatDps/eating`、`plants[].underAttack/eatDps/holdSec` 全部下发现场；`wallPlan` 只累计贴住墙的僵尸，不再把同行远处僵尸算进去。
+- 能量豆弹幕：从 `ProjectileProps` 解析单发伤害，输出 `count/projectileDamage/targetsPerHit/hitsPerTarget/totalPerTarget/maxTotal`；回旋镖能量豆明确为 16 发 × 20 × 来回 2 次 = 640/目标（最多 3 目标 1920）。
+- 更多能量豆字段别名：近/远伤害、植物/僵尸伤害、护甲、阳光脉冲、召唤/处决数量自动适配；藤蔓豌豆这类只写发数的卡会回退普通弹丸伤害；未知 `*Plantfood*` 字段保留到 `rawFields`，新增字段不会被静默丢掉。女巫榛/火鸡投手/树脂投手属于变形/召唤/铺地液，`total` 保持 null 并标 assumptions。
+- **省 token**：默认 lean context，`pvz_state`/`pvz_act` 只把决策字段发给模型，旧状态/旧动作结果只留最近 2 条并归档；系统提示词从约 13k 字符压到约 3.9k 字符；连续两轮单动作会提醒批量提交；完整事实仍可 `pvz_briefing` / `pvz_state full=true`。预计单轮 prompt 可明显下降，具体以 `run_end.stats.promptTokens` 实测为准。
+- **预算告警**：默认 120 万 tokens，80%/100% 提醒；结束日志显示总 tokens、预算百分比和可选金额估算，配置页可改预算（0=关）。
+- **本地执行队列**：模型在 `plan.queue` 写任务，本地每 450ms 执行第一条满足 cond 的任务；冷却/阳光/占格/墙太晚会跳过试下一条，支持 `danger/protect`、`ahead/safe/back` 和阳光/波次/僵尸/空格条件。只执行模型指定的卡和顺序，不本地选卡。
+- **残敌/空行**：`wave.done=true` 只代表波次计数到底；`activeLanes/idleLanes/residual` 明确区分有僵尸的行、空行和残敌，提示词要求残敌阶段先清 activeLanes，不按旧计划给空行补墙/输出；队列中空行的 plant/replace 默认跳过，预布防需显式 `allowIdleLane:true`。
+- **上下文再压缩**：历史窗口默认 16 条；局内计划只回摘要，完整计划用 `pvz_state full=true`。
+- **队列 coast**：队列有任务时本地先执行 2 拍、每拍约 700ms，再请求模型；换波/丢车/紧急任务会立即打断。
+- 版本统一 0.4.16，162 项测试通过。
+
+---
+
 ## v0.4.15
 
 **修复 `Invalid failed entity history`（版本 0.4.15）**

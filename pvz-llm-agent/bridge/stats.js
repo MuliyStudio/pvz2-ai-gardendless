@@ -7,6 +7,7 @@
 import { zombieTagsFrom } from '../knowledge/tags.js';
 import { zombieBehaviorFacts, zombieBehaviorLine } from '../knowledge/zombie-rules.js';
 import { damageModel, plantFoodFacts, usageFactsOf } from '../knowledge/plant-rules.js';
+import { checkPlantStats, checkZombieStats } from './crosscheck.js';
 
 const numOf = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
 const textOf = (v) => {
@@ -117,11 +118,15 @@ function firstObj(bag, name, alias) {
   return list.find((o) => (o.aliases || [])[0] === alias) || list.find((o) => (o.aliases || []).includes(alias)) || null;
 }
 
-function featureName(bag, kind, codename) {
+function featureOf(bag, kind, codename) {
   const key = kind === 'plant' ? 'PlantFeatures' : 'ZombieFeatures';
   const listKey = kind === 'plant' ? 'PLANTS' : 'ZOMBIES';
   const list = (bag && bag[key] && bag[key][listKey]) || [];
-  const hit = list.find((o) => o && o.CODENAME === codename);
+  return list.find((o) => o && o.CODENAME === codename) || null;
+}
+
+function featureName(bag, kind, codename) {
+  const hit = featureOf(bag, kind, codename);
   if (!hit) return null;
   return { zh: textOf(hit.NAME), en: (hit.NAME && hit.NAME.en) || null };
 }
@@ -201,6 +206,39 @@ function projectilesOf(bag, d) {
 }
 
 /**
+ * 能量豆弹幕的弹丸事实：只看 PeaTypePlantfood / CabbageTypePlantfood /
+ * BoomerangType 等指向 ProjectileProps 的字段。返回单发伤害与溅射伤害，
+ * 供 knowledge/plant-rules.js 计算 count × damage × hits 的总伤害。
+ */
+function plantFoodProjectilesOf(bag, d) {
+  const map = projectileMap(bag);
+  const out = [];
+  const seen = new Set();
+  const take = (v, key) => {
+    if (typeof v !== 'string' || seen.has(v)) return;
+    const data = map.get(v);
+    if (!data) return;
+    seen.add(v);
+    const splash = Array.isArray(data.SplashDamage)
+      ? data.SplashDamage.reduce((m, x) => Math.max(m, Number(x && x.Damage) || 0), 0)
+      : null;
+    out.push({
+      type: v,
+      key,
+      damage: numOf(data.Damage),
+      splashDamage: splash || null,
+      damageType: data.DamageType || null,
+    });
+  };
+  for (const [k, v] of Object.entries(d || {})) {
+    if (!/plantfood/i.test(k) && !/BoomerangType$/i.test(k)) continue;
+    if (Array.isArray(v)) for (const x of v) take(x, k);
+    else take(v, k);
+  }
+  return out;
+}
+
+/**
  * 毒伤事实：PoisonStacked / Poison / PoisonDPS 三种写法都存在。
  * 返回每层 dps、持续时间、层数、总伤害；不做“该不该带”的判断。
  */
@@ -260,6 +298,53 @@ function scalarProps(d) {
   return out;
 }
 
+/**
+ * 僵尸阶段触发点：只读字段名里明确写出的阈值，不靠文案猜。
+ * 返回值按 atHpPct 从高到低排（先触发的在前）。
+ */
+function zombiePhaseFacts(d) {
+  const out = [];
+  const pct = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n > 1 ? Math.min(1, n / 100) : n;
+  };
+  const push = (atHpPct, effect, extra) => {
+    if (atHpPct == null) return;
+    const rec = { atHpPct, effect };
+    for (const [k, v] of Object.entries(extra || {})) {
+      if (v != null) rec[k] = v;
+    }
+    out.push(rec);
+  };
+  for (const [key, value] of Object.entries(d || {})) {
+    const m = /^HealthPercentThrowImp(\d+)$/.exec(key);
+    if (m) {
+      push(pct(value), 'throw_imp', { spawn: d.ImpType || d.ImpTypes || null });
+      continue;
+    }
+    if (key === 'EnrageHealthPct') {
+      push(pct(value), 'enrage', {
+        speedScale: numOf(d.EnragedSpeedScale),
+        damageScale: numOf(d.EnragedDamageScale),
+      });
+      continue;
+    }
+    if (key === 'ArmDroppingHealthPct') {
+      push(pct(value), 'drop_arm');
+      continue;
+    }
+    if (key === 'ChickeningHealthPercentage') {
+      push(pct(value), 'spawn_chickens');
+      continue;
+    }
+    if (key === 'WeaselingHealthPercentage') {
+      push(pct(value), 'spawn_weasel');
+    }
+  }
+  return out.sort((a, b) => b.atHpPct - a.atHpPct);
+}
+
 export function createStatsReader(getCc) {
   const plantCache = new Map();
   const zombieCache = new Map();
@@ -287,6 +372,20 @@ export function createStatsReader(getCc) {
     const d = rec.objdata || {};
     // 弹道里的毒伤/真伤：植物属性本身不写，只在 PeaType/SporeType 指向的 ProjectileProps 里。
     const projectiles = projectilesOf(b, d);
+    // 能量豆弹幕（PeaTypePlantfood / CabbageTypePlantfood / BoomerangType…）
+    // 的单发伤害也在 ProjectileProps 里，必须一起解析。
+    const plantFoodProjectiles = plantFoodProjectilesOf(b, d);
+    // 有些卡只写 PlantfoodPeaCount、不写 PeaTypePlantfood（例如藤蔓豌豆），
+    // 这时可以回退到普通攻击弹丸伤害。但如果 PF 指定了一个解析不到的
+    // 别名（例如女巫榛的 ShroomTypePlantfood=toadstool 是植物不是弹丸），
+    // 就不要拿普通弹丸硬套，避免给出错误总伤害。
+    const pfAliases = Object.entries(d || {})
+      .filter(([k, v]) => /plantfood/i.test(k) && typeof v === 'string')
+      .map(([, v]) => v);
+    const unresolvedPfAlias = pfAliases.some((a) => !plantFoodProjectiles.some((p) => p && p.type === a));
+    const fallbackProjectileDamage = !unresolvedPfAlias
+      ? projectiles.reduce((m, p) => Math.max(m, Number(p && p.Damage) || 0), 0) || null
+      : null;
     const poison = poisonFacts(d, projectiles);
     // 直接弹道的真伤（SupressArmorProtection）与毒伤是两件事：
     // 毒伤持续伤害打本体；普通豌豆本身仍先打护甲。
@@ -295,7 +394,11 @@ export function createStatsReader(getCc) {
     const el = alm.elements.find((e) => e.type === 'RANGE');
     const range = (el && el.sort) || null;
     const areaEl = alm.elements.find((e) => e.type === 'AREA');
-    const area = (areaEl && areaEl.sort) || null;
+    // 本作很多植物没有单独的 AREA 元素，范围写在 RANGE.SORT（如“3x3 范围”“整行”）。
+    // 只看 AREA 会让 area=null，模型就会把 3x3 群伤当成单体。
+    const area = (areaEl && areaEl.sort)
+      || ((el && el.sort && /3x3|3×3|本格|整行|一行|多行|全屏|全场|直线/i.test(String(el.sort)))
+        ? el.sort : null);
     const dmgAlm = (() => {
       const de = alm.elements.find((e) => e.type === 'DAMAGE');
       return de && Number.isFinite(Number(de.value)) ? Number(de.value) : null;
@@ -340,17 +443,36 @@ export function createStatsReader(getCc) {
       targets,
       hitsPerTarget,
       multiDps: Math.round(unitDps * targets * hitsPerTarget * 10) / 10,
+      // 触发方式：有 AttackInterval = 持续/重复攻击；只有 AttackDuration = 一次性触发、持续几秒。
+      trigger: Number(d.AttackInterval) > 0 ? 'repeat'
+        : (Number(dm.attack.durationSec) > 0 ? 'once' : 'instant'),
+      repeat: Number(d.AttackInterval) > 0,
       // 攻击本身是否吃护甲：drain/true 才算；毒伤是“弹道打护甲 + 毒打本体”。
       ignoresArmor: dm.damageType === 'drain' || dm.damageType === 'true',
       trueDamage: dm.damageType === 'drain' || dm.damageType === 'true',
       damageType: ['drain', 'true'].includes(dm.damageType) ? dm.damageType : 'normal',
     } : null;
+    // 范围结算的 burst（土豆雷“本格”、樱桃 3x3、辣椒整行…）不是“只打一只”：
+    // 同一范围内的每只僵尸都会被结算一次。targets 仍保留图鉴/字段给出的单发目标数，
+    // 另给 areaTargets 明确范围语义，避免模型把 1800 当成“只能秒一只”。
+    const areaTargets = area && /本格|Tile|3x3|3×3|1x3|1×3|5x5|5×5|全屏|全场|三行|多行|整行|本行|一行/i.test(String(area))
+      ? 'all_in_area'
+      : null;
+    if (attack && areaTargets) attack.areaTargets = areaTargets;
     const burst = dm.burst ? {
       ...dm.burst,
       area: area || null,
       targets,
+      areaTargets,
     } : null;
     const names = featureName(b, 'plant', type);
+    // 放置类别：PlantFeatures.TAGS 是游戏自己的标记（amphibious / fly / vine / lilypad …）。
+    // 只原样上报，不做“能种/不能种”的推断；具体地形仍由 state.plantable 给。
+    const feature = featureOf(b, 'plant', type);
+    const placementTags = Array.isArray(feature && feature.TAGS)
+      ? feature.TAGS.filter((t) => typeof t === 'string' && t)
+      : [];
+    const plantPlace = (feature && feature.ZENGARDEN && feature.ZENGARDEN.PlantPlace) || null;
     const poisonDps = poison ? Number(poison.dps) || 0 : 0;
     const effectiveDps = Math.round((unitDps + poisonDps) * 10) / 10;
     const st = {
@@ -387,6 +509,7 @@ export function createStatsReader(getCc) {
       // 能量豆：结构化（kind/area/radius/total…）。没有专属效果才是 null。
       plantFood: plantFoodFacts(d, {
         family: d.Family, almanacArea: area, almanacRange: range, almanacPlantFood: pfAlm,
+        attack, plantFoodProjectiles, fallbackProjectileDamage,
       }),
       sun: stages.length ? {
         stages, interval: prodDay, intervalNight: prodNight,
@@ -395,8 +518,16 @@ export function createStatsReader(getCc) {
       } : null,
     };
     st.usage = usageFactsOf({ text: fullText, family: d.Family, range, props: d });
+    st.placement = (placementTags.length || plantPlace)
+      ? { tags: placementTags, plantPlace }
+      : null;
     st.shot = shotOf(st);
     st.props = scalarProps(d);
+    // 数据交叉校验：解析值 vs 原始 objdata；只在有问题时挂 checks，避免每张卡多 token。
+    try {
+      const checks = checkPlantStats(st, d);
+      if (!checks.ok) st.checks = checks;
+    } catch { /* ignore */ }
     return st;
   }
 
@@ -429,7 +560,7 @@ export function createStatsReader(getCc) {
     const names = featureName(b, 'zombie', type);
     // 免疫/召唤/Boss 这类“怕什么、会放什么”的事实：按字段名归类，新僵尸自动带上
     const behavior = zombieBehaviorFacts(d, { type });
-    return {
+    const z = {
       type,
       name: (names && names.zh) || type,
       nameEn: (names && names.en) || null,
@@ -454,6 +585,8 @@ export function createStatsReader(getCc) {
       spawns: behavior.spawns,
       flags: behavior.flags,
       boss: behavior.boss,
+      // 血量阈值触发的阶段（巨人扔小鬼/狂暴/掉手/放鸡/放黄鼠狼）；没写阈值就是空数组。
+      phases: zombiePhaseFacts(d),
       behaviorText: zombieBehaviorLine(behavior),
       behaviorUnknown: behavior.unknownImmuneKeys,
       behaviors: {
@@ -469,6 +602,11 @@ export function createStatsReader(getCc) {
         speedUpWhenEatPlants: d.SpeedUpWhenEatPlants === true,
       },
     };
+    try {
+      const checks = checkZombieStats(z, d);
+      if (!checks.ok) z.checks = checks;
+    } catch { /* ignore */ }
+    return z;
   }
 
   function lawnFacts(stageName) {
@@ -637,6 +775,14 @@ export function createStatsReader(getCc) {
     const sm = def && def.objdata ? def.objdata.StageModule : null;
     const mm = typeof sm === 'string' ? /RTID\(([^@()]+)@/.exec(sm) : null;
     const lawn = lawnFacts(mm ? mm[1] : null);
+    // 关卡 JSON 里的准备方式：传送带 / 普通选卡。组件还没加载时，先用关卡数据判断。
+    let selectionMethod = null;
+    for (const o of objs) {
+      const cls = String((o && o.objclass) || '');
+      if (cls !== 'SeedBankProperties' && cls !== 'ConveyorSeedBankProperties') continue;
+      if (o.objdata && o.objdata.SelectionMethod != null) selectionMethod = String(o.objdata.SelectionMethod);
+    }
+    const conveyorFromJson = modules.some((m) => /conveyor/i.test(`${m.cls || ''} ${m.alias || ''}`));
     const value = {
       assetName,
       waveCount: waveCount || waveList.length,
@@ -659,7 +805,11 @@ export function createStatsReader(getCc) {
         } : null,
         suppressedWaves: (lvl && Array.isArray(lvl.SuppressedDynamicZombieWaves) ? lvl.SuppressedDynamicZombieWaves.map(Number) : []),
       },
-      seedBank: { presets: seedBankPresets(objs) },
+      seedBank: {
+        presets: seedBankPresets(objs),
+        selectionMethod,
+        conveyor: conveyorFromJson,
+      },
     };
     levelCache.set(objs, value);
     return value;

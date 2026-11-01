@@ -7,7 +7,7 @@
  * 视觉方向：PvZ 深绿工具面板 + 暖阳光强调色；推理和决策日志分开，
  * 思考窗只保留一个滚动推理区，决策日志只记录动作/结果/计划。
  */
-import { formatToolCall, formatToolResult, formatPlan } from '../tools/format.js';
+import { formatToolCall, formatToolResult, formatPlan, localizeDisplay } from '../tools/format.js';
 import { DEFAULT_LLM, PROVIDER_PRESETS } from './agent.js';
 import { PET_SHEET, PET_SHEET_META } from './pet-sprites.js';
 
@@ -48,6 +48,7 @@ const ICONS = {
   settings: '<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
   alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
 };
 
 function icon(name, cls) {
@@ -291,9 +292,13 @@ const CSS = `
 #${PET_ID} .pp-bubble {position:relative;max-width:250px;min-width:96px;padding:9px 11px 10px;border:1px solid rgba(126,196,240,.36);border-radius:14px;background:linear-gradient(180deg,rgba(20,34,46,.98),rgba(10,19,27,.98));box-shadow:0 10px 28px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.06);opacity:0;transform:translateY(7px) scale(.96);transition:opacity .16s ease,transform .16s ease;pointer-events:none}
 #${PET_ID} .pp-bubble.on {opacity:1;transform:none;pointer-events:auto;cursor:pointer}
 #${PET_ID} .pp-bubble::after {content:'';position:absolute;left:50%;bottom:-7px;width:12px;height:12px;margin-left:-6px;background:rgba(10,19,27,.98);border-right:1px solid rgba(126,196,240,.36);border-bottom:1px solid rgba(126,196,240,.36);transform:rotate(45deg)}
-#${PET_ID} .pp-text {position:relative;z-index:1;display:block;max-height:128px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:11.5px;line-height:1.55;color:#d9edfa;text-align:left}
+#${PET_ID} .pp-text {position:relative;z-index:1;display:block;max-height:72px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:11.5px;line-height:1.55;color:#d9edfa;text-align:left}
 #${PET_ID} .pp-text:empty::before {content:'…';color:#7aa7c0}
 #${PET_ID} .pp-text::after {content:'';display:inline-block;width:5px;height:11px;margin-left:2px;vertical-align:-1px;background:#7fd4ff;animation:pp-caret 1s steps(1) infinite}
+#${PET_ID} .pp-text.thinking {color:#9fd8ff;letter-spacing:.02em}
+#${PET_ID} .pp-bubble.thinking {border-color:rgba(126,196,240,.7);box-shadow:0 10px 28px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.06),0 0 0 1px rgba(126,196,240,.12)}
+#${PET_ID} .pp-bubble.thinking .pp-text::after {background:#8fd8ff;animation:pp-think 1.1s steps(1) infinite}
+@keyframes pp-think {0%,49%{opacity:1}50%,100%{opacity:.15}}
 #${PET_ID} .pp-stage {position:relative;width:168px;height:182px;cursor:grab;filter:drop-shadow(0 14px 16px rgba(0,0,0,.5));animation:pp-float 3.4s ease-in-out infinite;pointer-events:auto}
 #${PET_ID} .pp-stage:active {cursor:grabbing}
 #${PET_ID} .pp-sprite {width:168px;height:182px;background-repeat:no-repeat;background-size:1176px 1092px;background-position:0 0}
@@ -359,7 +364,7 @@ export function createInGameUI({ agent, bridge }) {
         </div>
       </div>
       <div class="p-head-actions">
-        <button class="icon-btn" data-act="min" title="缩小为桌宠" aria-label="缩小为桌宠">${icon('minimize')}</button>
+        <button class="icon-btn" data-act="closeConfig" title="关闭配置页" aria-label="关闭配置页">${icon('x')}</button>
       </div>
     </div>
     <div class="p-body">
@@ -399,6 +404,10 @@ export function createInGameUI({ agent, bridge }) {
         <div class="p-label"><span>API Key</span><em>只在本机</em></div>
         <input data-f="apiKey" type="password" placeholder="sk-..." autocomplete="off" />
       </div>
+      <div class="p-field">
+        <div class="p-label"><span>预算告警</span><em>tokens · 0=关</em></div>
+        <input data-f="tokenBudget" type="number" min="0" step="100000" placeholder="1200000" />
+      </div>
       <div class="p-flags">
         <label class="check"><input data-f="remember" type="checkbox" /> 记住 Key</label>
         <label class="check"><input data-f="stream" type="checkbox" /> 流式</label>
@@ -406,17 +415,17 @@ export function createInGameUI({ agent, bridge }) {
       <div class="p-note">勾选“记住 Key”才写入本机 localStorage；不勾选只保存在内存。</div>
       <div class="p-csp" data-el="csp" title=""></div>
       <div class="p-actions main">
-        <button class="btn think" data-act="think" title="显示/隐藏思考窗（F10）" aria-label="显示或隐藏思考窗">${icon('scroll')}</button>
         <button class="btn ghost" data-act="test" title="测试连接" aria-label="测试连接">${icon('plug')}</button>
         <button class="btn primary" data-act="start" title="开始 AI（F8）" aria-label="开始 AI">${icon('play')}</button>
         <button class="btn danger" data-act="stop" title="停止（F8）" aria-label="停止">${icon('stop')}</button>
       </div>
-      <div class="p-actions two">
+      <div class="p-actions">
         <button class="btn ghost" data-act="exportMem" title="导出关卡记忆" aria-label="导出关卡记忆">${icon('download')}</button>
         <button class="btn ghost" data-act="importMem" title="导入关卡记忆" aria-label="导入关卡记忆">${icon('upload')}</button>
+        <button class="btn ghost" data-act="clearMem" title="清除所有关卡记忆与当前计划" aria-label="清除所有关卡记忆">${icon('database')}</button>
         <input data-el="importFile" type="file" accept="application/json,.json" style="display:none" />
       </div>
-      <div class="p-foot">F8 开始 / 停止 · F10 思考窗</div>
+      <div class="p-foot">F8 开始 / 停止 · F10 缩小 / 展开思考窗</div>
     </div>
     <div class="pl-resize" data-resize="panel" title="拖动缩放"></div>`;
   doc.body.appendChild(panel);
@@ -436,7 +445,7 @@ export function createInGameUI({ agent, bridge }) {
         <button class="icon-btn" data-act="config" title="打开配置页" aria-label="打开配置页">${icon('settings')}</button>
         <button class="icon-btn" data-act="pet" title="缩小为桌宠" aria-label="缩小为桌宠">${icon('minimize')}</button>
         <button class="icon-btn" data-act="clear" title="清空决策日志" aria-label="清空决策日志">${icon('trash')}</button>
-        <button class="icon-btn" data-act="hide" title="关闭思考窗（F10）" aria-label="关闭思考窗">${icon('x')}</button>
+        <button class="icon-btn" data-act="clearMem" title="清除关卡记忆与当前计划" aria-label="清除关卡记忆">${icon('database')}</button>
       </div>
     </div>
     <div class="t-body">
@@ -524,6 +533,10 @@ export function createInGameUI({ agent, bridge }) {
     lastThink: '',
     thinkOpen: false,
     hideTimer: null,
+    // 回复气泡至少停留一段时间：模型先说话再调工具时，别让动作气泡立刻把回复顶掉。
+    holdUntil: 0,
+    holdTimer: null,
+    pendingLine: null,
     drag: null,
   };
 
@@ -588,13 +601,14 @@ export function createInGameUI({ agent, bridge }) {
   }
 
   function petClean(text) {
-    return String(text == null ? '' : text)
+    const cleaned = String(text == null ? '' : text)
       .replace(/```[\s\S]*?```/g, ' ')
       .replace(/[`*_>#]/g, '')
       .replace(/\r/g, '')
       .replace(/[ \t]{2,}/g, ' ')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
+    return localizeDisplay(cleaned);
   }
 
   function petScheduleHide(ms) {
@@ -609,6 +623,8 @@ export function createInGameUI({ agent, bridge }) {
   function petSay(text, { reset = false } = {}) {
     const t = petClean(text);
     if (!t) return;
+    petTextEl.classList.remove('thinking');
+    petBubbleEl.classList.remove('thinking');
     if (reset) {
       pet.target = '';
       pet.shown = 0;
@@ -625,6 +641,64 @@ export function createInGameUI({ agent, bridge }) {
     petBubbleEl.classList.add('on');
     petScheduleHide(10000);
     petStartType();
+  }
+
+  // 思考阶段只显示“正在思考”，不把 reasoning 原文流进气泡：
+  // 推理还没结束时文字是半成品，玩家看不出最终回复是哪一句。
+  function petThink(text = '正在思考…') {
+    if (!pet.visible) return;
+    if (pet.typeTimer) { clearInterval(pet.typeTimer); pet.typeTimer = null; }
+    if (pet.hideTimer) { clearTimeout(pet.hideTimer); pet.hideTimer = null; }
+    petSetState('think');
+    pet.thinkOpen = true;
+    pet.lastThink = '';
+    pet.pendingLine = null;
+    pet.holdUntil = 0;
+    if (pet.holdTimer) { clearTimeout(pet.holdTimer); pet.holdTimer = null; }
+    pet.target = text;
+    pet.shown = text.length;
+    petTextEl.textContent = text;
+    petTextEl.classList.add('thinking');
+    petBubbleEl.classList.add('on', 'thinking');
+  }
+
+  // 工具动作/结果晚一点再显示：回复气泡先让玩家看清，再切到“正在做什么”。
+  function petHold(ms = 3200) {
+    if (!pet.visible) return;
+    pet.holdUntil = Date.now() + ms;
+    if (pet.holdTimer) { clearTimeout(pet.holdTimer); pet.holdTimer = null; }
+    pet.holdTimer = setTimeout(() => {
+      pet.holdTimer = null;
+      petFlushPending();
+    }, ms + 20);
+  }
+
+  function petQueueLine(text, opts) {
+    if (!pet.visible) return;
+    if (Date.now() >= pet.holdUntil) {
+      petSay(text, opts);
+      return;
+    }
+    pet.pendingLine = { text, opts };
+    if (!pet.holdTimer) {
+      pet.holdTimer = setTimeout(() => {
+        pet.holdTimer = null;
+        petFlushPending();
+      }, Math.max(20, pet.holdUntil - Date.now() + 20));
+    }
+  }
+
+  function petFlushPending() {
+    if (!pet.visible || !pet.pendingLine || Date.now() < pet.holdUntil) return;
+    const { text, opts } = pet.pendingLine;
+    pet.pendingLine = null;
+    petSay(text, opts);
+  }
+
+  function petCancelHold() {
+    pet.pendingLine = null;
+    pet.holdUntil = 0;
+    if (pet.holdTimer) { clearTimeout(pet.holdTimer); pet.holdTimer = null; }
   }
 
   function petStartType() {
@@ -651,7 +725,11 @@ export function createInGameUI({ agent, bridge }) {
     petSetState(agent.isRunning() ? 'think' : 'idle', { force: true });
     pet.lastThink = '';
     pet.thinkOpen = false;
-    petSay(agent.isRunning() ? '我盯着战场，边想边说。' : 'AI 待机中，点我展开 AI 思考窗。', { reset: true });
+    pet.pendingLine = null;
+    pet.holdUntil = 0;
+    if (pet.holdTimer) { clearTimeout(pet.holdTimer); pet.holdTimer = null; }
+    if (agent.isRunning()) petThink();
+    else petSay('AI 待机中，点我展开 AI 思考窗。', { reset: true });
   }
 
   function petHide() {
@@ -659,6 +737,9 @@ export function createInGameUI({ agent, bridge }) {
     petEl.classList.add('pl-hidden');
     if (pet.timer) { clearInterval(pet.timer); pet.timer = null; }
     if (pet.typeTimer) { clearInterval(pet.typeTimer); pet.typeTimer = null; }
+    if (pet.holdTimer) { clearTimeout(pet.holdTimer); pet.holdTimer = null; }
+    pet.pendingLine = null;
+    pet.holdUntil = 0;
   }
 
   function petRestore() {
@@ -666,12 +747,9 @@ export function createInGameUI({ agent, bridge }) {
     petHide();
   }
 
-  function minimizePanel() {
-    panel.classList.add('pl-hidden');
-    thought.classList.add('pl-hidden');
-    petShow();
-  }
-
+  // 交互约定：
+  // · AI 思考窗是主窗口，只能“缩小为桌宠”，没有关闭；点桌宠再展开。
+  // · 配置页是二级页面，只能“关闭”，没有缩小；关掉就是关掉，思考窗不受影响。
   function minimizeThought() {
     thought.classList.add('pl-hidden');
     petShow();
@@ -682,11 +760,8 @@ export function createInGameUI({ agent, bridge }) {
     petHide();
   }
 
-  function closeThought() {
-    thought.classList.add('pl-hidden');
-    // 配置页也关着时必须留桌宠，否则会没有任何入口
-    if (panel.classList.contains('pl-hidden')) petShow();
-    else petHide();
+  function closeConfig() {
+    panel.classList.add('pl-hidden');
   }
 
   function setThoughtVisible(show) {
@@ -707,57 +782,41 @@ export function createInGameUI({ agent, bridge }) {
       case 'run_start':
         pet.thinkOpen = false;
         pet.lastThink = '';
-        petSetState('think');
-        petSay('开始思考…', { reset: true });
+        petThink();
         break;
       case 'request':
         pet.thinkOpen = false;
         pet.lastThink = '';
+        petThink();
+        break;
+      case 'thinking':
+        // 推理原文只进思考窗，不进桌宠气泡；这里只确认“还在想”。
+        if (!pet.thinkOpen) petThink();
         petSetState('think');
         break;
-      case 'thinking': {
-        const full = String(ev.text || '');
-        if (!full) break;
-        if (!pet.thinkOpen) {
-          // 新一轮推理：重开气泡，避免接在上一轮的错误/工具结果后面
-          pet.thinkOpen = true;
-          petSay(full, { reset: true });
-        } else if (full.startsWith(pet.lastThink)) {
-          const delta = full.slice(pet.lastThink.length);
-          if (delta.trim()) {
-            petSetState('think');
-            petSay(delta);
-          }
-        } else if (!pet.lastThink.startsWith(full)) {
-          petSay(full, { reset: true });
-        }
-        pet.lastThink = full;
-        break;
-      }
-      case 'thinking_final': {
-        const final = String(ev.text || '');
-        if (pet.thinkOpen) {
-          // 流式文本通常已经显示；补齐上游最终文本多出来的尾巴（例如句号）
-          if (final && pet.lastThink && final.startsWith(pet.lastThink)) {
-            const rest = final.slice(pet.lastThink.length);
-            if (rest.trim()) petSay(rest);
-          }
-        } else if (final) {
-          pet.thinkOpen = true;
-          petSetState('think');
-          petSay(final.slice(-220), { reset: true });
-        }
+      case 'thinking_final':
+        // 等 assistant 事件到了再显示最终回复；推理结束本身不是回复。
         pet.thinkOpen = false;
         pet.lastThink = '';
+        break;
+      case 'assistant': {
+        // 思考完成后的可见回复：这一段才是玩家要读的话。
+        const text = petClean(ev.text);
+        if (!text) break;
+        pet.thinkOpen = false;
+        pet.lastThink = '';
+        petSetState('think');
+        petSay(text, { reset: true });
+        petHold(4200);
         break;
       }
       case 'tool_call': {
         pet.thinkOpen = false;
         pet.lastThink = '';
         let call = ev.name || '工具';
-        try { call = formatToolCall(ev.name, ev.args); } catch { /* ignore */ }
+        try { call = localizeDisplay(formatToolCall(ev.name, ev.args)); } catch { /* ignore */ }
         petSetState('think');
-        petSay(`准备${call}`, { reset: true });
+        petQueueLine(`准备${call}`, { reset: true });
         break;
       }
       case 'tool_result': {
@@ -767,13 +826,14 @@ export function createInGameUI({ agent, bridge }) {
         let txt = '';
         try { txt = resultText(ev.name, ev.result); } catch { /* ignore */ }
         txt = petShort(String(txt || '').split('\n').filter(Boolean)[0] || (ev.ok ? '完成' : '失败'), 90);
-        petSay(pending ? `还差一步：${txt}` : (ev.ok ? txt : `没成：${txt}`), { reset: true });
+        petQueueLine(pending ? `还差一步：${txt}` : (ev.ok ? txt : `没成：${txt}`), { reset: true });
         petSetState(pending ? 'wait' : ev.ok ? 'think' : 'failed');
         break;
       }
       case 'game_over':
         pet.thinkOpen = false;
         pet.lastThink = '';
+        petCancelHold();
         if (ev.phase === 'won') {
           petSetState('success');
           petSay('赢了！草坪守住了。', { reset: true });
@@ -788,18 +848,21 @@ export function createInGameUI({ agent, bridge }) {
       case 'error':
         pet.thinkOpen = false;
         pet.lastThink = '';
+        petCancelHold();
         petSetState('failed');
         petSay(`出错了：${petShort(ev.code || ev.reason || '未知错误', 80)}`, { reset: true });
         break;
       case 'stopped':
         pet.thinkOpen = false;
         pet.lastThink = '';
+        petCancelHold();
         petSetState('wait');
         petSay(`停下来了${ev.reason ? `：${petShort(ev.reason, 60)}` : '。'}`, { reset: true });
         break;
       case 'run_end':
         pet.thinkOpen = false;
         pet.lastThink = '';
+        petCancelHold();
         petSetState('idle');
         break;
       default:
@@ -845,6 +908,10 @@ export function createInGameUI({ agent, bridge }) {
   // 启动器通过 CDP 注入标记；导入 ZIP 后直接开游戏时不会有这个标记，提醒一次用法。
   if (!launcher.detected && !loadLauncherGuideSeen()) openLaunch(true);
   paintLauncher();
+  // AI 思考窗是主窗口：默认只显示它，配置页作为二级页面按需打开、关掉即关闭。
+  // 唯一例外：没有启动器时先把配置页留在屏幕上，否则用户看不到“必须用启动器”的提示。
+  panel.classList.add('pl-hidden');
+  if (!launcher.detected) panel.classList.remove('pl-hidden');
   if (!launcher.detected) {
     let tries = 0;
     launchPoll = setInterval(() => {
@@ -877,6 +944,7 @@ export function createInGameUI({ agent, bridge }) {
     baseUrl: $('[data-f="baseUrl"]'),
     model: $('[data-f="model"]'),
     fastModel: $('[data-f="fastModel"]'),
+    tokenBudget: $('[data-f="tokenBudget"]'),
     apiKey: $('[data-f="apiKey"]'),
     remember: $('[data-f="remember"]'),
     stream: $('[data-f="stream"]'),
@@ -929,6 +997,7 @@ export function createInGameUI({ agent, bridge }) {
   fields.fastModel.value = cfg.fastModel !== undefined
     ? cfg.fastModel
     : (fields.provider.value === 'deepseek' ? 'deepseek-chat' : '');
+  fields.tokenBudget.value = cfg.tokenBudget !== undefined ? cfg.tokenBudget : 1200000;
 
   // 迁移：0.1.9 存的是 OpenCode Go 直连地址，浏览器用不了，自动纠正到本地代理
   if (fields.provider.value === 'opencode-go' && !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(fields.baseUrl.value)) {
@@ -941,6 +1010,7 @@ export function createInGameUI({ agent, bridge }) {
       baseUrl: fields.baseUrl.value.trim(),
       model: fields.model.value.trim(),
       fastModel: fields.fastModel.value.trim(),
+      tokenBudget: Number(fields.tokenBudget.value) || 0,
       remember: fields.remember.checked,
       stream: fields.stream.checked,
       apiKey: fields.remember.checked ? fields.apiKey.value.trim() : '',
@@ -950,6 +1020,7 @@ export function createInGameUI({ agent, bridge }) {
       baseUrl: next.baseUrl,
       model: next.model,
       fastModel: next.fastModel,
+      tokenBudget: next.tokenBudget,
       apiKey: fields.apiKey.value.trim(),
       stream: next.stream,
     });
@@ -1124,7 +1195,7 @@ export function createInGameUI({ agent, bridge }) {
     let text = '';
     try { text = formatToolResult(name, result); } catch { text = result && result.ok === false ? `失败：${result.reason || result.code || '未知'}` : '完成'; }
     if (!text) return '完成';
-    text = String(text).replace(/^[✅❌⏳⌛]\s*/, '');
+    text = localizeDisplay(String(text).replace(/^[✅❌⏳⌛]\s*/, ''));
     const lines = String(text).split('\n');
     if (lines.length > 14) return lines.slice(0, 14).join('\n') + `\n…（还有 ${lines.length - 14} 行）`;
     return text;
@@ -1161,7 +1232,7 @@ export function createInGameUI({ agent, bridge }) {
         if (ev.text && /[\u4e00-\u9fa5]/.test(ev.text)) append('sys', `说明：${ev.text}`);
         break;
       case 'tool_call':
-        append('call', formatToolCall(ev.name, ev.args));
+        append('call', localizeDisplay(formatToolCall(ev.name, ev.args)));
         tMetaEl.textContent = '执行中';
         break;
       case 'tool_result': {
@@ -1183,7 +1254,8 @@ export function createInGameUI({ agent, bridge }) {
         break;
       case 'state':
         if (ev.state) renderState(ev.state);
-        if (ev.state && ev.state.plan) renderPlan(ev.state.plan, ev.state.planSavedAt);
+        // plan 被 bridge 清空时也要刷新，不能继续显示上一局的计划。
+        if (ev.state && 'plan' in ev.state) renderPlan(ev.state.plan, ev.state.planSavedAt);
         break;
       case 'state_phase':
         setStatus(`阶段：${phaseCN[ev.phase] || ev.phase}`, ev.phase === 'lost' ? 'err' : (ev.phase === 'won' || ev.phase === 'running' ? 'on' : 'pending'));
@@ -1215,7 +1287,7 @@ export function createInGameUI({ agent, bridge }) {
       case 'run_end':
         setStatus(`结束 · 工具 ${ev.stats ? ev.stats.toolCalls : 0} 次`, ev.error ? 'err' : '');
         tMetaEl.textContent = '已结束';
-        append('sys', `运行结束。工具调用 ${ev.stats ? ev.stats.toolCalls : 0} 次；tokens 入 ${ev.stats ? ev.stats.promptTokens : 0} / 出 ${ev.stats ? ev.stats.completionTokens : 0}`);
+        append('sys', `运行结束。工具调用 ${ev.stats ? ev.stats.toolCalls : 0} 次；tokens 入 ${ev.stats ? ev.stats.promptTokens : 0} / 出 ${ev.stats ? ev.stats.completionTokens : 0}${ev.stats && ev.stats.totalTokens ? ` / 总 ${ev.stats.totalTokens}` : ''}${ev.stats && ev.stats.estimatedCost != null ? `；估算 ${ev.stats.currency || '¥'}${ev.stats.estimatedCost}` : ''}${ev.stats && ev.stats.budgetUsedPct != null ? `；预算 ${ev.stats.budgetUsedPct}%` : ''}`);
         break;
       case 'log':
         append('sys', ev.text || '');
@@ -1283,6 +1355,27 @@ export function createInGameUI({ agent, bridge }) {
     }
   }
 
+  async function clearMemory() {
+    const ask = '清除所有关卡记忆（含历史卡组/复盘）和当前计划？此操作不可撤销。';
+    if (typeof A.confirm === 'function' && !A.confirm(ask)) return;
+    try {
+      if (!bridge || typeof bridge.clearMemory !== 'function') {
+        append('fail', '当前 bridge 不支持清除记忆');
+        return;
+      }
+      const r = bridge.clearMemory('all');
+      if (!r || r.ok === false) {
+        append('fail', `清除记忆失败：${(r && (r.code || r.reason)) || '未知原因'}`);
+        return;
+      }
+      try { renderPlan(null, null); } catch { /* ignore */ }
+      try { setLive(''); } catch { /* ignore */ }
+      append('sys', '已清除所有关卡记忆和当前计划。下一次进关会重新学习，不再带旧卡组/旧复盘。');
+    } catch (e) {
+      append('fail', `清除记忆失败：${String(e && e.message || e)}`);
+    }
+  }
+
   async function importMemory(file) {
     if (!file) return;
     try {
@@ -1307,12 +1400,12 @@ export function createInGameUI({ agent, bridge }) {
     if (act === 'start') startAI();
     else if (act === 'stop') stopAI();
     else if (act === 'test') test();
-    else if (act === 'think') setThoughtVisible(thought.classList.contains('pl-hidden'));
-    else if (act === 'min') minimizePanel();
+    else if (act === 'closeConfig') closeConfig();
     else if (act === 'toggleLaunch') openLaunch(!launchEl.classList.contains('open'));
     else if (act === 'ackLaunch') ackLauncherGuide();
     else if (act === 'exportMem') exportMemory();
     else if (act === 'importMem' && importFileEl) importFileEl.click();
+    else if (act === 'clearMem') clearMemory();
   });
   if (importFileEl) {
     importFileEl.addEventListener('change', () => {
@@ -1325,10 +1418,10 @@ export function createInGameUI({ agent, bridge }) {
     const btn = e.target && e.target.closest && e.target.closest('button');
     if (!btn) return;
     const act = btn.getAttribute('data-act');
-    if (act === 'hide') closeThought();
-    else if (act === 'pet') minimizeThought();
+    if (act === 'pet') minimizeThought();
     else if (act === 'config') openConfig();
     else if (act === 'clear') clearLog();
+    else if (act === 'clearMem') clearMemory();
     else if (act === 'copyLog') copyLog();
     else if (act === 'toggleThink') toggleThink();
     else if (act === 'togglePlan') togglePlan();
@@ -1518,16 +1611,25 @@ export function createInGameUI({ agent, bridge }) {
 
   petSetState('idle', { force: true });
 
-  A.addEventListener('keydown', (e) => {
-    if (e.key === 'F8') {
+  // 全游戏快捷键：用 window 捕获阶段，先于游戏 canvas 的 keydown 处理，
+  // 不再要求先点模组/思考窗获得焦点。
+  function onGlobalHotkey(e) {
+    if (!e || e.repeat) return;
+    const key = e.key || e.code;
+    if (key === 'F8' || e.code === 'F8') {
       e.preventDefault();
+      e.stopPropagation();
       if (agent.isRunning()) stopAI(); else startAI();
+      return;
     }
-    if (e.key === 'F10') {
+    if (key === 'F10' || e.code === 'F10') {
       e.preventDefault();
+      e.stopPropagation();
       setThoughtVisible(thought.classList.contains('pl-hidden'));
     }
-  });
+  }
+  A.addEventListener('keydown', onGlobalHotkey, true);
+  try { doc.addEventListener('keydown', onGlobalHotkey, true); } catch { /* ignore */ }
 
   // 初始
   setLive('');
