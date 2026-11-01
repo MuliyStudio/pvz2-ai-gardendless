@@ -16,6 +16,10 @@
 
 > 非官方社区项目，与 EA / PopCap / PvZ2 Gardendless 作者无关。仅用于单机体验，请勿用于联机或排行榜。
 
+<p align="center">
+  💬 交流群：<b>暮黎社群 1084453386</b> · <a href="https://qm.qq.com/q/1ie7bbuXfC">点击加入</a>
+</p>
+
 ---
 
 ## 演示
@@ -50,6 +54,7 @@
 - [目录结构 / 自行构建](#目录结构--自行构建)
 - [已知限制](#已知限制)
 - [更新日志](#更新日志)
+- [交流群](#交流群)
 
 ---
 
@@ -360,6 +365,12 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:an
 > v0.2.x / v0.3.x 的旧发布（`pvz-ai-agent-mod` 时代）已归档为 Pre-release，只作存档，不再更新；下载请用 [v0.4.17+](https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/latest)。
 
 完整版本记录见 **[CHANGELOG.md](CHANGELOG.md)**；逐版本实现细节另见 **[pvz-llm-agent/CHANGELOG.md](pvz-llm-agent/CHANGELOG.md)**。
+
+## 交流群
+
+- QQ 群：**暮黎社群 1084453386**
+- 加群链接：[https://qm.qq.com/q/1ie7bbuXfC](https://qm.qq.com/q/1ie7bbuXfC)
+- 反馈 bug 时建议附上：游戏/模组版本、关卡名、`code/reason`、以及能复现的操作。也可以直接开 [Issue](https://github.com/MuliyStudio/pvz2-ai-gardendless/issues)。
 
 ## License
 
