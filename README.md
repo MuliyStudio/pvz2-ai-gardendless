@@ -1,7 +1,13 @@
-# PvZ2 Gardendless · AI 草坪指挥官
+<p align="center">
+  <img src="docs/assets/logo-transparent.png" alt="PvZ2 Gardendless · AI 草坪指挥官" width="110">
+</p>
+
+<h1 align="center">PvZ2 Gardendless · AI 草坪指挥官</h1>
 
 <p align="center">
-  <img src="docs/assets/logo.png" alt="PvZ2 Gardendless · AI 草坪指挥官" width="200">
+  <a href="https://github.com/MuliyStudio/pvz2-ai-gardendless/releases/tag/v0.4.17">
+    <img src="docs/assets/cover-v0.4.17.jpg" alt="DEEPSEEK 接管游戏 · 大肥鱼的最终审判" width="100%">
+  </a>
 </p>
 
 > **现行实现（2026-11-01）**：新目录 [`pvz-llm-agent/`](pvz-llm-agent/README.md) 是本项目的唯一入口——LLM 是唯一决策者，代码只给事实 / 执行动作 / 返回真实结果 / 记录计划，**没有本地卡组、自动补卡、策略队列**。旧 `pvz-agent/`、`PvZ-MCP/`、`pvz-ai-agent-mod/` 保留但冻结，不再更新。
